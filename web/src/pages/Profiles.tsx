@@ -310,7 +310,13 @@ export default function Profiles() {
                       ? "border-indigo-500 bg-slate-800"
                       : "border-slate-800 bg-slate-900 hover:border-slate-700"
                   }`}
-                  onClick={() => setSelectedId(profile.id)}
+                  onClick={() => {
+                    if (profile.id === selected?.id) return;
+                    setSelectedId(profile.id);
+                    setMemoryContent("");
+                    setMemoryMessage("");
+                    addMemory.reset();
+                  }}
                 >
                   <span className="flex items-center justify-between gap-2">
                     <span className="font-medium">{profile.name}</span>

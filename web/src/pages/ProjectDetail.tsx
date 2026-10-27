@@ -322,8 +322,7 @@ export default function ProjectDetail() {
                     <p className="mt-1 text-xs text-slate-500">
                       {platformLabel(content.platform)} ·{" "}
                       {contentKindLabel(content.kind)} ·{" "}
-                      {contentStatusLabel(content.status)} · v
-                      {content.current_version}
+                      {contentStatusLabel(content.status)} · v{content.current_version}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
