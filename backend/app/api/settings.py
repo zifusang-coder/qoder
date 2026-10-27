@@ -24,7 +24,9 @@ ProviderKind = Literal["openai_compatible", "anthropic"]
 
 
 class ProviderIn(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+    ]
     kind: ProviderKind = "openai_compatible"
     base_url: str = Field(max_length=500)
     api_key: Annotated[
@@ -39,6 +41,14 @@ class ProviderIn(BaseModel):
         value = value.strip().rstrip("/")
         if not value.startswith(("http://", "https://")):
             raise ValueError("base_url 必须以 http:// 或 https:// 开头")
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def _ensure_ascii_api_key(cls, value: str) -> str:
+        # Fernet 密文长度随 UTF-8 字节数膨胀，非 ASCII 密钥会超出 api_key_enc 容量
+        if not value.isascii():
+            raise ValueError("api_key 只能包含 ASCII 字符")
         return value
 
 

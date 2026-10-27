@@ -221,6 +221,87 @@ async def test_api_key_max_length_rejected(auth_client, auth_headers):
     assert long_key not in resp.text
 
 
+async def test_multibyte_api_key_rejected(auth_client, auth_headers):
+    # 512 个 CJK 字符经 Fernet 加密后远超 api_key_enc 的容量，必须在入口拒绝
+    multibyte_key = "sk-" + "密" * 10
+
+    resp = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("多字节密钥", api_key=multibyte_key),
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+    assert multibyte_key not in resp.text
+
+
+async def test_api_key_whitespace_stripped(auth_client, auth_headers, db_session):
+    resp = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("填充密钥", api_key="  sk-1234567890  "),
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["api_key_masked"] == "sk-****7890"
+
+    row = (await db_session.execute(select(LLMProvider))).scalar_one()
+    assert decrypt_secret(row.api_key_enc) == "sk-1234567890"
+    assert len(row.api_key_enc) < 1000
+
+
+async def test_api_key_max_length_ciphertext_fits_column(
+    auth_client, auth_headers, db_session
+):
+    boundary_key = "sk-" + "a" * 509
+    assert len(boundary_key) == 512
+
+    resp = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("边界密钥", api_key=boundary_key),
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 201
+    row = (await db_session.execute(select(LLMProvider))).scalar_one()
+    assert decrypt_secret(row.api_key_enc) == boundary_key
+    assert len(row.api_key_enc) < 1000
+
+
+async def test_non_default_create_keeps_existing_default(
+    auth_client, auth_headers
+):
+    first = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("默认 A", is_default=True),
+        headers=auth_headers,
+    )
+    assert first.status_code == 201
+
+    second = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("默认 B", is_default=False),
+        headers=auth_headers,
+    )
+    assert second.status_code == 201
+
+    resp = await auth_client.get("/api/settings/providers", headers=auth_headers)
+    defaults = [p["name"] for p in resp.json() if p["is_default"]]
+    assert defaults == ["默认 A"]
+
+
+async def test_whitespace_only_name_rejected(auth_client, auth_headers):
+    resp = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("   "),
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
 async def test_base_url_max_length_rejected(auth_client, auth_headers):
     long_url = "https://example.com/" + "a" * 490
     assert len(long_url) > 500
