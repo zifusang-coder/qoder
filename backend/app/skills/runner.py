@@ -25,6 +25,7 @@ async def run_script(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -32,12 +33,20 @@ async def run_script(
             timeout=timeout,
         )
     except TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
         raise ScriptError(f"脚本超时（>{timeout}s）") from exc
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     if proc.returncode != 0:
         raise ScriptError(stderr.decode(errors="ignore")[-1000:] or "脚本执行失败")
     try:
-        return json.loads(stdout.decode() or "{}")
+        data = json.loads(stdout.decode() or "{}")
     except json.JSONDecodeError as exc:
         raise ScriptError("脚本输出不是合法 JSON") from exc
+    if not isinstance(data, dict):
+        raise ScriptError("脚本输出必须是 JSON 对象")
+    return data

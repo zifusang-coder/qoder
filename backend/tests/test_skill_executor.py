@@ -1,6 +1,8 @@
+import asyncio
 import uuid
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from app.llm.types import Usage
@@ -9,6 +11,40 @@ from app.skills.registry import SkillRegistry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
 TENANT = "00000000-0000-0000-0000-000000000001"
+
+
+def _write_skill(
+    root: Path,
+    skill_id: str,
+    *,
+    output_format: str = "markdown",
+    postprocess: str | None = None,
+) -> Path:
+    skill_dir = root / skill_id
+    skill_dir.mkdir(parents=True)
+    postprocess_line = f"postprocess: {postprocess}\n" if postprocess else ""
+    (skill_dir / "manifest.yaml").write_text(
+        f"""id: {skill_id}
+name: 测试技能
+version: "0.1.0"
+layer: produce
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic:
+      type: string
+outputs:
+  format: {output_format}
+{postprocess_line}llm:
+  tier: fast
+  temperature: 0.5
+tools: [llm]
+""",
+        encoding="utf-8",
+    )
+    (skill_dir / "prompt.md").write_text("请输出测试结果。", encoding="utf-8")
+    return skill_dir
 
 
 class FakeGateway:
@@ -28,6 +64,14 @@ class FailingGateway:
 
     async def complete(self, messages, **kwargs):
         raise RuntimeError("upstream boom")
+
+
+class CancellingGateway:
+    def __init__(self):
+        self.last_usage = Usage()
+
+    async def complete(self, messages, **kwargs):
+        raise asyncio.CancelledError
 
 
 @pytest.mark.parametrize(
@@ -98,4 +142,98 @@ async def test_executor_audits_failure(db_session):
     run = (await db_session.execute(select(SkillRun))).scalar_one()
     assert run.status == "failed"
     assert "upstream boom" in run.error
+    assert run.finished_at is not None
+
+
+async def test_executor_parses_json_output(db_session, tmp_path):
+    from sqlalchemy import select
+
+    from app.models.skill import SkillRun
+
+    _write_skill(tmp_path, "json-skill", output_format="json")
+    executor = SkillExecutor(
+        registry=SkillRegistry(tmp_path),
+        gateway=FakeGateway('```json\n{"title": "hello"}\n```'),
+        session=db_session,
+        tenant_id=TENANT,
+    )
+
+    result = await executor.run("json-skill", {"topic": "AI"})
+
+    assert result.data == {"title": "hello"}
+    run = (await db_session.execute(select(SkillRun))).scalar_one()
+    assert run.status == "succeeded"
+    assert run.outputs["data"] == {"title": "hello"}
+
+
+async def test_executor_runs_postprocess_script(db_session, tmp_path):
+    from sqlalchemy import select
+
+    from app.models.skill import SkillRun
+
+    skill_dir = _write_skill(
+        tmp_path, "post-skill", output_format="json", postprocess="postprocess.py"
+    )
+    (skill_dir / "postprocess.py").write_text(
+        """import json
+import sys
+
+payload = json.load(sys.stdin)
+print(json.dumps({"title": payload["output"]["title"].upper()}))
+""",
+        encoding="utf-8",
+    )
+    executor = SkillExecutor(
+        registry=SkillRegistry(tmp_path),
+        gateway=FakeGateway('{"title": "hello"}'),
+        session=db_session,
+        tenant_id=TENANT,
+    )
+
+    result = await executor.run("post-skill", {"topic": "AI"})
+
+    assert result.data == {"title": "HELLO"}
+    assert result.text == '{"title": "HELLO"}'
+    run = (await db_session.execute(select(SkillRun))).scalar_one()
+    assert run.status == "succeeded"
+
+
+async def test_executor_audits_schema_failure(db_session):
+    from sqlalchemy import select
+
+    from app.models.skill import SkillRun
+
+    executor = SkillExecutor(
+        registry=SkillRegistry(FIXTURE),
+        gateway=FakeGateway(),
+        session=db_session,
+        tenant_id=TENANT,
+    )
+
+    with pytest.raises(jsonschema.ValidationError):
+        await executor.run("demo-skill", {})
+
+    run = (await db_session.execute(select(SkillRun))).scalar_one()
+    assert run.status == "failed"
+    assert "topic" in run.error
+    assert run.finished_at is not None
+
+
+async def test_executor_audits_cancellation(db_session):
+    from sqlalchemy import select
+
+    from app.models.skill import SkillRun
+
+    executor = SkillExecutor(
+        registry=SkillRegistry(FIXTURE),
+        gateway=CancellingGateway(),
+        session=db_session,
+        tenant_id=TENANT,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await executor.run("demo-skill", {"topic": "AI 周报"})
+
+    run = (await db_session.execute(select(SkillRun))).scalar_one()
+    assert run.status == "cancelled"
     assert run.finished_at is not None

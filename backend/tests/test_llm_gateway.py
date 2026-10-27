@@ -9,7 +9,7 @@ import respx
 
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
-from app.llm.types import LLMConfig
+from app.llm.types import LLMConfig, Usage
 from app.models.settings import LLMProvider
 from app.security import encrypt_secret
 
@@ -87,6 +87,61 @@ async def test_complete_falls_back_to_standard_tier():
     assert await gateway.complete([{"role": "user", "content": "hi"}], tier="unknown") == "ok"
     body = json.loads(route.calls[0].request.content)
     assert body["model"] == "medium"
+
+
+@respx.mock
+async def test_complete_records_openai_usage():
+    respx.post(OPENAI_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            },
+        )
+    )
+    gateway = LLMGateway(_config())
+    await gateway.complete([{"role": "user", "content": "hi"}])
+    assert gateway.last_usage == Usage(5, 3)
+
+
+@respx.mock
+async def test_complete_records_anthropic_usage():
+    respx.post(ANTHROPIC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 7, "output_tokens": 2},
+            },
+        )
+    )
+    gateway = LLMGateway(_anthropic_config())
+    await gateway.complete([{"role": "user", "content": "hi"}])
+    assert gateway.last_usage == Usage(7, 2)
+
+
+@respx.mock
+async def test_complete_resets_usage_after_failure():
+    respx.post(OPENAI_URL).mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+                },
+            ),
+            httpx.Response(500, json={"error": "boom"}),
+        ]
+    )
+    gateway = LLMGateway(_config())
+    await gateway.complete([{"role": "user", "content": "hi"}])
+    assert gateway.last_usage == Usage(5, 3)
+
+    with pytest.raises(AppError):
+        await gateway.complete([{"role": "user", "content": "hi"}])
+    assert gateway.last_usage == Usage(0, 0)
 
 
 @respx.mock

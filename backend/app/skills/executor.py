@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -6,14 +8,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import jsonschema
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import AppError
 from app.llm.gateway import LLMGateway
 from app.llm.types import Usage
 from app.models.skill import SkillRun
 from app.skills.manifest import LoadedSkill
 from app.skills.registry import SkillRegistry
 from app.skills.runner import run_script
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,10 +106,49 @@ class SkillExecutor:
         usage = getattr(self.gateway, "last_usage", None)
         return usage if isinstance(usage, Usage) else Usage()
 
+    async def _fail_run(
+        self, run_id: uuid.UUID, started: float, exc: BaseException
+    ) -> None:
+        """Persist a failed/cancelled audit row without masking the original error."""
+        try:
+            try:
+                await self.session.rollback()
+            except Exception:
+                logger.exception("技能运行审计回滚失败 run_id=%s", run_id)
+            record = (
+                await self.session.execute(
+                    select(SkillRun).where(
+                        SkillRun.id == run_id,
+                        SkillRun.tenant_id == self.tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                return
+            usage = self._usage()
+            record.status = (
+                "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            )
+            record.outputs = {}
+            message = (
+                f"{exc.code}: {exc.message}"
+                if isinstance(exc, AppError)
+                else str(exc)
+            )
+            record.error = message[:2000]
+            record.prompt_tokens = usage.prompt_tokens
+            record.completion_tokens = usage.completion_tokens
+            record.duration_ms = int((time.monotonic() - started) * 1000)
+            record.finished_at = datetime.now(UTC)
+            await self.session.commit()
+        except Exception:
+            logger.exception("技能运行审计保存失败 run_id=%s", run_id)
+
     async def run(self, skill_id: str, inputs: dict) -> SkillRunResult:
         skill = self.registry.get(skill_id)
         started = time.monotonic()
         record = await self._open_run(skill_id, inputs)
+        run_id = record.id
         try:
             jsonschema.validate(inputs, skill.manifest.inputs)
             messages = self.build_messages(skill, inputs)
@@ -142,13 +187,6 @@ class SkillExecutor:
                 completion_tokens=usage.completion_tokens,
                 duration_ms=duration,
             )
-        except Exception as exc:
-            usage = self._usage()
-            record.status = "failed"
-            record.error = str(exc)[:2000]
-            record.prompt_tokens = usage.prompt_tokens
-            record.completion_tokens = usage.completion_tokens
-            record.duration_ms = int((time.monotonic() - started) * 1000)
-            record.finished_at = datetime.now(UTC)
-            await self.session.commit()
+        except BaseException as exc:
+            await self._fail_run(run_id, started, exc)
             raise

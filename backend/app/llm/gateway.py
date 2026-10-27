@@ -25,6 +25,14 @@ def _parse_sse(line: str) -> str | None:
     return payload or None
 
 
+def _token_count(value: object) -> int:
+    try:
+        count = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(count, 0)
+
+
 class LLMGateway:
     def __init__(self, config: LLMConfig, timeout: float = 120.0):
         self.config = config
@@ -159,13 +167,13 @@ class LLMGateway:
             usage = {}
         if self.config.kind == "anthropic":
             self.last_usage = Usage(
-                int(usage.get("input_tokens") or 0),
-                int(usage.get("output_tokens") or 0),
+                _token_count(usage.get("input_tokens")),
+                _token_count(usage.get("output_tokens")),
             )
         else:
             self.last_usage = Usage(
-                int(usage.get("prompt_tokens") or 0),
-                int(usage.get("completion_tokens") or 0),
+                _token_count(usage.get("prompt_tokens")),
+                _token_count(usage.get("completion_tokens")),
             )
 
         if self.config.kind == "anthropic":
@@ -208,6 +216,7 @@ class LLMGateway:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> AsyncIterator[str]:
+        self.last_usage = Usage()
         payload = self._payload(
             messages, tier, temperature, stream=True, max_tokens=max_tokens
         )
