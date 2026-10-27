@@ -1121,9 +1121,11 @@ git commit -m "feat: add JWT auth, password hashing and admin seed"
 **Files:**
 - Create: `backend/app/models/settings.py`
 - Create: `backend/app/api/settings.py`
-- Modify: `backend/app/models/__init__.py`
-- Modify: `backend/app/main.py`
 - Create: `backend/tests/test_settings_api.py`
+- Create: `backend/migrations/versions/e0351ce8dbaa_enforce_single_default_llm_provider_per_.py`
+- Modify: `backend/app/main.py`
+- Modify: `backend/tests/conftest.py`
+- Note: `backend/app/models/__init__.py` 保持为空（`migrations/env.py` 用 pkgutil 自动发现模型）
 
 - [ ] **Step 1: 写失败测试 `backend/tests/test_settings_api.py`**
 
@@ -1140,7 +1142,7 @@ def test_secret_roundtrip_and_mask():
 - [ ] **Step 2: 写 `backend/app/models/settings.py`**
 
 ```python
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import JSONType, TenantScoped
@@ -1148,21 +1150,37 @@ from app.models.base import JSONType, TenantScoped
 
 class LLMProvider(TenantScoped):
     __tablename__ = "llm_providers"
+    __table_args__ = (
+        # 每个租户最多一个默认提供商；并发创建由数据库兜底
+        Index(
+            "uq_llm_providers_tenant_default",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default"),
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(100))
     kind: Mapped[str] = mapped_column(String(32), default="openai_compatible")
     base_url: Mapped[str] = mapped_column(String(500))
     api_key_enc: Mapped[str] = mapped_column(String(1000))
-    tiers: Mapped[dict] = mapped_column(JSONType, default=dict)
+    tiers: Mapped[dict[str, str]] = mapped_column(JSONType, default=dict)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 ```
 
 - [ ] **Step 3: 写 `backend/app/api/settings.py`**
 
 ```python
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+import logging
+import uuid
+from typing import Annotated, Literal
+
+from cryptography.fernet import InvalidToken
+from fastapi import APIRouter, Depends, Response
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -1170,18 +1188,42 @@ from app.deps import get_current_user
 from app.errors import AppError
 from app.models.settings import LLMProvider
 from app.models.user import User
-from app.security import encrypt_secret
+from app.security import decrypt_secret, encrypt_secret
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+logger = logging.getLogger(__name__)
+
+ProviderKind = Literal["openai_compatible", "anthropic"]
+
 
 class ProviderIn(BaseModel):
-    name: str
-    kind: str = "openai_compatible"
-    base_url: str
-    api_key: str = Field(min_length=8)
+    name: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+    ]
+    kind: ProviderKind = "openai_compatible"
+    base_url: str = Field(max_length=500)
+    api_key: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=8, max_length=512)
+    ]
     tiers: dict[str, str] = Field(default_factory=dict)
     is_default: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def _normalize_base_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("base_url 必须以 http:// 或 https:// 开头")
+        return value
+
+    @field_validator("api_key")
+    @classmethod
+    def _ensure_ascii_api_key(cls, value: str) -> str:
+        # Fernet 密文长度随 UTF-8 字节数膨胀，非 ASCII 密钥会超出 api_key_enc 容量
+        if not value.isascii():
+            raise ValueError("api_key 只能包含 ASCII 字符")
+        return value
 
 
 class ProviderOut(BaseModel):
@@ -1198,37 +1240,56 @@ def _mask(key: str) -> str:
     return f"{key[:3]}****{key[-4:]}" if len(key) > 8 else "****"
 
 
-def _to_out(p: LLMProvider) -> ProviderOut:
-    from app.security import decrypt_secret
-
+def _to_out(provider: LLMProvider) -> ProviderOut:
+    try:
+        masked = _mask(decrypt_secret(provider.api_key_enc))
+    except (InvalidToken, UnicodeDecodeError):
+        # MASTER_KEY 轮换后旧密文无法解密，只降级展示，绝不泄露密文或明文
+        logger.warning("api_key_decrypt_failed provider_id=%s", provider.id)
+        masked = "****"
     return ProviderOut(
-        id=str(p.id),
-        name=p.name,
-        kind=p.kind,
-        base_url=p.base_url,
-        api_key_masked=_mask(decrypt_secret(p.api_key_enc)),
-        tiers=p.tiers or {},
-        is_default=p.is_default,
+        id=str(provider.id),
+        name=provider.name,
+        kind=provider.kind,
+        base_url=provider.base_url,
+        api_key_masked=masked,
+        tiers=dict(provider.tiers or {}),
+        is_default=provider.is_default,
     )
 
 
 @router.get("/providers", response_model=list[ProviderOut])
 async def list_providers(
-    _: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[ProviderOut]:
-    rows = (await session.execute(select(LLMProvider))).scalars().all()
-    return [_to_out(p) for p in rows]
+    rows = (
+        await session.execute(
+            select(LLMProvider)
+            .where(LLMProvider.tenant_id == user.tenant_id)
+            .order_by(LLMProvider.created_at, LLMProvider.id)
+        )
+    ).scalars()
+    return [_to_out(row) for row in rows]
 
 
 @router.post("/providers", response_model=ProviderOut, status_code=201)
 async def create_provider(
     payload: ProviderIn,
-    _: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProviderOut:
     if payload.is_default:
-        await session.execute(update(LLMProvider).values(is_default=False))
+        await session.execute(
+            update(LLMProvider)
+            .where(
+                LLMProvider.tenant_id == user.tenant_id,
+                LLMProvider.is_default.is_(True),
+            )
+            .values(is_default=False)
+        )
     provider = LLMProvider(
+        tenant_id=user.tenant_id,
         name=payload.name,
         kind=payload.kind,
         base_url=payload.base_url,
@@ -1237,7 +1298,11 @@ async def create_provider(
         is_default=payload.is_default,
     )
     session.add(provider)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise AppError("default_conflict", "默认提供商冲突，请重试", 409) from None
     await session.refresh(provider)
     return _to_out(provider)
 
@@ -1245,43 +1310,90 @@ async def create_provider(
 @router.delete("/providers/{provider_id}", status_code=204)
 async def delete_provider(
     provider_id: str,
-    _: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> None:
-    provider = await session.get(LLMProvider, provider_id)
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    try:
+        parsed_id = uuid.UUID(provider_id)
+    except ValueError:
+        raise AppError("not_found", "提供商不存在", 404) from None
+    provider = (
+        await session.execute(
+            select(LLMProvider).where(
+                LLMProvider.id == parsed_id,
+                LLMProvider.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
     if provider is None:
         raise AppError("not_found", "提供商不存在", 404)
     await session.delete(provider)
     await session.commit()
+    return Response(status_code=204)
 ```
 
-- [ ] **Step 4: 更新 `backend/app/models/__init__.py`**
+- [ ] **Step 4: `backend/app/models/__init__.py` 保持为空**
+
+`migrations/env.py` 通过 pkgutil 自动发现 `app.models.*` 并注册到 `Base.metadata`；测试中 `app.main` 的导入链会在 `create_all` 之前加载 `LLMProvider`。因此无需维护 star import，避免重复导入与循环依赖。
+
+- [ ] **Step 5: 在 `app/main.py` 挂载路由并注册校验错误处理器**
 
 ```python
-from app.models.base import *  # noqa: F401,F403
-from app.models.settings import *  # noqa: F401,F403
-from app.models.user import *  # noqa: F401,F403
-```
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
-Alembic 的 `migrations/env.py` 会自动遍历 `app.models` 下的所有模块并注册到 `Base.metadata`，新增模型文件无需在此维护导入。
+from app.api import auth
+from app.api import settings as settings_api
 
-- [ ] **Step 5: 在 `app/main.py` 挂载路由**
 
-```python
-from app.api import auth, settings as settings_api
-...
+async def validation_error_handler(
+    _: Request, exc: RequestValidationError
+) -> JSONResponse:
+    # 只保留 loc/msg/type，绝不回显 input/ctx，避免泄露密钥等原始输入
+    detail = [
+        {"loc": list(err["loc"]), "msg": err["msg"], "type": err["type"]}
+        for err in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "validation_error",
+            "message": "请求参数校验失败",
+            "detail": detail,
+        },
+    )
+
+
+app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.include_router(settings_api.router, prefix="/api")
 ```
 
-- [ ] **Step 6: 运行测试**
+- [ ] **Step 6: 运行测试与静态检查**
 
-Run: `cd backend && python -m pytest -q`
-Expected: 全部通过
+Run: `cd backend && uv run pytest -q && uv run ruff check .`
+Expected: 35 passed；`All checks passed!`
 
-- [ ] **Step 7: 迁移并提交**
+设置相关测试共 20 个，覆盖：加密往返、掩码、列表租户隔离、默认唯一（应用层 + 数据库部分唯一索引）、删除 404（不存在/非法 UUID/跨租户）、未认证 401、422 不回显原始密钥、非 ASCII 密钥拒绝、密钥去空白、512 字符边界密文仍小于 1000、非默认创建不影响既有默认、空白 name 拒绝、密文损坏降级为 `****`。
+
+- [ ] **Step 7: 生成迁移并验证**
 
 ```bash
-cd backend && alembic revision --autogenerate -m "add llm providers"
+make up
+cd backend
+uv run alembic revision --autogenerate -m "add llm providers"
+uv run alembic revision --autogenerate -m "enforce single default llm provider per tenant"
+uv run alembic upgrade head
+uv run alembic check
+uv run alembic heads
+cd ..
+make down
+```
+
+Expected: 单 head `e0351ce8dbaa`；`No new upgrade operations detected.`；部分唯一索引 SQL 为 `CREATE UNIQUE INDEX uq_llm_providers_tenant_default ON llm_providers (tenant_id) WHERE is_default`。
+
+- [ ] **Step 8: 提交**
+
+```bash
 git add backend
 git commit -m "feat: add LLM provider settings with encrypted keys"
 ```
