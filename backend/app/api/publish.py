@@ -16,6 +16,7 @@ from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
 from app.publish.base import Platform, PublishConfigError, PublishError
+from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
 from app.services.precheck import run_precheck
@@ -26,9 +27,11 @@ from app.services.publish import (
     apply_action,
     apply_precheck,
     execute_job,
+    export_job,
     reopen,
     reschedule,
 )
+from app.storage import Storage, get_storage
 
 router = APIRouter(prefix="/publish", tags=["publish"])
 
@@ -469,6 +472,34 @@ async def execute_publish(
         raise AppError("account_misconfigured", str(exc), 409) from exc
     except PublishError as exc:
         raise AppError("publish_failed", str(exc), 502) from exc
+    return _out(job)
+
+
+@router.post("/jobs/{job_id}/export", response_model=JobOut)
+async def export_publish(
+    job_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: Storage = Depends(get_storage),  # noqa: B008
+) -> JobOut:
+    job = await _owned_job(session, job_id, user)
+    if job.platform not in MANUAL_EXPORT_PLATFORMS:
+        raise AppError("export_unsupported", "该平台不支持手动导出，请使用自动发布", 409)
+
+    try:
+        job = await export_job(
+            session,
+            job.id,
+            ExportAdapter(storage),
+            tenant_id=user.tenant_id,
+            actor=user.email,
+        )
+    except JobNotFound as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except InvalidTransition as exc:
+        raise AppError(
+            "invalid_state", "发布任务状态已变化，请刷新后重试", 409
+        ) from exc
     return _out(job)
 
 
