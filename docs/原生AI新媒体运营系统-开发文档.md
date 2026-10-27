@@ -332,7 +332,7 @@ draft: submit→prechecking, export→exporting, cancel→cancelled
 prechecking: pass→awaiting_review, fail→precheck_failed
 precheck_failed: submit→prechecking, cancel→cancelled
 awaiting_review: approve→approved, reject→draft, export→exporting, cancel→cancelled
-approved: publish→publishing, export→exporting, cancel→cancelled
+approved: publish→publishing, fail→publish_failed(系统), export→exporting, cancel→cancelled
 exporting: export_done→exported, fail→export_failed
 export_failed: retry→exporting, cancel→cancelled
 publishing: succeed→published, fail→publish_failed
@@ -340,11 +340,11 @@ publish_failed: retry→approved, cancel→cancelled
 cancelled: reopen→draft
 exported / published: 终态
 ```
-- 不变量:导出失败(`export_failed`)重试只回到 `exporting`,不能绕过人工审核到达 `approved`;`approved` 仅来自人工 `approve` 或发布失败(`publish_failed`)后的重试;`reopen` 仅用于幂等重放的内部路径。
+- 不变量:导出失败(`export_failed`)重试只回到 `exporting`,不能绕过人工审核到达 `approved`;`approved` 仅来自人工 `approve` 或发布失败(`publish_failed`)后的重试;`approved → fail` 仅由后台 worker 在确定性失败时使用,用户动作不暴露;`reopen` 仅用于幂等重放的内部路径。
 - 幂等:`idempotency_key = content_id + version + platform + account_id`,有意不包含 `scheduled_at`;改期走独立接口(`PATCH /publish/jobs/{id}/schedule`),且仅允许在执行前修改。
 - 手动导出:可从 `draft`、`awaiting_review`、`approved` 发起导出;`exported` 仅记录被导出的版本,不等于已发布;导出失败重试不能绕过审核。
 - 审核快照:审核通过时冻结内容版本,之后修改需重新审核。
-- 定时发布:arq 定时任务在 `scheduled_at` 触发 precheck → 按模式决定自动发布或等审核。
+- 定时发布:arq worker 每分钟扫描已审核通过(`approved`)且到期的公众号任务并执行;precheck 与人工审核发生在排期之前,触发时不再二次审核。
 - 动作边界:`submit` 为 precheck 内部调用的系统动作,用户动作仅 `approve` / `reject` / `cancel` / `retry`。
 
 #### 4.4.4 发布前检查(precheck,Task 1.13 已落地)
@@ -366,7 +366,7 @@ exported / published: 终态
 - 发布流程:`stable_token` 获取 access_token → `draft/add` 创建草稿,`media_id` 作为 `external_id` 回写。默认只建草稿,群发仍由人工在公众号后台完成;`thumb_media_id` 必填,`author` 与评论开关来自账号 `meta`。
 - 人工审核边界:`POST /publish/jobs/{id}/execute` 只接受 `approved` 任务;平台异常落 `publish_failed` 并可人工 `retry`,最多 5 次;配置类错误(缺封面、凭据失效)返回 409 `account_misconfigured` 且不消耗尝试次数。
 - 安全:凭据与 access_token 不入响应与日志;httpx/httpcore 日志级别固定 WARNING;失败落库再失败只记录任务 id。
-- 遗留:进程崩溃导致 `publishing` 悬挂的对账恢复在 Task 1.16 实现;超时重试可能产生重复草稿,恢复流程需人工确认。
+- 遗留:进程崩溃导致 `publishing` 悬挂的恢复已由 4.4.7 对账实现;超时重试可能产生重复草稿,仍需人工在平台核对。
 
 #### 4.4.6 手动导出(Task 1.15 已落地)
 
@@ -375,6 +375,15 @@ exported / published: 终态
 - 并发与幂等:导出前持久提交 `exporting` 与租约标记再执行 I/O;60 秒内的重复请求返回 409 `export_in_progress`;已 `exported` 的任务重复导出幂等返回 200;陈旧租约可恢复,重试原子覆盖同一路径。
 - 失败:导出失败落 `export_failed`,返回 500 `导出失败，请稍后重试`,原始异常只进日志;写库竞态下若另一路径已完成导出,返回真实成功结果。
 - 边界:`exported` 仅表示已生成人工发布包,不等于已发布;系统不提供绕过人工审核的自动发布路径。
+
+#### 4.4.7 定时发布 worker(Task 1.16 已落地)
+
+- 触发与范围:arq cron 每分钟扫描 `approved` + 公众号 + `scheduled_at` 已到期的任务,按到期时间排序,每批最多 10 个;跨租户扫描是系统进程行为,执行时仍按任务所属租户校验内容与账号。Phase 0/1 通过 `make worker` 单独启动,不纳入 docker-compose。
+- 防重入与超时:cron 使用固定 `job_id`,上一轮未结束时不会重复入队;`job_timeout = 600s`,单批有界;每个任务独立会话,单个失败不影响后续任务。
+- 悬挂对账:`publishing` 超过 `STALE_PUBLISH_SECONDS = 900` 视为结果未知,落 `publish_failed` 并提示到平台核对已有草稿,`attempts` 不变;执行与对账并发迁移时静默跳过。
+- 确定性失败:缺账号 / 账号停用 / 平台不一致 / 尝试次数达上限 / 版本缺失 / 审核后内容被修改,直接置 `publish_failed` 并写 `scheduler` 事件,避免每分钟重复报错;该 `fail` 边仅系统可用。
+- 重试语义:发布失败后人工 `retry` 回到 `approved`,原 `scheduled_at` 保留,下一轮扫描会再次执行;超时重试可能重复建草稿,需先在平台确认。
+- 后续扩展:定时触发时补做 precheck、图片/视频规则、发布结果自动回填。
 
 ### 4.5 归因与画像回写
 
@@ -461,7 +470,7 @@ exported / published: 终态
 | 内容 | `GET/POST /contents` `GET/PATCH /contents/{id}` `POST /contents/{id}/versions` `POST /contents/{id}/repurpose` | 多平台改写 |
 | 技能 | `GET /skills` `POST /skills/{id}/run` `POST /skills/{id}/run/stream`(SSE) `GET /skill-runs` | 执行与审计 |
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
-| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15 已落地,手动导出四平台) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing` |
+| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15 已落地,手动导出四平台) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing`;到期任务由 arq worker 每分钟扫描执行(Task 1.16 已落地) |
 | 账号 | `GET/POST /accounts` `PATCH/DELETE /accounts/{id}` | 公众号 AppID/Secret 绑定;凭据加密落库、响应仅掩码;DELETE 为软停用 |
 | 归因 | `POST /analytics/import` `GET /analytics/snapshots` `POST /content/{id}/postmortem` | 手动/CSV 导入 + 复盘 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
@@ -471,6 +480,7 @@ exported / published: 终态
 
 - `POST /skills/{id}/run` 同步短任务(<30s)直接返回;长任务返回 `202 + task_id`,前端轮询或 SSE 订阅。
 - 视频/批量处理一律走 arq worker,`skill_runs.status` 作为任务状态源。
+- 定时发布由 arq cron 每分钟扫描 `approved` 且到期的公众号任务;worker 通过 `make worker` 启动,与 API 进程分离。
 
 ---
 

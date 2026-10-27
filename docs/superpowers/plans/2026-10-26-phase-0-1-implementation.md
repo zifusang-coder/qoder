@@ -8787,7 +8787,7 @@ exported / published: 终态
   - 安全:httpx/httpcore 日志级别固定 WARNING(`configure_http_logging()`),避免 `access_token` 以 INFO 进入日志;失败落库再失败只记录任务 id。
   - 重试与上限:发布失败可 `retry` 回 `approved`;`MAX_PUBLISH_ATTEMPTS = 5`(`too_many_attempts` 409);配置类错误(缺封面、凭据不可用)返回 409 `account_misconfigured` 且不消耗尝试次数。
   - Tests:`test_wechat_publish.py` 68 个,全量后端 423 passed,`ruff check .` 通过;提交 `1fd21b5`(feature)、`dedf041` / `513fdc2` / `3452f9a` / `e04edd3`(安全与配置错误修正)。
-  - 遗留:`publishing` 悬挂(平台已建草稿但本地未回写)的崩溃恢复留待 Task 1.16 对账流程;超时重试的重复草稿风险需在恢复流程中人工确认。
+  - 遗留:`publishing` 悬挂(平台已建草稿但本地未回写)的崩溃恢复已由 Task 1.16 对账流程实现;超时重试的重复草稿风险仍需人工确认。
 
 ---
 
@@ -8810,133 +8810,18 @@ exported / published: 终态
 
 ### Task 1.16: arq 定时发布
 
-**Files:**
-- Create: `backend/app/worker.py`
-- Modify: `backend/app/services/publish.py`
-- Modify: `Makefile`
-- Create: `backend/tests/test_worker.py`
+- [x] **已落地**
 
-- [ ] **Step 1: 写失败测试 `backend/tests/test_worker.py`**
+  Files: `backend/app/worker.py`、`backend/app/publish/state.py`、`backend/tests/test_worker.py`、`backend/tests/test_publish.py`、`Makefile`。
 
-```python
-from datetime import datetime, timedelta, timezone
-
-from app.models.base import DEFAULT_TENANT_ID
-from app.models.publish import PublishJob
-from app.worker import list_due_jobs
-
-
-async def test_list_due_jobs_only_approved_and_due(db_session):
-    now = datetime.now(timezone.utc)
-    db_session.add_all(
-        [
-            PublishJob(
-                tenant_id=DEFAULT_TENANT_ID, content_id="c1", content_version=1,
-                platform="wechat", status="approved", idempotency_key="k1",
-                scheduled_at=now - timedelta(minutes=1),
-            ),
-            PublishJob(
-                tenant_id=DEFAULT_TENANT_ID, content_id="c2", content_version=1,
-                platform="wechat", status="approved", idempotency_key="k2",
-                scheduled_at=now + timedelta(hours=1),
-            ),
-            PublishJob(
-                tenant_id=DEFAULT_TENANT_ID, content_id="c3", content_version=1,
-                platform="wechat", status="draft", idempotency_key="k3",
-                scheduled_at=now - timedelta(minutes=5),
-            ),
-        ]
-    )
-    await db_session.commit()
-    due = await list_due_jobs(db_session, now)
-    assert [job.idempotency_key for job in due] == ["k1"]
-```
-
-- [ ] **Step 2: 运行确认失败**
-
-Run: `cd backend && uv run pytest tests/test_worker.py -q`
-Expected: FAIL（`app.worker` 不存在）
-
-- [ ] **Step 3: 写 `backend/app/worker.py`**
-
-```python
-import logging
-from datetime import datetime, timezone
-
-from arq import cron
-from arq.connections import RedisSettings
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.config import get_settings
-from app.db import SessionLocal
-from app.models.publish import PublishJob
-from app.publish.wechat import WeChatMPAdapter
-from app.services.publish import execute_job
-
-logger = logging.getLogger(__name__)
-
-
-async def list_due_jobs(session: AsyncSession, now: datetime) -> list[PublishJob]:
-    rows = (
-        await session.execute(
-            select(PublishJob).where(
-                PublishJob.status == "approved",
-                PublishJob.platform == "wechat",
-                PublishJob.scheduled_at.is_not(None),
-                PublishJob.scheduled_at <= now,
-            )
-        )
-    ).scalars().all()
-    return list(rows)
-
-
-async def publish_due_jobs(_ctx=None) -> int:
-    now = datetime.now(timezone.utc)
-    executed = 0
-    async with SessionLocal() as session:
-        for job in await list_due_jobs(session, now):
-            try:
-                await execute_job(session, job, WeChatMPAdapter(), actor="scheduler")
-                executed += 1
-            except Exception:
-                logger.exception("scheduled publish failed job=%s", job.id)
-    return executed
-
-
-class WorkerSettings:
-    functions = [publish_due_jobs]
-    cron_jobs = [cron(publish_due_jobs, minute=set(range(60)), second=0)]
-    redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
-    max_tries = 3
-    job_timeout = 300
-```
-
-- [ ] **Step 4: Makefile 增加 worker 目标**
-
-```makefile
-worker:
-	cd backend && arq app.worker.WorkerSettings
-```
-
-- [ ] **Step 5: 运行测试确认通过**
-
-Run: `cd backend && uv run pytest tests/test_worker.py -q`
-Expected: `1 passed`
-
-- [ ] **Step 6: 手工验证定时链路**
-
-1. 启动 `make worker`。
-2. 在 API 创建任务并推进到 `approved`，`scheduled_at` 设为 1 分钟后。
-3. 观察 worker 日志出现执行记录，任务状态变为 `published`（需配置真实公众号或 mock 网关）。
-Expected：只执行一次；重复扫描时状态已非 approved，不会重复发布。
-
-- [ ] **Step 7: 提交**
-
-```bash
-git add backend Makefile
-git commit -m "feat: add arq worker for scheduled publishing"
-```
+  - 扫描：arq cron 每分钟触发 `publish_due_jobs`，跨租户查询 `approved` + `wechat` + `scheduled_at` 非空且已到期的任务，按 `scheduled_at, created_at` 排序；每批最多 `MAX_BATCH_SIZE = 10` 个（多取 1 条判断是否截断），剩余任务留给下一轮，避免单批超过 worker 超时。
+  - 执行：每个任务独立会话调用既有 `execute_job(..., actor="scheduler")`，沿用状态机与账号/版本校验；单个任务失败不阻塞后续任务；适配器异常已由 `execute_job` 落库，worker 只记录 warning，未预期异常记录 traceback。
+  - 确定性失败：新增系统专用 `approved → fail → publish_failed` 边（用户动作仍只有 `approve` / `reject` / `cancel` / `retry`，`/actions` 对 `fail` 返回 403）。`account_missing` / `account_inactive` / `account_platform_mismatch` / `too_many_attempts` / `empty_content` 与 `ContentChanged` 会把任务置为 `publish_failed`，`attempts` 不变，并写 `scheduler` 事件；并发下任务已不在 `approved`（`invalid_state`）时静默跳过。
+  - 悬挂对账：`publishing` 超过 `STALE_PUBLISH_SECONDS = 900`（大于 `job_timeout = 600`）的任务置为 `publish_failed`，错误信息为 `发布超时，结果未知；请到平台核对已有草稿后重试`，`attempts` 不变；对账与执行之间的并发迁移（`InvalidTransition` / `JobNotFound`）静默跳过。
+  - 防重入：cron 使用固定 `job_id="publish-due-jobs"`，上一轮未结束时 arq 不会重复入队；`WorkerSettings.functions` 为空列表，cron 协程自动注册。
+  - 运行：`make worker` → `cd backend && uv run arq app.worker.WorkerSettings`；Phase 0/1 不提供 docker-compose worker 服务，需单独启动。
+  - Tests：`test_worker.py` 18 个（到期过滤、批上限、悬挂对账、确定性失败与隔离、适配器异常隔离、多租户、cron 防重入/超时配置），全部使用文件型 SQLite + 独立 `async_sessionmaker` 验证真实提交边界；全量后端 460 passed，`ruff check .` 通过；提交 `c90e16b`（feature）、`278b23d`（确定性失败与批上限）、`7731cec`（日志与测试加固）。
+  - 遗留：失败重试保留原 `scheduled_at`，修复后重新 approve 会在下一轮扫描重试；超时后平台可能已建重复草稿，需人工在公众号后台确认；定时链路只执行已审核任务，不在触发时补做 precheck；真实公众号与 Redis 的手工联调待凭据/环境就绪。
 
 ---
 
