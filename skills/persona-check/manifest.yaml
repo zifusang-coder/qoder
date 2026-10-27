@@ -1,0 +1,21 @@
+id: persona-check
+name: 人设一致性
+version: "0.1.0"
+layer: produce
+description: 检查文本是否符合账号定位、语气与禁区，给出评分与修改建议
+inputs:
+  type: object
+  required: [text]
+  properties:
+    text:
+      type: string
+context:
+  profile: true
+  references: []
+outputs:
+  format: json
+llm:
+  tier: standard
+  temperature: 0.3
+tools: [llm]
+cost_estimate_tokens: 1500

@@ -1,0 +1,26 @@
+id: content-repurposing
+name: 一稿多改
+version: "0.1.0"
+layer: produce
+description: 将一篇主稿改写为指定平台的版本，保留观点并适配平台结构
+inputs:
+  type: object
+  required: [source, platform]
+  properties:
+    source:
+      type: string
+    platform:
+      type: string
+      enum: [wechat, xiaohongshu, douyin, zhihu, kuaishou, channels, bilibili]
+    constraints:
+      type: string
+context:
+  profile: true
+  references: []
+outputs:
+  format: markdown
+llm:
+  tier: standard
+  temperature: 0.6
+tools: [llm]
+cost_estimate_tokens: 4000

@@ -1,0 +1,29 @@
+id: postmortem
+name: 内容复盘
+version: "0.1.0"
+layer: attribute
+description: 基于发布数据与内容版本，产出可执行的复盘结论与记忆候选
+inputs:
+  type: object
+  required: [title, platform, metrics]
+  properties:
+    title:
+      type: string
+    platform:
+      type: string
+    metrics:
+      type: object
+    content_excerpt:
+      type: string
+    publish_time:
+      type: string
+context:
+  profile: true
+  references: []
+outputs:
+  format: json
+llm:
+  tier: standard
+  temperature: 0.4
+tools: [llm]
+cost_estimate_tokens: 2500

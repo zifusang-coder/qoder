@@ -1,0 +1,31 @@
+id: cover-card
+name: 封面卡片
+version: "0.1.0"
+layer: produce
+description: 生成纯色封面图并返回文件路径，供公众号与小红书使用
+inputs:
+  type: object
+  required: [title, output_dir]
+  properties:
+    title:
+      type: string
+    subtitle:
+      type: string
+    output_dir:
+      type: string
+      description: 项目产物目录，必须位于 outputs 下
+    theme:
+      type: string
+      enum: [dark, light, warm]
+      default: dark
+context:
+  profile: false
+  references: []
+outputs:
+  format: json
+llm:
+  tier: fast
+  temperature: 0.2
+tools: [llm, script]
+postprocess: scripts/render_cover.py
+cost_estimate_tokens: 400
