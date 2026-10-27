@@ -6,11 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AppError
-from app.llm.gateway import LLMGateway
+from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.profile import Profile, ProfileMemory
 from app.models.project import Content, ContentVersion, Project
 from app.services.analytics import latest_snapshots
 from app.services.profiles import MAX_MEMORIES, build_profile_block
+from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.registry import SkillRegistry
 
@@ -48,15 +49,15 @@ def _memory_candidates(raw: object) -> list[tuple[str, str, float]]:
         if not isinstance(item, dict):
             continue
         raw_content = item.get("content")
-        if raw_content is None:
+        if not isinstance(raw_content, str):
             continue
-        content = str(raw_content).strip()
+        content = raw_content.strip()
         if not content:
             continue
         content = content[:MAX_MEMORY_CONTENT]
 
         raw_kind = item.get("kind")
-        kind = str(raw_kind).strip() if raw_kind is not None else ""
+        kind = raw_kind.strip() if isinstance(raw_kind, str) else ""
         if not 1 <= len(kind) <= MAX_MEMORY_KIND:
             kind = "insight"
 
@@ -74,7 +75,7 @@ async def generate_postmortem(
     *,
     session: AsyncSession,
     registry: SkillRegistry,
-    gateway: LLMGateway,
+    gateway: LLMGateway | None = None,
     tenant_id: str,
     content_id: uuid.UUID,
     skill_id: str = "postmortem",
@@ -107,6 +108,8 @@ async def generate_postmortem(
     ).get(content.id)
     if snapshot is None:
         raise AppError("no_metrics", "请先导入该内容的发布数据", 409)
+
+    await require_enabled(session, tenant_id, skill_id)
 
     version = (
         await session.execute(
@@ -174,6 +177,10 @@ async def generate_postmortem(
         "publish_time": snapshot.captured_at.isoformat(),
     }
 
+    # 延迟到 404/409 校验之后再解析网关，避免缺少 LLM 配置掩盖真实错误
+    if gateway is None:
+        gateway = await load_gateway_default(session, tenant_id)
+
     executor = SkillExecutor(
         registry=registry,
         gateway=gateway,
@@ -188,13 +195,16 @@ async def generate_postmortem(
     if not isinstance(report, dict):
         raise AppError("skill_output_invalid", "复盘结果格式异常", 502)
 
-    # 执行器提交后重新取回内容，确保 meta 合并基于最新行且不触发异步懒加载
+    # 执行器提交后锁定并刷新内容行，确保 meta 合并基于最新数据（避免并发写覆盖）
     content = (
         await session.execute(
-            select(Content).where(
+            select(Content)
+            .where(
                 Content.id == content_id,
                 Content.tenant_id == tenant_id,
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if content is None:

@@ -8,11 +8,9 @@ from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.skills import get_llm_gateway
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
-from app.llm.gateway import LLMGateway
 from app.models.project import Content, Project
 from app.models.user import User
 from app.services.analytics import import_csv, latest_snapshots
@@ -179,13 +177,11 @@ async def postmortem(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
-    gateway: LLMGateway = Depends(get_llm_gateway),  # noqa: B008
 ) -> PostmortemOut:
     try:
         result = await generate_postmortem(
             session=session,
             registry=registry,
-            gateway=gateway,
             tenant_id=user.tenant_id,
             content_id=content_id,
             skill_id=payload.skill_id,
@@ -202,7 +198,7 @@ async def postmortem(
     except ValueError as exc:
         raise AppError(
             "skill_output_invalid",
-            str(exc)[:200] or "模型输出格式异常",
+            "模型输出格式异常",
             502,
         ) from exc
     return PostmortemOut(**result)

@@ -7,14 +7,13 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
-from app.api.skills import get_llm_gateway
 from app.config import DEFAULT_TENANT_ID
 from app.llm.types import Usage
 from app.main import app
 from app.models.analytics import AnalyticsSnapshot
 from app.models.profile import ProfileMemory
 from app.models.project import Content, Project
-from app.models.skill import SkillRun
+from app.models.skill import SkillRun, SkillSetting
 from app.skills.registry import SkillRegistry, get_registry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
@@ -48,16 +47,21 @@ class FakeGateway:
 
 
 @pytest.fixture
-def postmortem_env():
+def postmortem_env(monkeypatch):
     gateway = FakeGateway()
     registry = SkillRegistry(FIXTURE)
+
+    async def _fake_load_gateway(session, tenant_id):
+        return gateway
+
     app.dependency_overrides[get_registry] = lambda: registry
-    app.dependency_overrides[get_llm_gateway] = lambda: gateway
+    monkeypatch.setattr(
+        "app.services.postmortem.load_gateway_default", _fake_load_gateway
+    )
     try:
         yield SimpleNamespace(gateway=gateway, registry=registry)
     finally:
         app.dependency_overrides.pop(get_registry, None)
-        app.dependency_overrides.pop(get_llm_gateway, None)
 
 
 async def _setup(
@@ -216,6 +220,65 @@ async def test_postmortem_without_metrics_returns_409(
     assert "postmortem" not in content.meta
 
 
+async def test_postmortem_rejects_disabled_skill(
+    client, db_session, postmortem_env
+):
+    profile_id, _project_id, content_id = await _setup(client)
+    await _import_metrics(client, content_id)
+    db_session.add(
+        SkillSetting(
+            tenant_id=DEFAULT_TENANT_ID,
+            skill_id="postmortem-fake",
+            enabled=False,
+        )
+    )
+    await db_session.commit()
+
+    response = await _postmortem(client, content_id)
+    assert response.status_code == 409
+    assert response.json()["code"] == "skill_disabled"
+    assert postmortem_env.gateway.calls == 0
+    assert await _count(db_session, SkillRun) == 0
+    assert await _count(
+        db_session, ProfileMemory, ProfileMemory.profile_id == uuid.UUID(profile_id)
+    ) == 0
+
+
+async def test_postmortem_validates_before_loading_gateway(
+    client, db_session, postmortem_env, monkeypatch
+):
+    async def _must_not_load(session, tenant_id):
+        raise AssertionError("gateway must not load")
+
+    monkeypatch.setattr(
+        "app.services.postmortem.load_gateway_default", _must_not_load
+    )
+
+    missing = await _postmortem(client, uuid.uuid4())
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "not_found"
+
+    _profile_id, _project_id, content_id = await _setup(client)
+    no_metrics = await _postmortem(client, content_id)
+    assert no_metrics.status_code == 409
+    assert no_metrics.json()["code"] == "no_metrics"
+
+    await _import_metrics(client, content_id)
+    db_session.add(
+        SkillSetting(
+            tenant_id=DEFAULT_TENANT_ID,
+            skill_id="postmortem-fake",
+            enabled=False,
+        )
+    )
+    await db_session.commit()
+    disabled = await _postmortem(client, content_id)
+    assert disabled.status_code == 409
+    assert disabled.json()["code"] == "skill_disabled"
+
+    assert postmortem_env.gateway.calls == 0
+
+
 async def test_postmortem_content_not_found_and_tenant_isolation(
     client, db_session, postmortem_env
 ):
@@ -352,7 +415,9 @@ async def test_postmortem_sanitizes_memory_candidates(
                 {"content": long_text, "kind": "  ", "weight": 5},
                 {"content": "默认权重"},
                 {"content": "字符串权重", "weight": "0.7"},
-                {"content": "负权重", "weight": -1},
+                {"content": {"text": "x"}, "weight": 0.9},
+                {"content": 123, "weight": 0.9},
+                {"content": "负权重", "kind": 7, "weight": -1},
             ],
         },
         ensure_ascii=False,
@@ -366,7 +431,7 @@ async def test_postmortem_sanitizes_memory_candidates(
     ).json()
     assert len(memories) == 3
     by_content = {memory["content"]: memory for memory in memories}
-    # 只有三条候选合法，其余（空白、布尔权重、字符串权重）必须被丢弃
+    # 只有三条候选合法，其余（空白、布尔权重、字符串权重、非字符串内容）必须被丢弃
     assert set(by_content) == {long_text[:200], "默认权重", "负权重"}
 
     truncated = by_content[long_text[:200]]
@@ -375,9 +440,13 @@ async def test_postmortem_sanitizes_memory_candidates(
     assert truncated["weight"] == 1.0
     assert by_content["默认权重"]["weight"] == 0.5
     assert by_content["默认权重"]["kind"] == "insight"
+    # 非字符串 kind 回退为默认值
     assert by_content["负权重"]["weight"] == 0.0
+    assert by_content["负权重"]["kind"] == "insight"
     assert "布尔权重" not in by_content
     assert "字符串权重" not in by_content
+    assert "{'text': 'x'}" not in by_content
+    assert "123" not in by_content
 
 
 async def test_postmortem_caps_memories_at_three(
