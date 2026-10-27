@@ -15,7 +15,7 @@ from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
-from app.publish.base import Platform, PublishError
+from app.publish.base import Platform, PublishConfigError, PublishError
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
 from app.services.precheck import run_precheck
@@ -465,6 +465,8 @@ async def execute_publish(
         ) from exc
     except ContentChanged as exc:
         raise AppError("content_changed", str(exc), 409) from exc
+    except PublishConfigError as exc:
+        raise AppError("account_misconfigured", str(exc), 409) from exc
     except PublishError as exc:
         raise AppError("publish_failed", str(exc), 502) from exc
     return _out(job)

@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -11,11 +10,10 @@ from app.api import settings as settings_api
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError, app_error_handler
+from app.logging_setup import configure_http_logging
 from app.seed import ensure_admin
 
-# httpx 默认在 INFO 级别记录完整请求 URL，公众号 access_token 会因此进入日志
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
+configure_http_logging()
 
 
 @asynccontextmanager

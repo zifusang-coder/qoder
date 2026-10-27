@@ -7,9 +7,13 @@ import httpx
 import markdown
 from cryptography.fernet import InvalidToken
 
+from app.logging_setup import configure_http_logging
 from app.models.publish import PlatformAccount
-from app.publish.base import PublishError, PublishResult
+from app.publish.base import PublishConfigError, PublishError, PublishResult
 from app.security import decrypt_secret
+
+# worker 直接导入适配器时也必须屏蔽 httpx 的完整 URL 日志
+configure_http_logging()
 
 TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/stable_token"
 DRAFT_URL = "https://api.weixin.qq.com/cgi-bin/draft/add"
@@ -107,7 +111,7 @@ class WeChatMPAdapter:
         author = meta.get("author", "")
         thumb = meta.get("thumb_media_id")
         if not isinstance(thumb, str) or not thumb.strip():
-            raise PublishError(
+            raise PublishConfigError(
                 "公众号草稿需要封面图 thumb_media_id，请在账号设置中配置"
             )
         article: dict[str, Any] = {

@@ -229,18 +229,30 @@ async def update_account(
     account = await _owned_account(session, account_id, user)
     if account.status != "active":
         raise AppError("account_revoked", "账号已停用，无法修改，请重新创建", 409)
-    if payload.name is not None:
-        account.name = payload.name
+    # 先完成全部校验再修改 ORM 对象，避免后续校验失败时留下脏对象
+    name = payload.name
+    credential_enc = None
     if payload.credential is not None:
         try:
             credential = _clean_credential(account.platform, payload.credential)
         except ValueError as exc:
             raise AppError("validation_error", str(exc), 422) from None
-        account.credential_enc = encrypt_secret(
+        credential_enc = encrypt_secret(
             json.dumps(credential, ensure_ascii=False)
         )
+    meta = None
     if payload.meta is not None:
-        account.meta = payload.meta
+        # PATCH 只合并本次提交的键，未提交的 meta（如 thumb_media_id）必须保留
+        try:
+            meta = _clean_meta({**(account.meta or {}), **payload.meta})
+        except ValueError as exc:
+            raise AppError("validation_error", str(exc), 422) from None
+    if name is not None:
+        account.name = name
+    if credential_enc is not None:
+        account.credential_enc = credential_enc
+    if meta is not None:
+        account.meta = meta
     try:
         await session.commit()
     except IntegrityError:

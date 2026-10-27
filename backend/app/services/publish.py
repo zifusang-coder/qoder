@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import AppError
 from app.models.project import Content, ContentVersion
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
-from app.publish.base import PublisherAdapter, PublishError
+from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
 from app.publish.state import next_status
 
 logger = logging.getLogger(__name__)
@@ -218,6 +218,30 @@ async def reschedule(
     return job
 
 
+async def _persist_failure(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    message: str,
+    *,
+    tenant_id: str,
+    actor: str,
+    attempts: int,
+) -> None:
+    try:
+        await apply_action(
+            session,
+            job_id,
+            "fail",
+            tenant_id=tenant_id,
+            actor=actor,
+            note=message[:500],
+            fields={"error": message[:1000], "attempts": attempts},
+        )
+    except Exception:
+        logger.exception("发布失败状态写入失败 job=%s", job_id)
+        await session.rollback()
+
+
 async def execute_job(
     session: AsyncSession,
     job_id: uuid.UUID,
@@ -264,6 +288,7 @@ async def execute_job(
         raise AppError("account_platform_mismatch", "账号平台与发布平台不一致", 409)
 
     # 先落库次数与进行中标记：进程崩溃后仍能看出请求已提交平台
+    previous_attempts = job.attempts
     job = await apply_action(
         session,
         job.id,
@@ -271,7 +296,7 @@ async def execute_job(
         tenant_id=tenant_id,
         actor=actor,
         fields={
-            "attempts": job.attempts + 1,
+            "attempts": previous_attempts + 1,
             "error": "发布请求已提交，等待平台确认",
         },
     )
@@ -280,6 +305,17 @@ async def execute_job(
         result = await adapter.publish(
             account=account, title=version.title, body=version.body
         )
+    except PublishConfigError as exc:
+        # 配置问题可修复，回滚本次尝试次数，避免用户改好配置前先被限流
+        await _persist_failure(
+            session,
+            job.id,
+            str(exc),
+            tenant_id=tenant_id,
+            actor=actor,
+            attempts=previous_attempts,
+        )
+        raise
     except Exception as exc:  # noqa: BLE001 - 任何适配器异常都必须归一化后才能返回
         # 未预期异常只暴露类名，避免把内部细节或密钥带进响应
         failure = (
@@ -288,19 +324,14 @@ async def execute_job(
             else PublishError(f"发布执行失败（{type(exc).__name__}）")
         )
         message = str(failure)[:1000]
-        try:
-            await apply_action(
-                session,
-                job.id,
-                "fail",
-                tenant_id=tenant_id,
-                actor=actor,
-                note=message[:500],
-                fields={"error": message},
-            )
-        except Exception:
-            logger.exception("发布失败状态写入失败 job=%s", job.id)
-            await session.rollback()
+        await _persist_failure(
+            session,
+            job.id,
+            message,
+            tenant_id=tenant_id,
+            actor=actor,
+            attempts=previous_attempts + 1,
+        )
         raise failure from None
 
     return await apply_action(

@@ -22,6 +22,10 @@ class PublishError(RuntimeError):
     """发布适配器可安全展示给调用方的错误。"""
 
 
+class PublishConfigError(PublishError):
+    """账号配置缺失或无效，用户可自行修复，不应消耗发布尝试次数。"""
+
+
 @dataclass
 class PublishResult:
     external_id: str

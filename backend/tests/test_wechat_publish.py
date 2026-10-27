@@ -10,9 +10,10 @@ from sqlalchemy import select
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
+from app.publish.base import PublishError, PublishResult
 from app.publish.wechat import DRAFT_URL, TOKEN_URL, WeChatMPAdapter
 from app.security import decrypt_secret, encrypt_secret
-from app.services.publish import apply_action
+from app.services.publish import apply_action, execute_job
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
 
@@ -450,6 +451,85 @@ async def test_update_meta_validation(client, meta):
     assert response.json()["code"] == "validation_error"
 
 
+@respx.mock
+async def test_update_meta_merges_instead_of_replacing(client, db_session):
+    _, draft_route = _mock_success()
+    account = await _create_account(
+        client, meta={"author": "作者甲", "thumb_media_id": "thumb-0"}
+    )
+
+    response = await client.patch(
+        f"/api/accounts/{account['id']}", json={"meta": {"author": "作者乙"}}
+    )
+    assert response.status_code == 200, response.text
+
+    stored = await _stored_account(db_session, account["id"])
+    assert stored.meta == {"author": "作者乙", "thumb_media_id": "thumb-0"}
+
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+    executed = await _execute(client, job["id"])
+    assert executed.status_code == 200, executed.text
+
+    article = json.loads(draft_route.calls[0].request.content)["articles"][0]
+    assert article["author"] == "作者乙"
+    assert article["thumb_media_id"] == "thumb-0"
+
+
+async def test_update_account_cross_tenant_or_malformed_404(client, db_session):
+    foreign = PlatformAccount(
+        tenant_id=OTHER_TENANT,
+        platform="wechat",
+        name="外部账号",
+        credential_enc=encrypt_secret(json.dumps(CREDENTIAL)),
+        status="active",
+        meta={},
+    )
+    db_session.add(foreign)
+    await db_session.commit()
+
+    foreign_response = await client.patch(
+        f"/api/accounts/{foreign.id}", json={"name": "改名"}
+    )
+    assert foreign_response.status_code == 404
+    assert foreign_response.json()["code"] == "not_found"
+
+    malformed = await client.patch(
+        "/api/accounts/not-a-uuid", json={"name": "改名"}
+    )
+    assert malformed.status_code == 404
+    assert malformed.json()["code"] == "not_found"
+
+
+async def test_update_invalid_credential_is_422_without_leak(client):
+    account = await _create_account(client)
+
+    response = await client.patch(
+        f"/api/accounts/{account['id']}", json={"credential": {"app_id": "wx-new"}}
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert "wx-new" not in response.text
+    assert CREDENTIAL["app_secret"] not in response.text
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"meta": {"author": "a" * 65}},
+        {"meta": {"thumb_media_id": "t" * 201}},
+        {"name": "n" * 101},
+    ],
+)
+async def test_account_field_length_limits(client, overrides):
+    response = await client.post(
+        "/api/accounts", json=_account_payload(**overrides)
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
 @pytest.mark.parametrize(
     "meta",
     [
@@ -615,7 +695,7 @@ async def test_digest_unescapes_html_entities():
 
 
 def test_httpx_logging_is_suppressed():
-    import app.main  # noqa: F401  导入即生效，确保 URL 日志不泄露 token
+    import app.publish.wechat  # noqa: F401  适配器导入即生效，worker 也不会泄露 URL
 
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
     assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
@@ -744,15 +824,130 @@ async def test_missing_thumb_media_id_fails_before_network(client, db_session):
     await _approve(client, job["id"])
 
     response = await _execute(client, job["id"])
-    assert response.status_code == 502
+    assert response.status_code == 409
     body = response.json()
-    assert body["code"] == "publish_failed"
+    assert body["code"] == "account_misconfigured"
     assert "thumb_media_id" in body["message"]
 
     assert token_route.call_count == 0
     assert draft_route.call_count == 0
     failed = await _stored_job(db_session, job["id"])
     assert failed.status == "publish_failed"
+    assert failed.attempts == 0
+
+
+@respx.mock
+async def test_config_error_does_not_consume_attempts(client, db_session):
+    token_route, draft_route = _mock_success()
+    account = await _create_account(client, meta={"author": "作者甲"})
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    stored = await _stored_job(db_session, job["id"])
+    stored.attempts = 4
+    await db_session.commit()
+
+    response = await _execute(client, job["id"])
+    assert response.status_code == 409
+    assert response.json()["code"] == "account_misconfigured"
+    assert token_route.call_count == 0
+    assert draft_route.call_count == 0
+
+    failed = await _stored_job(db_session, job["id"])
+    assert failed.status == "publish_failed"
+    assert failed.attempts == 4
+
+
+@respx.mock
+async def test_attempt_limit_boundary(client, db_session):
+    _, draft_route = _mock_success()
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    stored = await _stored_job(db_session, job["id"])
+    stored.attempts = 4
+    await db_session.commit()
+
+    response = await _execute(client, job["id"])
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "published"
+    assert response.json()["attempts"] == 5
+    assert draft_route.call_count == 1
+
+
+async def test_unexpected_adapter_exception_is_sanitized(client, db_session):
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    class BoomAdapter:
+        platform = "wechat"
+        capability = "auto"
+
+        async def publish(self, *, account, title, body):
+            raise RuntimeError("boom wx123 secret")
+
+    with pytest.raises(PublishError) as excinfo:
+        await execute_job(
+            db_session,
+            uuid.UUID(job["id"]),
+            BoomAdapter(),
+            tenant_id=DEFAULT_TENANT_ID,
+            actor="tester@local",
+        )
+
+    assert str(excinfo.value) == "发布执行失败（RuntimeError）"
+    failed = await _stored_job(db_session, job["id"])
+    assert failed.status == "publish_failed"
+    assert failed.attempts == 1
+    for marker in ("wx123", "secret", "boom"):
+        assert marker not in str(excinfo.value)
+        assert marker not in failed.error
+
+
+async def test_in_flight_marker_is_persisted_before_adapter_call(
+    client, db_session
+):
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+    job_uuid = uuid.UUID(job["id"])
+    observed: dict[str, str] = {}
+
+    class InspectingAdapter:
+        platform = "wechat"
+        capability = "auto"
+
+        async def publish(self, *, account, title, body):
+            db_session.expire_all()
+            current = (
+                await db_session.execute(
+                    select(PublishJob).where(PublishJob.id == job_uuid)
+                )
+            ).scalar_one()
+            observed["status"] = current.status
+            observed["error"] = current.error
+            return PublishResult(external_id="media-inspected")
+
+    result = await execute_job(
+        db_session,
+        job_uuid,
+        InspectingAdapter(),
+        tenant_id=DEFAULT_TENANT_ID,
+        actor="tester@local",
+    )
+
+    assert observed == {
+        "status": "publishing",
+        "error": "发布请求已提交，等待平台确认",
+    }
+    assert result.status == "published"
+    assert result.external_id == "media-inspected"
 
 
 @respx.mock
