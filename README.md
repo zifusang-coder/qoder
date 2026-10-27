@@ -27,7 +27,33 @@ cd web && npm install && npm run dev
 
 打开 http://localhost:5173 ，使用本地开发默认账号登录：凭据取自已存在的 `.env`，若不存在则由 `make setup` 从 `.env.example` 复制，模板默认 `admin@local` / `admin12345`。这些默认值仅限本地开发：`ENV` 非 `dev` 时应用会拒绝占位符 `JWT_SECRET` / `MASTER_KEY` 并启动失败，默认管理员密码也必须修改。
 
-Phase 0 的对话页为占位壳，尚无 `/api/chat` 接口。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
+前端对话页仍为占位壳；后端已提供 `/api/chat` 编排接口（关键词路由到技能，未命中时通用问答）。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
+
+### 定时发布 worker
+
+定时发布与 API 进程分离，需要 Redis 已由 Compose 启动：
+
+```bash
+make worker
+```
+
+等价于 `cd backend && uv run arq app.worker.WorkerSettings`。worker 每分钟扫描 `approved` 且到期的公众号任务并执行，不在 docker-compose 中常驻。
+
+### 数据导入
+
+`POST /api/analytics/import` 接收 UTF-8 CSV（上限 5MB），列固定为：
+
+```text
+content_id,platform,captured_at,views,likes,comments,shares,saves,followers_delta
+```
+
+`captured_at` 必须为 `YYYY-MM-DD`；`platform` 必须与内容自身平台一致。同一内容、平台、日期重复导入会覆盖指标而不是新增行。
+
+### 发布边界
+
+- 公众号：仅通过官方接口创建草稿，群发需人工在公众号后台完成。
+- 小红书/知乎/快手/视频号：导出 zip（manifest、正文、发布指南），由人工上传。
+- 不使用任何逆向接口或自动化点击。
 
 ## 测试
 
