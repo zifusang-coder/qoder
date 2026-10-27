@@ -3420,9 +3420,11 @@ git commit -m "feat: build profile context block with marker escaping"
 - Create: `backend/app/skills/manifest.py`
 - Create: `backend/app/skills/registry.py`
 - Create: `backend/app/models/skill.py`
+- Create: `backend/migrations/versions/<autogenerate>_add_skill_settings_and_runs.py`
 - Create: `backend/tests/fixtures/skills/demo-skill/manifest.yaml`
 - Create: `backend/tests/fixtures/skills/demo-skill/prompt.md`
 - Create: `backend/tests/test_skills_registry.py`
+- Modify: `backend/tests/conftest.py`
 - Create: `scripts/validate_skills.py`
 
 - [ ] **Step 1: 写测试夹具技能**
@@ -3466,11 +3468,24 @@ import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app.skills.manifest import ManifestError, load_skill
 from app.skills.registry import SkillRegistry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
+
+
+def _mutated_copy(tmp_path: Path, **changes) -> Path:
+    target = tmp_path / "demo-skill"
+    shutil.copytree(FIXTURE / "demo-skill", target)
+    manifest_path = target / "manifest.yaml"
+    data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    data.update(changes)
+    manifest_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True), encoding="utf-8"
+    )
+    return target
 
 
 def test_load_demo_skill():
@@ -3491,6 +3506,98 @@ def test_registry_loads_all():
     registry = SkillRegistry(FIXTURE)
     registry.load()
     assert registry.get("demo-skill").manifest.name == "演示技能"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"layer": "unknown"},
+        {"tools": "llm"},
+        {"tools": ["shell"]},
+        {"context": {"profile": "sometimes"}},
+        {"inputs": []},
+        {"context": []},
+        {"outputs": []},
+        {"llm": []},
+        {"llm": {"tier": "turbo"}},
+        {"llm": {"temperature": True}},
+        {"cost_estimate_tokens": 1.9},
+    ],
+)
+def test_invalid_manifest_is_rejected(tmp_path, changes):
+    with pytest.raises(ManifestError):
+        load_skill(_mutated_copy(tmp_path, **changes))
+
+
+def test_reference_outside_skill_dir_is_rejected(tmp_path):
+    (tmp_path / "outside.md").write_text("secret", encoding="utf-8")
+    skill_dir = _mutated_copy(
+        tmp_path,
+        context={"profile": True, "references": ["../../outside.md"]},
+    )
+    with pytest.raises(ManifestError, match="不能指向技能目录之外"):
+        load_skill(skill_dir)
+
+
+def test_postprocess_outside_skill_dir_is_rejected(tmp_path):
+    (tmp_path / "evil.py").write_text("print('x')", encoding="utf-8")
+    skill_dir = _mutated_copy(tmp_path, postprocess="../evil.py")
+    with pytest.raises(ManifestError, match="不能指向技能目录之外"):
+        load_skill(skill_dir)
+
+
+def test_symlinked_references_dir_is_rejected(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("secret", encoding="utf-8")
+    skill_dir = _mutated_copy(
+        tmp_path,
+        context={"profile": True, "references": ["secret.md"]},
+    )
+    (skill_dir / "references").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ManifestError, match="不能指向技能目录之外"):
+        load_skill(skill_dir)
+
+
+def test_references_and_postprocess_inside_skill_are_accepted(tmp_path):
+    skill_dir = _mutated_copy(
+        tmp_path,
+        postprocess="scripts/check.py",
+        context={"profile": True, "references": ["style.md"]},
+    )
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "style.md").write_text("风格", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "check.py").write_text(
+        "print('{}')", encoding="utf-8"
+    )
+    skill = load_skill(skill_dir)
+    assert skill.manifest.references == ["style.md"]
+    assert skill.manifest.postprocess == "scripts/check.py"
+
+
+def test_registry_skips_invalid_skill(tmp_path):
+    shutil.copytree(FIXTURE / "demo-skill", tmp_path / "demo-skill")
+    broken = tmp_path / "broken-skill"
+    shutil.copytree(FIXTURE / "demo-skill", broken)
+    manifest = broken / "manifest.yaml"
+    data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    data["id"] = "broken-skill"
+    manifest.write_text(
+        yaml.safe_dump(data, allow_unicode=True), encoding="utf-8"
+    )
+    (broken / "prompt.md").unlink()
+    registry = SkillRegistry(tmp_path)
+    registry.load()
+    assert set(registry.skills) == {"demo-skill"}
+    assert len(registry.errors) == 1
+    with pytest.raises(ManifestError):
+        registry.get("broken-skill")
+
+
+def test_profile_none_disables_profile(tmp_path):
+    skill = load_skill(_mutated_copy(tmp_path, context={"profile": "none"}))
+    assert skill.manifest.profile is False
 ```
 
 - [ ] **Step 3: 运行确认失败**
@@ -3501,13 +3608,16 @@ Expected: FAIL（模块不存在）
 - [ ] **Step 4: 写 `backend/app/skills/manifest.py`**
 
 ```python
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-ALLOWED_LAYERS = {"discover", "plan", "produce", "publish", "attribute"}
+ALLOWED_LAYERS = {"discover", "plan", "produce", "publish", "attribute", "general"}
 ALLOWED_TOOLS = {"llm", "http", "script"}
+ALLOWED_TIERS = {"fast", "standard", "premium"}
+ALLOWED_OUTPUT_FORMATS = {"markdown", "json"}
 
 
 class ManifestError(ValueError):
@@ -3546,94 +3656,216 @@ def _require(data: dict, key: str, skill_id: str):
     return data[key]
 
 
+def _string_list(value, field_name: str, skill_id: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ManifestError(f"{skill_id}: {field_name} 必须是字符串列表")
+    return list(value)
+
+
+def _inside(skill_dir: Path, relative: str, field_name: str, skill_id: str) -> Path:
+    root = skill_dir.resolve()
+    target = (root / relative).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise ManifestError(f"{skill_id}: {field_name} 不能指向技能目录之外") from None
+    return target
+
+
+def _profile_flag(value, skill_id: str) -> bool:
+    # 兼容设计文档的 required/optional/none 与布尔写法
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        raise ManifestError(f"{skill_id}: context.profile 非法取值 {value!r}")
+    if value in {"required", "optional"}:
+        return True
+    if value == "none":
+        return False
+    raise ManifestError(f"{skill_id}: context.profile 非法取值 {value!r}")
+
+
 def load_skill(skill_dir: Path) -> LoadedSkill:
+    skill_dir = skill_dir.resolve()
     manifest_path = skill_dir / "manifest.yaml"
     if not manifest_path.exists():
         raise ManifestError(f"{skill_dir.name}: 缺少 manifest.yaml")
-    data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    try:
+        raw_manifest = manifest_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(raw_manifest) or {}
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ManifestError(f"{skill_dir.name}: manifest.yaml 无法读取") from exc
+    except yaml.YAMLError as exc:
+        raise ManifestError(f"{skill_dir.name}: manifest.yaml 不是合法 YAML") from exc
+    if not isinstance(data, dict):
+        raise ManifestError(f"{skill_dir.name}: manifest.yaml 顶层必须是对象")
 
     skill_id = str(_require(data, "id", skill_dir.name))
     if skill_id != skill_dir.name:
         raise ManifestError(f"{skill_dir.name}: id 必须与目录名一致（当前 {skill_id}）")
 
+    name = str(_require(data, "name", skill_id)).strip()
+    if not name:
+        raise ManifestError(f"{skill_id}: name 不能为空")
+
     layer = str(_require(data, "layer", skill_id))
     if layer not in ALLOWED_LAYERS:
         raise ManifestError(f"{skill_id}: 非法 layer {layer}")
 
-    tools = list(data.get("tools", ["llm"]))
+    inputs = data.get("inputs")
+    if inputs is None:
+        inputs = {"type": "object", "properties": {}}
+    if not isinstance(inputs, dict):
+        raise ManifestError(f"{skill_id}: inputs 必须是 JSON Schema 对象")
+
+    tools = _string_list(data.get("tools", ["llm"]), "tools", skill_id)
     unknown = set(tools) - ALLOWED_TOOLS
     if unknown:
         raise ManifestError(f"{skill_id}: 不允许的工具 {sorted(unknown)}")
 
-    context = data.get("context") or {}
-    references = list(context.get("references") or [])
+    context = data.get("context")
+    if context is None:
+        context = {}
+    if not isinstance(context, dict):
+        raise ManifestError(f"{skill_id}: context 必须是对象")
+    references = _string_list(
+        context.get("references"), "context.references", skill_id
+    )
     for ref in references:
-        if not (skill_dir / "references" / ref).exists():
+        target = _inside(
+            skill_dir, f"references/{ref}", "引用文件", skill_id
+        )
+        if not target.is_file():
             raise ManifestError(f"{skill_id}: 引用文件不存在 references/{ref}")
 
     postprocess = data.get("postprocess")
-    if postprocess and not (skill_dir / postprocess).exists():
-        raise ManifestError(f"{skill_id}: 后处理脚本不存在 {postprocess}")
+    if postprocess is not None:
+        if not isinstance(postprocess, str) or not postprocess.strip():
+            raise ManifestError(f"{skill_id}: postprocess 必须是非空路径字符串")
+        if not _inside(
+            skill_dir, postprocess, "postprocess", skill_id
+        ).is_file():
+            raise ManifestError(f"{skill_id}: 后处理脚本不存在 {postprocess}")
 
     prompt_path = skill_dir / "prompt.md"
-    if not prompt_path.exists() or not prompt_path.read_text(encoding="utf-8").strip():
+    try:
+        prompt = prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise ManifestError(f"{skill_id}: prompt.md 无法读取") from None
+    if not prompt.strip():
         raise ManifestError(f"{skill_id}: prompt.md 为空")
 
-    outputs = data.get("outputs") or {}
-    llm = data.get("llm") or {}
+    outputs = data.get("outputs")
+    if outputs is None:
+        outputs = {}
+    if not isinstance(outputs, dict):
+        raise ManifestError(f"{skill_id}: outputs 必须是对象")
+    output_format = str(outputs.get("format", "markdown"))
+    if output_format not in ALLOWED_OUTPUT_FORMATS:
+        raise ManifestError(f"{skill_id}: 非法输出格式 {output_format}")
+    output_schema = outputs.get("schema")
+    if output_schema is not None and not isinstance(output_schema, dict):
+        raise ManifestError(f"{skill_id}: outputs.schema 必须是对象")
+
+    llm = data.get("llm")
+    if llm is None:
+        llm = {}
+    if not isinstance(llm, dict):
+        raise ManifestError(f"{skill_id}: llm 必须是对象")
+    tier = str(llm.get("tier", "standard"))
+    if tier not in ALLOWED_TIERS:
+        raise ManifestError(f"{skill_id}: 非法 llm.tier {tier}")
+    try:
+        raw_temperature = llm.get("temperature", 0.7)
+        if isinstance(raw_temperature, bool):
+            raise TypeError
+        temperature = float(raw_temperature)
+    except (TypeError, ValueError):
+        raise ManifestError(f"{skill_id}: llm.temperature 必须是数字") from None
+    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+        raise ManifestError(f"{skill_id}: llm.temperature 必须在 0-2 之间")
+
+    cost = data.get("cost_estimate_tokens", 0)
+    if isinstance(cost, bool) or not isinstance(cost, int):
+        raise ManifestError(f"{skill_id}: cost_estimate_tokens 必须是整数")
+    if cost < 0:
+        raise ManifestError(f"{skill_id}: cost_estimate_tokens 不能为负")
+
     manifest = SkillManifest(
         id=skill_id,
-        name=str(_require(data, "name", skill_id)),
+        name=name,
         version=str(data.get("version", "0.1.0")),
         layer=layer,
         description=str(data.get("description", "")),
-        inputs=data.get("inputs") or {"type": "object", "properties": {}},
-        profile=bool(context.get("profile", True)),
+        inputs=inputs,
+        profile=_profile_flag(context.get("profile", True), skill_id),
         references=references,
-        output_format=str(outputs.get("format", "markdown")),
-        output_schema=outputs.get("schema"),
-        llm_tier=str(llm.get("tier", "standard")),
-        temperature=float(llm.get("temperature", 0.7)),
+        output_format=output_format,
+        output_schema=output_schema,
+        llm_tier=tier,
+        temperature=temperature,
         tools=tools,
         postprocess=postprocess,
-        cost_estimate_tokens=int(data.get("cost_estimate_tokens", 0)),
+        cost_estimate_tokens=cost,
         dir=skill_dir,
     )
-    return LoadedSkill(manifest=manifest, prompt=prompt_path.read_text(encoding="utf-8"))
+    return LoadedSkill(manifest=manifest, prompt=prompt)
 ```
+
+`_inside` 同时阻止 `../` 路径穿越：`references` 与 `postprocess` 只能指向技能目录内部，避免清单把宿主机任意文件注入提示词或执行。
 
 - [ ] **Step 5: 写 `backend/app/skills/registry.py`**
 
 ```python
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 from app.config import get_settings
 from app.skills.manifest import LoadedSkill, ManifestError, load_skill
 
+logger = logging.getLogger(__name__)
+
 
 class SkillRegistry:
     def __init__(self, root: Path):
         self.root = root
         self._skills: dict[str, LoadedSkill] = {}
+        self._errors: list[str] = []
+        self._loaded = False
 
     def load(self) -> None:
         skills: dict[str, LoadedSkill] = {}
-        if not self.root.exists():
-            self._skills = skills
-            return
-        for entry in sorted(self.root.iterdir()):
-            if not entry.is_dir() or not (entry / "manifest.yaml").exists():
-                continue
-            skill = load_skill(entry)
-            skills[skill.manifest.id] = skill
+        errors: list[str] = []
+        if self.root.exists():
+            for entry in sorted(self.root.iterdir()):
+                if not entry.is_dir() or not (entry / "manifest.yaml").exists():
+                    continue
+                try:
+                    skill = load_skill(entry)
+                except ManifestError as exc:
+                    # 单个坏技能不应让全部技能不可用；错误保留给校验脚本/日志
+                    errors.append(str(exc))
+                    logger.warning("技能加载失败：%s", exc)
+                    continue
+                skills[skill.manifest.id] = skill
         self._skills = skills
+        self._errors = errors
+        self._loaded = True
 
     @property
     def skills(self) -> dict[str, LoadedSkill]:
-        if not self._skills:
+        if not self._loaded:
             self.load()
-        return self._skills
+        return dict(self._skills)
+
+    @property
+    def errors(self) -> list[str]:
+        if not self._loaded:
+            self.load()
+        return list(self._errors)
 
     def get(self, skill_id: str) -> LoadedSkill:
         skill = self.skills.get(skill_id)
@@ -3654,7 +3886,7 @@ def get_registry() -> SkillRegistry:
 ```python
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import JSONType, TenantScoped
@@ -3662,6 +3894,11 @@ from app.models.base import JSONType, TenantScoped
 
 class SkillSetting(TenantScoped):
     __tablename__ = "skill_settings"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "skill_id", name="uq_skill_settings_tenant_skill"
+        ),
+    )
 
     skill_id: Mapped[str] = mapped_column(String(100), index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -3678,7 +3915,9 @@ class SkillRun(TenantScoped):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 ```
 
 - [ ] **Step 7: 写 `scripts/validate_skills.py`**
@@ -3716,20 +3955,45 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
+同时修改 `backend/tests/conftest.py` 的 `skills_env`：切换 `SKILLS_DIR` 前后调用 `get_registry.cache_clear()`（导入 `from app.skills.registry import get_registry`），避免缓存指向旧目录：
+
+```python
+@pytest.fixture
+def skills_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKILLS_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    get_registry.cache_clear()
+    yield tmp_path
+    get_settings.cache_clear()
+    get_registry.cache_clear()
+```
+
 - [ ] **Step 8: 运行测试与校验**
 
 Run: `cd backend && uv run pytest tests/test_skills_registry.py -q`
-Expected: `3 passed`
+Expected: `20 passed`
 
-Run: `cd .. && python scripts/validate_skills.py`
+Run: `cd backend && uv run python ../scripts/validate_skills.py`
 Expected: 技能目录为空时输出 `共加载 0 个技能，错误 0 个`，退出码 0
 
-- [ ] **Step 9: 提交**
+- [ ] **Step 9: 生成并验证迁移**
 
 ```bash
-git add backend/app/skills backend/app/models/skill.py backend/tests scripts/validate_skills.py
+cd backend && uv run alembic revision --autogenerate -m "add skill settings and runs"
+cd backend && uv run alembic upgrade head && uv run alembic downgrade -1 && uv run alembic upgrade head
+cd backend && uv run alembic check
+```
+
+Expected: 新迁移包含 `skill_settings`（含 `uq_skill_settings_tenant_skill` 唯一约束）与 `skill_runs`；`alembic check` 输出无待生成操作。
+
+- [ ] **Step 10: 提交**
+
+```bash
+git add backend/app/skills backend/app/models/skill.py backend/tests scripts/validate_skills.py backend/migrations
 git commit -m "feat: add skill manifest loader, registry and validator"
 ```
+
+实际落地：迁移 `e967c168b6d2`；后续两个修复提交为 `92923d2`（拒绝畸形 manifest 字段）与 `5d17f48`（symlink 越界防护、坏技能隔离、缓存清理）。验证：目标用例 20 passed，后端全量 158 passed，`uv run ruff check .` 通过，迁移 `upgrade/downgrade/upgrade` 往返与 `alembic check` 均通过，随后已执行 `make down`。
 
 ---
 
