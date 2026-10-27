@@ -1,0 +1,276 @@
+import uuid
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import get_session
+from app.deps import get_current_user
+from app.errors import AppError
+from app.models.profile import Profile
+from app.models.project import Content, ContentVersion, Project
+from app.models.user import User
+
+router = APIRouter(tags=["projects"])
+
+
+class ProjectIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    topic: str = ""
+    profile_id: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+
+
+class ProjectOut(BaseModel):
+    id: str
+    title: str
+    topic: str
+    status: str
+    profile_id: str | None
+    platforms: list[str]
+
+
+class ProjectList(BaseModel):
+    items: list[ProjectOut]
+
+
+class ContentIn(BaseModel):
+    platform: str
+    kind: str = "article"
+    title: str = ""
+    body: str = ""
+
+
+class ContentOut(BaseModel):
+    id: str
+    project_id: str
+    platform: str
+    kind: str
+    title: str
+    current_version: int
+    status: str
+
+
+class VersionIn(BaseModel):
+    title: str = ""
+    body: str = ""
+    source: str = "manual"
+
+
+class VersionOut(BaseModel):
+    id: str
+    content_id: str
+    version: int
+    title: str
+    body: str
+    source: str
+
+
+class VersionList(BaseModel):
+    items: list[VersionOut]
+
+
+def _parse_uuid(value: str, message: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except (ValueError, TypeError):
+        raise AppError("not_found", message, 404) from None
+
+
+def _project_out(p: Project) -> ProjectOut:
+    return ProjectOut(
+        id=str(p.id), title=p.title, topic=p.topic, status=p.status,
+        profile_id=p.profile_id, platforms=p.platforms or [],
+    )
+
+
+def _content_out(c: Content) -> ContentOut:
+    return ContentOut(
+        id=str(c.id), project_id=str(c.project_id), platform=c.platform, kind=c.kind,
+        title=c.title, current_version=c.current_version, status=c.status,
+    )
+
+
+def _version_out(v: ContentVersion) -> VersionOut:
+    return VersionOut(
+        id=str(v.id), content_id=str(v.content_id), version=v.version,
+        title=v.title, body=v.body, source=v.source,
+    )
+
+
+async def _owned_project(session: AsyncSession, project_id: str, user: User) -> Project:
+    parsed = _parse_uuid(project_id, "项目不存在")
+    project = (
+        await session.execute(
+            select(Project).where(Project.id == parsed, Project.tenant_id == user.tenant_id)
+        )
+    ).scalar_one_or_none()
+    if project is None:
+        raise AppError("not_found", "项目不存在", 404)
+    return project
+
+
+async def _owned_content(session: AsyncSession, content_id: str, user: User) -> Content:
+    parsed = _parse_uuid(content_id, "内容不存在")
+    content = (
+        await session.execute(
+            select(Content).where(Content.id == parsed, Content.tenant_id == user.tenant_id)
+        )
+    ).scalar_one_or_none()
+    if content is None:
+        raise AppError("not_found", "内容不存在", 404)
+    return content
+
+
+async def _next_version(session: AsyncSession, content_id: uuid.UUID) -> int:
+    current = (
+        await session.execute(
+            select(func.max(ContentVersion.version)).where(
+                ContentVersion.content_id == content_id
+            )
+        )
+    ).scalar()
+    return int(current or 0) + 1
+
+
+@router.get("/projects", response_model=ProjectList)
+async def list_projects(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ProjectList:
+    rows = (
+        await session.execute(
+            select(Project)
+            .where(Project.tenant_id == user.tenant_id)
+            .order_by(Project.created_at.desc())
+        )
+    ).scalars().all()
+    return ProjectList(items=[_project_out(p) for p in rows])
+
+
+@router.post("/projects", response_model=ProjectOut, status_code=201)
+async def create_project(
+    payload: ProjectIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ProjectOut:
+    if payload.profile_id:
+        profile = (
+            await session.execute(
+                select(Profile).where(
+                    Profile.id == _parse_uuid(payload.profile_id, "账号画像不存在"),
+                    Profile.tenant_id == user.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if profile is None:
+            raise AppError("not_found", "账号画像不存在", 404)
+    project = Project(tenant_id=user.tenant_id, **payload.model_dump())
+    session.add(project)
+    await session.commit()
+    await session.refresh(project)
+    return _project_out(project)
+
+
+@router.get("/projects/{project_id}", response_model=ProjectOut)
+async def get_project(
+    project_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ProjectOut:
+    return _project_out(await _owned_project(session, project_id, user))
+
+
+@router.get("/projects/{project_id}/contents", response_model=list[ContentOut])
+async def list_contents(
+    project_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[ContentOut]:
+    project = await _owned_project(session, project_id, user)
+    rows = (
+        await session.execute(
+            select(Content)
+            .where(Content.project_id == project.id, Content.tenant_id == user.tenant_id)
+            .order_by(Content.created_at)
+        )
+    ).scalars().all()
+    return [_content_out(c) for c in rows]
+
+
+@router.post("/projects/{project_id}/contents", response_model=ContentOut, status_code=201)
+async def create_content(
+    project_id: str,
+    payload: ContentIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ContentOut:
+    project = await _owned_project(session, project_id, user)
+    content = Content(
+        tenant_id=user.tenant_id,
+        project_id=project.id,
+        platform=payload.platform,
+        kind=payload.kind,
+        title=payload.title,
+        current_version=0,
+    )
+    session.add(content)
+    await session.flush()
+    if payload.body or payload.title:
+        version = ContentVersion(
+            tenant_id=user.tenant_id,
+            content_id=content.id,
+            version=1,
+            title=payload.title,
+            body=payload.body,
+            source="manual",
+        )
+        session.add(version)
+        content.current_version = 1
+    await session.commit()
+    await session.refresh(content)
+    return _content_out(content)
+
+
+@router.get("/contents/{content_id}/versions", response_model=VersionList)
+async def list_versions(
+    content_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> VersionList:
+    content = await _owned_content(session, content_id, user)
+    rows = (
+        await session.execute(
+            select(ContentVersion)
+            .where(ContentVersion.content_id == content.id)
+            .order_by(ContentVersion.version.desc())
+        )
+    ).scalars().all()
+    return VersionList(items=[_version_out(v) for v in rows])
+
+
+@router.post("/contents/{content_id}/versions", response_model=VersionOut, status_code=201)
+async def create_version(
+    content_id: str,
+    payload: VersionIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> VersionOut:
+    content = await _owned_content(session, content_id, user)
+    version_no = await _next_version(session, content.id)
+    version = ContentVersion(
+        tenant_id=user.tenant_id,
+        content_id=content.id,
+        version=version_no,
+        title=payload.title or content.title,
+        body=payload.body,
+        source=payload.source,
+    )
+    session.add(version)
+    content.current_version = version_no
+    if payload.title:
+        content.title = payload.title
+    await session.commit()
+    await session.refresh(version)
+    return _version_out(version)
