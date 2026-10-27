@@ -8876,186 +8876,28 @@ exported / published: 终态
 
 ---
 
-### Task 1.20: 端到端验收
+### Task 1.20: 端到端验收（已落地）
 
-**Files:**
-- Create: `backend/tests/test_e2e.py`
-- Create: `docs/phase-1-checklist.md`
-- Modify: `README.md`
+**交付文件**
+- `backend/tests/test_e2e.py`：单个 `test_full_mvp_flow` 覆盖 画像 → 项目 → 公众号内容 → 一稿多改（小红书）→ 发布任务 → 发布前检查 → 人工审核 → 导出 zip → CSV 重复导入 → 复盘回写画像记忆 → 第二版本与版本历史。仅替换 LLM 网关、fixture 技能注册表与临时存储，业务服务与路由均为真实实现。
+- `backend/tests/test_builtin_skills.py`：新增内置技能目录数断言（12）。
+- `backend/tests/test_repurpose.py`：新增生产常量 `MAX_UPLOAD_BYTES == 10MB` 断言。
+- `docs/phase-1-checklist.md`：按自动化证据勾选功能/安全/工程项；依赖真实凭据、浏览器、PostgreSQL/Redis 的项统一列入“待人工验收”。
+- `README.md`：新增“定时发布 worker”“数据导入”“发布边界”章节。
 
-- [ ] **Step 1: 写端到端测试 `backend/tests/test_e2e.py`**
+**计划偏差（均已验证为必要修正）**
+- 计划用公众号内容创建小红书任务，会触发 409 `platform_mismatch`；实现改为先一稿多改，再用生成的小红书内容建任务。
+- `get_llm_gateway` 依赖覆写对服务内部延迟加载无效；实现改为 monkeypatch `app.services.repurpose.load_gateway_default` 与 `app.services.postmortem.load_gateway_default`。
+- 小红书应走 `/export` 而非 `/execute`（`/execute` 仅公众号自动发布）。
+- CSV 实际为 9 列（含 `followers_delta`）；E2E 使用约 530 字正文避免 `too_short` 警告。
 
-```python
-from pathlib import Path
+**验证**
+- `cd backend && uv run pytest -q`：499 passed。
+- `cd backend && uv run ruff check .`：通过。
+- 前端 Task 1.19 已记录 `npm run test` 25 passed、`npm run build` 成功；本次未复跑。
+- 真实 LLM/公众号/Redis + arq/PostgreSQL/浏览器/新机器复现仍待人工验收，清单中未勾选。
 
-from app.llm.gateway import get_llm_gateway
-from app.llm.types import Usage
-from app.skills.registry import SkillRegistry, get_registry
-from app.storage import Storage, get_storage
-
-FIXTURE = Path(__file__).parent / "fixtures" / "skills"
-POSTMORTEM = (
-    '{"verdict":"超预期","what_worked":["开头具体"],"what_failed":[],'
-    '"next_actions":["保持"],'
-    '"memories":[{"kind":"insight","content":"场景化开头有效","weight":0.9}]}'
-)
-CLEAN_BODY = "# 一稿多改实战\n\n" + "把一件事讲清楚，比堆砌概念更重要。" * 30
-
-
-class E2EGateway:
-    last_usage = Usage(30, 40)
-
-    async def complete(self, messages, **kwargs):
-        if "复盘测试桩" in messages[0]["content"]:
-            return POSTMORTEM
-        return "# 小红书版\n\n改写后的正文"
-
-
-async def test_full_mvp_flow(client, tmp_path):
-    from app.main import app
-
-    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
-    app.dependency_overrides[get_llm_gateway] = lambda: E2EGateway()
-    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
-
-    profile = (await client.post("/api/profiles", json={"name": "主号", "taboos": ["收益承诺"]})).json()
-    project = (
-        await client.post("/api/projects", json={"title": "闭环", "profile_id": profile["id"]})
-    ).json()
-    content = (
-        await client.post(
-            f"/api/projects/{project['id']}/contents",
-            json={"platform": "wechat", "title": "闭环测试", "body": CLEAN_BODY},
-        )
-    ).json()
-    assert content["current_version"] == 1
-
-    # 一稿多改
-    repurposed = await client.post(
-        f"/api/projects/{project['id']}/repurpose",
-        json={"source_content_id": content["id"], "platform": "xiaohongshu", "skill_id": "demo-skill"},
-    )
-    assert repurposed.status_code == 201
-    assert repurposed.json()["version"] == 1
-
-    # 发布：检查 → 审核 → 导出
-    job = (
-        await client.post(
-            "/api/publish/jobs", json={"content_id": content["id"], "platform": "xiaohongshu"}
-        )
-    ).json()
-    precheck = await client.post(f"/api/publish/jobs/{job['id']}/precheck")
-    assert precheck.status_code == 200
-    assert precheck.json()["job"]["status"] == "awaiting_review"
-
-    approved = await client.post(
-        f"/api/publish/jobs/{job['id']}/actions", json={"action": "approve"}
-    )
-    assert approved.json()["status"] == "approved"
-
-    exported = await client.post(f"/api/publish/jobs/{job['id']}/execute")
-    assert exported.json()["status"] == "exported"
-    assert (tmp_path / project["id"] / exported.json()["export_path"]).exists()
-
-    # 数据 → 复盘 → 记忆
-    csv_body = (
-        "content_id,platform,captured_at,views,likes,comments,shares,saves\n"
-        f"{content['id']},wechat,2026-10-22,2000,120,18,25,10\n"
-    ).encode()
-    imported = await client.post(
-        "/api/analytics/import", files={"file": ("d.csv", csv_body, "text/csv")}
-    )
-    assert imported.json()["upserted"] == 1
-
-    report = await client.post(
-        f"/api/analytics/contents/{content['id']}/postmortem",
-        json={"skill_id": "postmortem-fake"},
-    )
-    assert report.status_code == 200
-    assert report.json()["memory_ids"]
-
-    memories = await client.get(f"/api/profiles/{profile['id']}/memories")
-    assert any(m["source"] == "postmortem" for m in memories.json())
-
-    versions = await client.get(f"/api/contents/{content['id']}/versions")
-    assert versions.json()["items"][0]["version"] == 1
-```
-
-- [ ] **Step 2: 运行全量测试**
-
-```bash
-cd backend && uv run pytest -q
-```
-Expected：全部通过，`test_e2e.py` 覆盖 画像 → 项目 → 改写 → 发布 → 导出 → 数据 → 复盘回写。
-
-- [ ] **Step 3: 写 `docs/phase-1-checklist.md`**
-
-```markdown
-# Phase 1 验收清单
-
-## 功能
-- [ ] 画像 6 维字段可创建、编辑、删除
-- [ ] 画像记忆可手工添加，复盘可自动写入
-- [ ] 12 个技能可列表、启停；停用后执行返回 409
-- [ ] 技能执行有 `skill_runs` 审计记录（耗时、token、状态）
-- [ ] 项目可创建，内容多版本可回溯
-- [ ] 上传文件限制 10MB，路径穿越被拒绝
-- [ ] 一稿多改生成独立平台版本
-- [ ] 对话能按关键词路由到技能，未命中时进入通用问答
-- [ ] 发布前检查定位到禁用词字符位置，禁区告警不阻断
-- [ ] 非法状态跃迁返回 409 `invalid_transition`
-- [ ] 公众号发布创建草稿并记录 media_id
-- [ ] 小红书/知乎/快手/视频号导出 zip（manifest + content + guide）
-- [ ] 定时任务到点执行且不重复发布
-- [ ] CSV 重复导入不产生重复行
-- [ ] 复盘结果写入画像记忆并记录来源
-
-## 安全与合规
-- [ ] LLM 与平台密钥加密存储，接口只返回掩码
-- [ ] 发布必须经过 `awaiting_review → approved`
-- [ ] 后处理脚本无 shell、环境变量白名单、30 秒超时
-- [ ] 未认证访问一律 401
-- [ ] 所有业务表带 `tenant_id`，跨租户查询不可见
-
-## 工程
-- [ ] `alembic upgrade head` / `downgrade base` 可往返
-- [ ] `pytest` 全绿
-- [ ] `npm run build` 通过
-- [ ] README 可在新机器复现
-```
-
-- [ ] **Step 4: README 增加 Phase 1 运行项**
-
-在 `README.md` 的启动步骤后追加：
-
-```markdown
-### 定时发布 worker
-
-```bash
-make worker
-```
-
-### 数据导入
-
-CSV 列：`content_id,platform,captured_at,views,likes,comments,shares,saves`，日期格式 `YYYY-MM-DD`。
-
-### 发布边界
-
-- 公众号：仅创建草稿，群发需人工在后台完成。
-- 小红书/知乎/快手/视频号：导出 zip，人工上传。
-- 不使用任何逆向接口或自动化点击。
-```
-
-- [ ] **Step 5: 逐项勾选验收清单**
-
-按清单在浏览器与命令行逐条验证；任何一项不通过则回到对应任务修复，不得跳过。
-
-- [ ] **Step 6: 提交**
-
-```bash
-git add backend/tests/test_e2e.py docs/phase-1-checklist.md README.md
-git commit -m "test: add end-to-end MVP acceptance and phase-1 checklist"
-```
+**提交**：`161d0c5`、`8603356`、`3cf4389`、`3e790ad`。
 
 ---
 
