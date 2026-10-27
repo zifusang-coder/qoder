@@ -11,10 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
-from app.models.project import Content, ContentVersion
+from app.models.profile import Profile
+from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
 from app.publish.state import InvalidTransition
+from app.services.precheck import run_precheck
 from app.services.publish import (
     ContentChanged,
     JobNotFound,
@@ -98,6 +100,14 @@ class JobOut(BaseModel):
 class JobList(BaseModel):
     items: list[JobOut]
     total: int
+
+
+class PrecheckOut(BaseModel):
+    job: JobOut
+    passed: bool
+    errors: int
+    warnings: int
+    issues: list[dict]
 
 
 def _out(job: PublishJob) -> JobOut:
@@ -333,6 +343,98 @@ async def get_job(
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
     return _out(await _owned_job(session, job_id, user))
+
+
+@router.post("/jobs/{job_id}/precheck", response_model=PrecheckOut)
+async def precheck_job(
+    job_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> PrecheckOut:
+    job = await _owned_job(session, job_id, user)
+    if job.status not in {"draft", "precheck_failed"}:
+        raise AppError(
+            "invalid_state", "只有草稿或检查未通过的任务可以执行检查", 409
+        )
+
+    version = (
+        await session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == job.content_id,
+                ContentVersion.version == job.content_version,
+                ContentVersion.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        raise AppError("empty_content", "发布版本不存在", 409)
+
+    content = (
+        await session.execute(
+            select(Content).where(
+                Content.id == job.content_id,
+                Content.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if content is None:
+        raise AppError("not_found", "内容不存在", 404)
+
+    project = (
+        await session.execute(
+            select(Project).where(
+                Project.id == content.project_id,
+                Project.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if project is None:
+        raise AppError("not_found", "项目不存在", 404)
+
+    taboos: list[str] = []
+    if project.profile_id is not None:
+        profile = (
+            await session.execute(
+                select(Profile).where(
+                    Profile.id == project.profile_id,
+                    Profile.tenant_id == user.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if profile is not None:
+            taboos = profile.taboos or []
+
+    text = f"# {version.title}\n{version.body}" if version.title else version.body
+    report = run_precheck(text, platform=job.platform, taboos=taboos)
+
+    try:
+        job = await apply_action(
+            session,
+            job.id,
+            "submit",
+            tenant_id=user.tenant_id,
+            actor=user.email,
+            note="发布前检查",
+        )
+        job = await apply_action(
+            session,
+            job.id,
+            "pass" if report["passed"] else "fail",
+            tenant_id=user.tenant_id,
+            actor=user.email,
+            note="检查通过" if report["passed"] else "检查未通过",
+        )
+    except InvalidTransition as exc:
+        raise AppError(
+            "invalid_state", "发布任务状态已变化，请刷新后重试", 409
+        ) from exc
+    except JobNotFound as exc:
+        raise AppError("not_found", "发布任务不存在", 404) from exc
+
+    job.checks = report
+    await session.commit()
+    await session.refresh(job)
+    return PrecheckOut(job=_out(job), **report)
 
 
 @router.patch("/jobs/{job_id}/schedule", response_model=JobOut)
