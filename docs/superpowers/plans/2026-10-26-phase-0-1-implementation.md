@@ -2642,16 +2642,24 @@ git commit -m "feat: add React scaffold with login, settings and chat shell"
 
 - [ ] **Step 1: 写 `README.md`**
 
-```markdown
+````markdown
 # 新媒体运营系统
 
-原生 AI 新媒体运营系统（Phase 0/1 MVP）。设计见 `docs/原生AI新媒体运营系统-开发文档.md`。
+原生 AI 新媒体运营系统（Phase 0/1 MVP）。设计见 [设计文档](docs/原生AI新媒体运营系统-开发文档.md)。
 
 ## 本地启动
 
+### 前置要求
+
+- Docker 与 Docker Compose v2（`docker compose` 需支持 `up --wait`），且 Docker daemon 已启动。
+- GNU Make（macOS 需 Xcode Command Line Tools，`xcode-select --install`）：下文所有命令均通过 `make` 调用。
+- `uv`：Makefile 通过 `uv sync` / `uv run` 安装后端依赖；uv 会自行获取兼容的 Python 3.11+ 解释器（本次验证使用 3.11.15）。`requires-python` 为 `>=3.11`，仓库不提供 `.python-version` 固定版本。
+- Node.js `^20.19.0 || >=22.12.0`（Vite 8 的引擎要求）与 npm。
+- PostgreSQL / Redis 由 Compose 提供（宿主机端口 15432 / 16379），后端与前端在宿主机运行（8000 / 5173）：这四个端口需空闲。
+
 ```bash
 make setup       # 复制 .env（若不存在）并安装后端依赖
-make up          # PostgreSQL + Redis（等待健康检查通过）
+make up          # PostgreSQL + Redis（等待容器就绪，db 健康检查通过）
 make migrate     # alembic upgrade head
 make dev         # uvicorn app.main:app --reload --port 8000
 ```
@@ -2662,13 +2670,18 @@ make dev         # uvicorn app.main:app --reload --port 8000
 cd web && npm install && npm run dev
 ```
 
-打开 http://localhost:5173 ，使用 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 登录。
+打开 http://localhost:5173 ，使用本地开发默认账号登录：凭据取自已存在的 `.env`，若不存在则由 `make setup` 从 `.env.example` 复制，模板默认 `admin@local` / `admin12345`。这些默认值仅限本地开发：`ENV` 非 `dev` 时应用会拒绝占位符 `JWT_SECRET` / `MASTER_KEY` 并启动失败，默认管理员密码也必须修改。
+
+Phase 0 的对话页为占位壳，尚无 `/api/chat` 接口。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
 
 ## 测试
 
+前置：先安装前端依赖（`npm --prefix web install`）并启动 Docker 服务（`make up`），再运行下列测试与构建命令。
+
 ```bash
-make test
-cd web && npm run build
+make test                   # 后端：uv run pytest -q
+npm --prefix web run test   # 前端单测（vitest run）
+npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build）
 ```
 
 ## 约定
@@ -2676,33 +2689,43 @@ cd web && npm run build
 - 发布默认人工审核；LLM 不直接触发发布。
 - 平台密钥仅加密存储，接口只返回掩码。
 - 产物写入 `outputs/<project_id>/`，不进版本库。
-```
+````
 
 - [ ] **Step 2: 写 `docs/phase-0-checklist.md`**
 
-```markdown
+````markdown
 # Phase 0 验收清单
 
-- [ ] `docker compose ps` 中 db/redis 均健康
-- [ ] `alembic upgrade head` 成功，`downgrade base` 可回滚
-- [ ] `GET /health` 返回 `{"status":"ok"}`
-- [ ] 默认管理员可登录，错误密码返回 401 + `invalid_credentials`
-- [ ] 未带 token 请求 `/api/auth/me` 返回 401
-- [ ] 保存 LLM 提供商后列表仅显示掩码密钥
-- [ ] 前端可登录、可见设置页与对话页
-- [ ] `pytest` 全绿，`npm run build` 成功
-```
+验收日期：2026-10-27。环境：macOS 本地；后端 Python 3.11.15（uv）；前端 Node v25.8.2 / npm 11.11.1；Docker Compose 项目 `newmedia`。
+
+- [x] `docker compose ps` 中 db 为 healthy
+- [x] redis 容器为 Up，且 `docker compose exec -T redis redis-cli ping` 返回 `PONG`（compose 未定义 redis healthcheck，因此 `ps` 不显示 healthy）
+- [x] `cd backend && uv run alembic upgrade head` 成功；`downgrade base` 可回滚；再次 `upgrade head` 成功（round-trip 后重启应用，默认管理员重新种入）
+- [x] `GET /health` 返回 `{"status":"ok"}`（HTTP 200）
+- [x] 默认管理员可登录（HTTP 200，返回 `access_token`）；错误密码返回 401，body `code=invalid_credentials`
+- [x] 未带 token 请求 `/api/auth/me` 返回 401（`code=unauthorized`）
+- [x] 保存 LLM 提供商后列表仅显示掩码密钥（`sk-****5678`）；创建响应与列表响应均不含原始密钥；临时提供商已删除，列表恢复为空
+- [x] 前端可登录、可见设置页与对话页：Task 0.7 在 commit `15c5077` 的代码状态上做了浏览器验证。工具为 browser-use（Chromium），因当时 Playwright / Chrome MCP 不可用。实际观察到：登录成功并跳转 `/chat`；对话页显示 Phase 1 占位内容且输入框禁用；设置页显示空状态；创建提供商 `e2e-temp` 后列表显示掩码密钥 `sk-****-123`；通过 API 删除该提供商后列表恢复为空；全程无控制台报错。本任务回归：`npm --prefix web run test` 11 passed、`npm --prefix web run build` 成功。对话页当前仍为占位壳，尚无 `/api/chat` 接口
+- [x] `make test`：后端 69 passed；`npm --prefix web run test`：11 passed；`npm --prefix web run build`：成功
+````
 
 - [ ] **Step 3: 逐项验证并勾选**
 
-Run: `cd backend && pytest -q && cd ../web && npm run build`
-Expected: 全绿；将清单项逐条打勾
+Run: `make up && make migrate && make test && npm --prefix web run test && npm --prefix web run build`
+Expected: db healthy、redis PONG、迁移 round-trip 成功；后端 69 passed、前端 11 passed、构建成功；将清单项逐条打勾
 
 - [ ] **Step 4: 提交**
 
 ```bash
 git add README.md docs/phase-0-checklist.md
 git commit -m "docs: add runbook and phase-0 acceptance checklist"
+```
+
+评审修复单独提交，不改写已提交内容：
+
+```bash
+git commit -m "docs: fix runbook prerequisites and command sequencing"
+git commit -m "docs: tighten phase-0 runbook evidence and prerequisites"
 ```
 
 ---
