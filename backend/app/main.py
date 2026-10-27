@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import auth
+from app.api import auth, profiles
 from app.api import settings as settings_api
 from app.config import get_settings
 from app.db import SessionLocal
@@ -50,6 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(auth.router, prefix="/api")
+app.include_router(profiles.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 
 
