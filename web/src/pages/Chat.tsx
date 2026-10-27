@@ -10,15 +10,13 @@ export default function Chat() {
         </Link>
       </div>
       <p className="mt-2 text-sm text-amber-400">对话编排将在 Phase 1 接入，当前为界面骨架。</p>
-      <div
-        className="mt-4 flex-1 space-y-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-500"
-        role="status"
-      >
+      <div className="mt-4 flex-1 space-y-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-500">
         对话能力将在 Phase 1 接入
       </div>
       <div className="mt-4 flex gap-2">
         <input
           className="flex-1 rounded border border-slate-700 bg-slate-900 px-3 py-2 disabled:opacity-50"
+          aria-label="对话输入"
           disabled
           placeholder="对话能力将在 Phase 1 接入"
         />

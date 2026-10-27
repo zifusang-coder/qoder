@@ -9,33 +9,49 @@ export function setToken(token: string | null) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+export function handleUnauthorized(requestToken: string | null) {
+  // A newer login may have happened while this request was in flight; only
+  // clear the token if it is still the one the failing request was sent with.
+  if (getToken() !== requestToken) return;
+  setToken(null);
+  if (!location.pathname.endsWith("/login")) location.href = "/login";
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,
     message: string,
+    public detail?: unknown,
   ) {
     super(message);
   }
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getToken();
+  const requestToken = getToken();
+  const headers = new Headers(init.headers);
+  if (init.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (requestToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${requestToken}`);
+  }
   const resp = await fetch(`/api${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init.headers ?? {}),
-    },
+    headers,
   });
   if (resp.status === 401) {
-    setToken(null);
-    if (!location.pathname.endsWith("/login")) location.href = "/login";
+    handleUnauthorized(requestToken);
   }
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new ApiError(resp.status, body.code ?? "error", body.message ?? "请求失败");
+    throw new ApiError(
+      resp.status,
+      body.code ?? "error",
+      body.message ?? "请求失败",
+      body.detail,
+    );
   }
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
