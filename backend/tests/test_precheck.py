@@ -16,23 +16,53 @@ def _issue_rules(report: dict) -> list[str]:
     return [issue["rule"] for issue in report["issues"]]
 
 
-def test_banned_words_report_positions_and_are_errors():
-    text = "# 标题\n全网最低价，100%有效。" + "这是正文。" * 70
-    report = run_precheck(text, platform="wechat", taboos=[])
+def _banned(report: dict) -> list[dict]:
+    return [i for i in report["issues"] if i["rule"] == "banned_word"]
 
-    banned = [i for i in report["issues"] if i["rule"] == "banned_word"]
+
+def _taboo(report: dict) -> list[dict]:
+    return [i for i in report["issues"] if i["rule"] == "persona_taboo"]
+
+
+def test_banned_words_report_positions_and_are_errors():
+    body = "全网最低价，100%有效"
+    report = run_precheck(body, title="标题", platform="wechat", taboos=[])
+
+    banned = _banned(report)
     assert {issue["word"] for issue in banned} == {"全网最低", "100%有效"}
     assert all(isinstance(issue["index"], int) for issue in banned)
+    assert all(issue["field"] == "body" for issue in banned)
     for issue in banned:
-        assert text[issue["index"]:].startswith(issue["word"])
+        assert (
+            body[issue["index"] : issue["index"] + len(issue["word"])]
+            == issue["word"]
+        )
     assert report["passed"] is False
     assert report["errors"] == 2
+    assert report["warnings"] == 1
+    assert [i["rule"] for i in report["issues"]].count("too_short") == 1
+
+
+def test_banned_word_in_title_uses_title_relative_offset():
+    title = "最佳标题"
+    report = run_precheck(
+        "这是正文。" * 70, title=title, platform="wechat", taboos=[]
+    )
+
+    banned = _banned(report)
+    assert len(banned) == 1
+    issue = banned[0]
+    assert issue["field"] == "title"
+    assert issue["word"] == "最佳"
+    assert issue["index"] == 0
+    assert title[issue["index"] : issue["index"] + len(issue["word"])] == "最佳"
+    assert report["errors"] == 1
     assert report["warnings"] == 0
 
 
 def test_clean_wechat_article_passes():
     report = run_precheck(
-        "# 标题\n" + "这是正文。" * 70, platform="wechat", taboos=[]
+        "这是正文。" * 70, title="标题", platform="wechat", taboos=[]
     )
 
     assert report["passed"] is True
@@ -42,22 +72,24 @@ def test_clean_wechat_article_passes():
 
 
 def test_persona_taboo_warns_without_failing():
-    body = "我们不做收益承诺，只讲方法。" * 8
-    text = f"# 标题\n{body}"
-    report = run_precheck(text, platform="xiaohongshu", taboos=["收益承诺"])
+    body = "我们不做收益承诺，只讲方法。" + "这是正文。" * 20
+    report = run_precheck(
+        body, title="标题", platform="xiaohongshu", taboos=["收益承诺"]
+    )
 
     assert report["passed"] is True
     assert report["errors"] == 0
     assert report["warnings"] == 1
     assert "too_short" not in _issue_rules(report)
-    taboo_issues = [i for i in report["issues"] if i["rule"] == "persona_taboo"]
+    taboo_issues = _taboo(report)
     assert len(taboo_issues) == 1
     assert taboo_issues[0]["level"] == "warn"
-    assert taboo_issues[0]["index"] == text.find("收益承诺")
+    assert taboo_issues[0]["field"] == "body"
+    assert taboo_issues[0]["index"] == body.find("收益承诺")
 
 
 def test_short_wechat_article_warns():
-    report = run_precheck("# 标题\n短文", platform="wechat", taboos=[])
+    report = run_precheck("短文", title="标题", platform="wechat", taboos=[])
 
     assert report["passed"] is True
     assert report["errors"] == 0
@@ -87,8 +119,9 @@ def test_empty_text_is_error():
 
 
 def test_too_long_is_error_not_warning():
-    text = "# 标题\n" + "正" * (MAX_LENGTH + 1)
-    report = run_precheck(text, platform="wechat", taboos=[])
+    report = run_precheck(
+        "正" * (MAX_LENGTH + 1), title="标题", platform="wechat", taboos=[]
+    )
 
     assert report["passed"] is False
     assert report["errors"] == 1
@@ -96,29 +129,67 @@ def test_too_long_is_error_not_warning():
     too_long = [i for i in report["issues"] if i["rule"] == "too_long"]
     assert len(too_long) == 1
     assert too_long[0]["level"] == "error"
+    assert too_long[0]["message"] == f"正文超过 {MAX_LENGTH} 字"
 
 
 def test_platform_specific_minimum_length():
     text_80 = "好" * 80
 
-    xiaohongshu = run_precheck(text_80, platform="xiaohongshu", taboos=[])
+    xiaohongshu = run_precheck(
+        text_80, title="标题", platform="xiaohongshu", taboos=[]
+    )
     assert "too_short" not in _issue_rules(xiaohongshu)
 
-    xiaohongshu_short = run_precheck("好" * 79, platform="xiaohongshu", taboos=[])
+    xiaohongshu_short = run_precheck(
+        "好" * 79, title="标题", platform="xiaohongshu", taboos=[]
+    )
     assert "too_short" in _issue_rules(xiaohongshu_short)
 
-    zhihu = run_precheck(text_80, platform="zhihu", taboos=[])
+    zhihu = run_precheck(text_80, title="标题", platform="zhihu", taboos=[])
     zhihu_short = [i for i in zhihu["issues"] if i["rule"] == "too_short"]
     assert len(zhihu_short) == 1
     assert "200" in zhihu_short[0]["message"]
 
-    unknown = run_precheck("好" * 5, platform="douyin", taboos=[])
+    unknown = run_precheck("好" * 5, title="标题", platform="douyin", taboos=[])
     assert "too_short" not in _issue_rules(unknown)
 
 
-async def _create_content(
-    client, *, title="标题", body="正文", platform="wechat"
-):
+def test_fullwidth_banned_word_is_detected():
+    report = run_precheck(
+        "１００％有效", title="标题", platform="wechat", taboos=[]
+    )
+
+    banned = _banned(report)
+    assert len(banned) == 1
+    assert banned[0]["word"] == "100%有效"
+    assert banned[0]["field"] == "body"
+    assert report["passed"] is False
+    assert report["errors"] == 1
+
+
+def test_zero_width_banned_word_is_detected():
+    report = run_precheck("最\u200b佳", title="标题", platform="wechat", taboos=[])
+
+    banned = _banned(report)
+    assert len(banned) == 1
+    assert banned[0]["word"] == "最佳"
+    assert banned[0]["field"] == "body"
+    assert report["errors"] == 1
+
+
+def test_multiple_banned_word_occurrences_each_reported():
+    report = run_precheck(
+        "保证保证", title="标题", platform="wechat", taboos=[]
+    )
+
+    banned = _banned(report)
+    assert len(banned) == 2
+    assert [issue["index"] for issue in banned] == [0, 2]
+    assert all(issue["word"] == "保证" for issue in banned)
+    assert report["errors"] == 2
+
+
+async def _create_content(client, *, title="标题", body="正文", platform="wechat"):
     project = await client.post(
         "/api/projects", json={"title": f"检查测试-{uuid.uuid4().hex[:8]}"}
     )
@@ -232,10 +303,12 @@ async def test_precheck_banned_content_fails_and_records_events(
     assert response.status_code == 200
     body = response.json()
     assert body["passed"] is False
-    assert body["errors"] >= 2
+    assert body["errors"] == 2
+    assert body["warnings"] == 1
     assert body["job"]["status"] == "precheck_failed"
     assert body["job"]["checks"] == _report_from(body)
 
+    db_session.expire_all()
     events = await _events(db_session, job["id"])
     assert len(events) == 3
     assert {event.action for event in events} == {"create", "submit", "fail"}
@@ -269,6 +342,7 @@ async def test_precheck_clean_content_passes(client, db_session):
     assert body["job"]["status"] == "awaiting_review"
     assert body["job"]["checks"] == _report_from(body)
 
+    db_session.expire_all()
     stored = await _stored_job(db_session, job["id"])
     assert stored.status == "awaiting_review"
     assert stored.checks == body["job"]["checks"]
@@ -298,6 +372,7 @@ async def test_recheck_from_precheck_failed_records_second_pair(
     assert second.json()["passed"] is False
     assert second.json()["job"]["status"] == "precheck_failed"
 
+    db_session.expire_all()
     events = await _events(db_session, job["id"])
     actions = [event.action for event in events]
     assert actions.count("create") == 1
@@ -309,6 +384,31 @@ async def test_recheck_from_precheck_failed_records_second_pair(
         if event.action == "submit"
     )
     assert submits == [("draft", "prechecking"), ("precheck_failed", "prechecking")]
+
+
+async def test_precheck_rescues_stuck_prechecking_status(client, db_session):
+    content = await _create_content(
+        client, title="标题", body="这是正文。" * 70
+    )
+    job = await _create_job(client, content["id"])
+    stored = await _stored_job(db_session, job["id"])
+    stored.status = "prechecking"
+    await db_session.commit()
+
+    response = await _precheck(client, job["id"])
+
+    assert response.status_code == 200
+    assert response.json()["job"]["status"] == "awaiting_review"
+
+    db_session.expire_all()
+    events = await _events(db_session, job["id"])
+    assert [event.action for event in events].count("submit") == 0
+    assert {event.action for event in events} == {"create", "pass"}
+    pass_event = next(event for event in events if event.action == "pass")
+    assert (
+        pass_event.from_status,
+        pass_event.to_status,
+    ) == ("prechecking", "awaiting_review")
 
 
 async def test_precheck_rejects_non_precheckable_status(client, db_session):
@@ -324,7 +424,11 @@ async def test_precheck_rejects_non_precheckable_status(client, db_session):
 
     assert response.status_code == 409
     assert response.json()["code"] == "invalid_state"
-    assert response.json()["message"] == "只有草稿或检查未通过的任务可以执行检查"
+    assert (
+        response.json()["message"]
+        == "只有草稿、检查未通过或检查中的任务可以执行检查"
+    )
+    db_session.expire_all()
     events = await _events(db_session, job["id"])
     assert [event.action for event in events] == ["create"]
 
@@ -354,6 +458,26 @@ async def test_precheck_unknown_or_foreign_job_returns_404(client, db_session):
     assert foreign.json()["code"] == "not_found"
 
 
+async def test_precheck_job_pointing_at_foreign_content_returns_404(
+    client, db_session
+):
+    content = await _create_content(
+        client, title="标题", body="这是正文。" * 70
+    )
+    job = await _create_job(client, content["id"])
+    foreign_job = await _seed_foreign_job(db_session)
+
+    stored = await _stored_job(db_session, job["id"])
+    stored.content_id = foreign_job.content_id
+    await db_session.commit()
+
+    response = await _precheck(client, job["id"])
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_found"
+    assert response.json()["message"] == "内容不存在"
+
+
 async def test_precheck_uses_project_profile_taboos(client, db_session):
     profile = Profile(
         tenant_id=DEFAULT_TENANT_ID,
@@ -367,7 +491,7 @@ async def test_precheck_uses_project_profile_taboos(client, db_session):
     content = await _create_content(
         client,
         title="标题",
-        body="我们不做收益承诺，只讲方法。" * 8,
+        body="我们不做收益承诺，只讲方法。" + "这是正文。" * 20,
         platform="xiaohongshu",
     )
     project = await _project_of(db_session, content)
@@ -380,8 +504,10 @@ async def test_precheck_uses_project_profile_taboos(client, db_session):
     assert response.status_code == 200
     body = response.json()
     assert body["passed"] is True
-    assert body["warnings"] >= 1
-    assert "persona_taboo" in _issue_rules(_report_from(body))
+    assert body["warnings"] == 1
+    taboo_issues = _taboo(_report_from(body))
+    assert len(taboo_issues) == 1
+    assert taboo_issues[0]["field"] == "body"
 
 
 async def test_foreign_profile_taboos_do_not_leak(client, db_session):
@@ -397,7 +523,7 @@ async def test_foreign_profile_taboos_do_not_leak(client, db_session):
     content = await _create_content(
         client,
         title="标题",
-        body="我们不做收益承诺，只讲方法。" * 8,
+        body="我们不做收益承诺，只讲方法。" + "这是正文。" * 20,
         platform="xiaohongshu",
     )
     project = await _project_of(db_session, content)
@@ -412,3 +538,42 @@ async def test_foreign_profile_taboos_do_not_leak(client, db_session):
     assert body["passed"] is True
     assert body["warnings"] == 0
     assert "persona_taboo" not in _issue_rules(_report_from(body))
+
+
+async def test_precheck_uses_pinned_version_not_latest(client, db_session):
+    content = await _create_content(
+        client, title="标题", body="这是正文。" * 70
+    )
+    job = await _create_job(client, content["id"])
+
+    stored_content = (
+        await db_session.execute(
+            select(Content).where(Content.id == uuid.UUID(content["id"]))
+        )
+    ).scalar_one()
+    stored_content.current_version = 2
+    db_session.add(
+        ContentVersion(
+            tenant_id=DEFAULT_TENANT_ID,
+            content_id=stored_content.id,
+            version=2,
+            title="标题",
+            body="全网最低价，100%有效",
+        )
+    )
+    await db_session.commit()
+
+    response = await _precheck(client, job["id"])
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is True
+    assert body["errors"] == 0
+    assert body["job"]["status"] == "awaiting_review"
+    assert not _banned(_report_from(body))
+
+    db_session.expire_all()
+    stored = await _stored_job(db_session, job["id"])
+    assert stored.content_version == 1
+    assert stored.checks == body["job"]["checks"]
+    assert not _banned(stored.checks)

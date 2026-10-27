@@ -22,6 +22,7 @@ from app.services.publish import (
     JobNotFound,
     JobNotReschedulable,
     apply_action,
+    apply_precheck,
     reopen,
     reschedule,
 )
@@ -32,8 +33,16 @@ Platform = Literal[
     "wechat", "xiaohongshu", "douyin", "zhihu", "kuaishou", "channels", "bilibili"
 ]
 
-USER_ACTIONS = {"submit", "approve", "reject", "cancel", "retry"}
-SYSTEM_ACTIONS = {"pass", "fail", "succeed", "export_done", "publish", "export"}
+USER_ACTIONS = {"approve", "reject", "cancel", "retry"}
+SYSTEM_ACTIONS = {
+    "submit",
+    "pass",
+    "fail",
+    "succeed",
+    "export_done",
+    "publish",
+    "export",
+}
 INTERNAL_ACTIONS = {"reopen"}
 
 
@@ -352,22 +361,12 @@ async def precheck_job(
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> PrecheckOut:
     job = await _owned_job(session, job_id, user)
-    if job.status not in {"draft", "precheck_failed"}:
+    if job.status not in {"draft", "precheck_failed", "prechecking"}:
         raise AppError(
-            "invalid_state", "只有草稿或检查未通过的任务可以执行检查", 409
+            "invalid_state",
+            "只有草稿、检查未通过或检查中的任务可以执行检查",
+            409,
         )
-
-    version = (
-        await session.execute(
-            select(ContentVersion).where(
-                ContentVersion.content_id == job.content_id,
-                ContentVersion.version == job.content_version,
-                ContentVersion.tenant_id == user.tenant_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if version is None:
-        raise AppError("empty_content", "发布版本不存在", 409)
 
     content = (
         await session.execute(
@@ -379,6 +378,18 @@ async def precheck_job(
     ).scalar_one_or_none()
     if content is None:
         raise AppError("not_found", "内容不存在", 404)
+
+    version = (
+        await session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == content.id,
+                ContentVersion.version == job.content_version,
+                ContentVersion.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        raise AppError("empty_content", "发布版本不存在", 409)
 
     project = (
         await session.execute(
@@ -404,25 +415,20 @@ async def precheck_job(
         if profile is not None:
             taboos = profile.taboos or []
 
-    text = f"# {version.title}\n{version.body}" if version.title else version.body
-    report = run_precheck(text, platform=job.platform, taboos=taboos)
+    report = run_precheck(
+        version.body,
+        title=version.title,
+        platform=job.platform,
+        taboos=taboos,
+    )
 
     try:
-        job = await apply_action(
+        job = await apply_precheck(
             session,
             job.id,
-            "submit",
+            report,
             tenant_id=user.tenant_id,
             actor=user.email,
-            note="发布前检查",
-        )
-        job = await apply_action(
-            session,
-            job.id,
-            "pass" if report["passed"] else "fail",
-            tenant_id=user.tenant_id,
-            actor=user.email,
-            note="检查通过" if report["passed"] else "检查未通过",
         )
     except InvalidTransition as exc:
         raise AppError(
@@ -431,9 +437,6 @@ async def precheck_job(
     except JobNotFound as exc:
         raise AppError("not_found", "发布任务不存在", 404) from exc
 
-    job.checks = report
-    await session.commit()
-    await session.refresh(job)
     return PrecheckOut(job=_out(job), **report)
 
 

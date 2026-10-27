@@ -79,6 +79,50 @@ async def apply_action(
     return job
 
 
+async def apply_precheck(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    report: dict,
+    *,
+    tenant_id: str,
+    actor: str,
+) -> PublishJob:
+    job = await _locked_job(session, job_id, tenant_id)
+    status = job.status
+    if status != "prechecking":
+        target = next_status(status, "submit")
+        session.add(
+            PublishEvent(
+                tenant_id=job.tenant_id,
+                job_id=job.id,
+                from_status=status,
+                to_status=target,
+                action="submit",
+                note="发布前检查",
+                actor=actor,
+            )
+        )
+        status = target
+    action = "pass" if report["passed"] else "fail"
+    target = next_status(status, action)
+    session.add(
+        PublishEvent(
+            tenant_id=job.tenant_id,
+            job_id=job.id,
+            from_status=status,
+            to_status=target,
+            action=action,
+            note="检查通过" if report["passed"] else "检查未通过",
+            actor=actor,
+        )
+    )
+    job.status = target
+    job.checks = report
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
 async def reopen(
     session: AsyncSession,
     job_id: uuid.UUID,

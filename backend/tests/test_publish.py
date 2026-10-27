@@ -8,7 +8,12 @@ from app.config import DEFAULT_TENANT_ID
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.publish.state import TRANSITIONS, InvalidTransition, next_status
-from app.services.publish import ContentChanged, _locked_job, apply_action
+from app.services.publish import (
+    ContentChanged,
+    _locked_job,
+    apply_action,
+    apply_precheck,
+)
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
 
@@ -67,7 +72,8 @@ async def _system_act(db_session, job_id, action):
 
 
 async def _advance_to_awaiting_review(client, db_session, job_id):
-    assert (await _act(client, job_id, "submit")).status_code == 200
+    submitted = await _system_act(db_session, job_id, "submit")
+    assert submitted.status == "prechecking"
     await _system_act(db_session, job_id, "pass")
 
 
@@ -351,18 +357,28 @@ async def test_approve_on_draft_returns_409(client):
     assert response.json()["code"] == "invalid_transition"
 
 
-async def test_double_submit_returns_409(client):
+async def test_double_submit_is_rejected(client, db_session):
     content = await _create_content(client)
     job = (await _create_job(client, content["id"])).json()
 
-    assert (await _act(client, job["id"], "submit")).status_code == 200
-    second = await _act(client, job["id"], "submit")
-    assert second.status_code == 409
-    assert second.json()["code"] == "invalid_transition"
+    submitted = await _system_act(db_session, job["id"], "submit")
+    assert submitted.status == "prechecking"
+    with pytest.raises(InvalidTransition):
+        await _system_act(db_session, job["id"], "submit")
 
 
 @pytest.mark.parametrize(
-    "action", ["publish", "pass", "fail", "succeed", "export", "export_done", "reopen"]
+    "action",
+    [
+        "submit",
+        "publish",
+        "pass",
+        "fail",
+        "succeed",
+        "export",
+        "export_done",
+        "reopen",
+    ],
 )
 async def test_system_actions_are_forbidden(client, action):
     content = await _create_content(client)
@@ -371,6 +387,7 @@ async def test_system_actions_are_forbidden(client, action):
     response = await _act(client, job["id"], action)
     assert response.status_code == 403
     assert response.json()["code"] == "action_forbidden"
+    assert response.json()["message"] == "该动作不能通过此接口执行"
 
 
 async def test_unknown_action_returns_422(client):
@@ -383,16 +400,16 @@ async def test_unknown_action_returns_422(client):
 
 
 async def test_actions_on_missing_job_return_404(client, db_session):
-    malformed = await _act(client, "not-a-uuid", "submit")
+    malformed = await _act(client, "not-a-uuid", "approve")
     assert malformed.status_code == 404
     assert malformed.json()["code"] == "not_found"
 
-    unknown = await _act(client, str(uuid.uuid4()), "submit")
+    unknown = await _act(client, str(uuid.uuid4()), "approve")
     assert unknown.status_code == 404
 
     foreign_content = await _seed_foreign_content(db_session)
     foreign_job = await _seed_foreign_job(db_session, foreign_content)
-    foreign = await _act(client, str(foreign_job.id), "submit")
+    foreign = await _act(client, str(foreign_job.id), "approve")
     assert foreign.status_code == 404
     assert foreign.json()["code"] == "not_found"
 
@@ -759,6 +776,43 @@ async def test_locked_job_refreshes_stale_identity_map(client, db_session):
     assert fresh.status == "exporting"
 
 
+async def test_apply_precheck_refreshes_stale_identity_map(client, db_session):
+    content = await _create_content(client)
+    job_id = uuid.UUID((await _create_job(client, content["id"])).json()["id"])
+    cached = (
+        await db_session.execute(select(PublishJob).where(PublishJob.id == job_id))
+    ).scalar_one()
+    assert cached.status == "draft"
+
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == job_id)
+        .values(status="awaiting_review")
+        .execution_options(synchronize_session=False)
+    )
+    await db_session.commit()
+    assert cached.status == "draft"
+
+    with pytest.raises(InvalidTransition):
+        await apply_precheck(
+            db_session,
+            job_id,
+            {"passed": True, "errors": 0, "warnings": 0, "issues": []},
+            tenant_id=DEFAULT_TENANT_ID,
+            actor="system",
+        )
+
+    db_session.expire_all()
+    job = await _stored_job(db_session, job_id)
+    assert job.status == "awaiting_review"
+    events = (
+        await db_session.execute(
+            select(PublishEvent).where(PublishEvent.job_id == job_id)
+        )
+    ).scalars().all()
+    assert [event.action for event in events] == ["create"]
+
+
 async def test_publish_guard_reads_fresh_content_version(client, db_session):
     content = await _create_content(client)
     job_id = (await _create_job(client, content["id"])).json()["id"]
@@ -805,9 +859,8 @@ async def test_happy_path_actions_record_events(client, db_session):
     job_body = (await _create_job(client, content["id"])).json()
     job_id = job_body["id"]
 
-    submitted = await _act(client, job_id, "submit")
-    assert submitted.status_code == 200
-    assert submitted.json()["status"] == "prechecking"
+    submitted = await _system_act(db_session, job_id, "submit")
+    assert submitted.status == "prechecking"
 
     await _system_act(db_session, job_id, "pass")
 
@@ -815,13 +868,19 @@ async def test_happy_path_actions_record_events(client, db_session):
     assert approved.status_code == 200
     assert approved.json()["status"] == "approved"
 
+    db_session.expire_all()
     events = (
         await db_session.execute(
             select(PublishEvent).where(PublishEvent.job_id == uuid.UUID(job_id))
         )
     ).scalars().all()
     by_action = {event.action: event for event in events}
-    assert len(events) == 4
+    assert [event.action for event in events] == [
+        "create",
+        "submit",
+        "pass",
+        "approve",
+    ]
     assert set(by_action) == {"create", "submit", "pass", "approve"}
     assert (by_action["create"].from_status, by_action["create"].to_status) == (
         "created",
@@ -842,6 +901,7 @@ async def test_happy_path_actions_record_events(client, db_session):
     assert all(event.tenant_id == DEFAULT_TENANT_ID for event in events)
     assert all(event.job_id == uuid.UUID(job_id) for event in events)
     assert by_action["create"].actor == "tester@local"
+    assert by_action["submit"].actor == "system"
     assert by_action["pass"].actor == "system"
     assert by_action["approve"].actor == "tester@local"
     assert by_action["approve"].note == "人工确认"
@@ -856,15 +916,20 @@ async def test_reject_and_cancel_record_events(client, db_session):
         assert response.status_code == 200
         return response.json()["status"]
 
-    assert await _act_and_status("submit") == "prechecking"
+    async def _submit():
+        job = await _system_act(db_session, job_id, "submit")
+        assert job.status == "prechecking"
+
+    await _submit()
     await _system_act(db_session, job_id, "pass")
     assert await _act_and_status("reject") == "draft"
 
-    assert await _act_and_status("submit") == "prechecking"
+    await _submit()
     await _system_act(db_session, job_id, "pass")
     assert await _act_and_status("approve") == "approved"
     assert await _act_and_status("cancel") == "cancelled"
 
+    db_session.expire_all()
     events = (
         await db_session.execute(
             select(PublishEvent).where(PublishEvent.job_id == uuid.UUID(job_id))
@@ -877,10 +942,10 @@ async def test_reject_and_cancel_record_events(client, db_session):
     assert rows == sorted(
         [
             ("create", "created", "draft", "tester@local"),
-            ("submit", "draft", "prechecking", "tester@local"),
+            ("submit", "draft", "prechecking", "system"),
             ("pass", "prechecking", "awaiting_review", "system"),
             ("reject", "awaiting_review", "draft", "tester@local"),
-            ("submit", "draft", "prechecking", "tester@local"),
+            ("submit", "draft", "prechecking", "system"),
             ("pass", "prechecking", "awaiting_review", "system"),
             ("approve", "awaiting_review", "approved", "tester@local"),
             ("cancel", "approved", "cancelled", "tester@local"),
@@ -921,8 +986,8 @@ async def test_list_jobs_filters_tenant_and_status(client, db_session):
     other = (
         await _create_job(client, douyin_content["id"], platform="douyin")
     ).json()
-    submitted = await _act(client, other["id"], "submit")
-    assert submitted.status_code == 200
+    submitted = await _system_act(db_session, other["id"], "submit")
+    assert submitted.status == "prechecking"
 
     foreign_content = await _seed_foreign_content(db_session)
     db_session.add(
