@@ -7,7 +7,7 @@ import uuid
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import DEFAULT_TENANT_ID
@@ -444,7 +444,7 @@ async def test_update_duplicate_name_returns_409(client):
         {"unknown": "x"},
     ],
 )
-async def test_update_meta_validation(client, meta):
+async def test_update_meta_validation(client, db_session, meta):
     account = await _create_account(client)
 
     response = await client.patch(
@@ -452,6 +452,9 @@ async def test_update_meta_validation(client, meta):
     )
     assert response.status_code == 422
     assert response.json()["code"] == "validation_error"
+
+    stored = await _stored_account(db_session, account["id"])
+    assert stored.meta == {"author": "作者甲", "thumb_media_id": "thumb-0"}
 
 
 @respx.mock
@@ -1016,14 +1019,19 @@ async def test_in_flight_marker_is_persisted_before_adapter_call(
     job = await _create_job(client, content["id"], account_id=account["id"])
     await _approve(client, job["id"])
     job_uuid = uuid.UUID(job["id"])
-    observed: dict[str, str] = {}
+    observed: dict[str, object] = {}
+    commits: list[bool] = []
+
+    def _record_commit(_: object) -> None:
+        commits.append(True)
 
     class InspectingAdapter:
         platform = "wechat"
         capability = "auto"
 
         async def publish(self, *, account, title, body):
-            # 用独立会话读取同一引擎，验证服务在调用适配器前已提交进行中标记
+            # 独立会话读取同一引擎；after_commit 证明此刻状态已真正落库，
+            # 避免 StaticPool 共享连接看到未提交的 flush 而产生假阳性
             async with AsyncSession(bind=db_session.bind) as probe:
                 current = (
                     await probe.execute(
@@ -1032,19 +1040,25 @@ async def test_in_flight_marker_is_persisted_before_adapter_call(
                 ).scalar_one()
             observed["status"] = current.status
             observed["error"] = current.error
+            observed["committed"] = bool(commits)
             return PublishResult(external_id="media-inspected")
 
-    result = await execute_job(
-        db_session,
-        job_uuid,
-        InspectingAdapter(),
-        tenant_id=DEFAULT_TENANT_ID,
-        actor="tester@local",
-    )
+    event.listen(db_session.sync_session, "after_commit", _record_commit)
+    try:
+        result = await execute_job(
+            db_session,
+            job_uuid,
+            InspectingAdapter(),
+            tenant_id=DEFAULT_TENANT_ID,
+            actor="tester@local",
+        )
+    finally:
+        event.remove(db_session.sync_session, "after_commit", _record_commit)
 
     assert observed == {
         "status": "publishing",
         "error": "发布请求已提交，等待平台确认",
+        "committed": True,
     }
     assert result.status == "published"
     assert result.external_id == "media-inspected"

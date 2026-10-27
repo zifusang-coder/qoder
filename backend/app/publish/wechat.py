@@ -107,7 +107,7 @@ class WeChatMPAdapter:
         self, account: PlatformAccount, title: str, body: str
     ) -> dict[str, Any]:
         html_body = markdown.markdown(body, extensions=["extra", "sane_lists"])
-        meta = account.meta or {}
+        meta = account.meta if isinstance(account.meta, dict) else {}
         author = meta.get("author", "")
         thumb = meta.get("thumb_media_id")
         if not isinstance(thumb, str) or not thumb.strip():
