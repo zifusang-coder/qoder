@@ -23,18 +23,23 @@ outputs:
   format: json
   schema:
     type: object
-    required: [score, verdict, reasons, angles]
+    required: [score, verdict, reasons]
     properties:
       score:
-        type: number
+        type: integer
+        minimum: 0
+        maximum: 100
       verdict:
         type: string
+        enum: [advance, revise, drop]
       reasons:
         type: array
+        maxItems: 3
         items:
           type: string
       angles:
         type: array
+        maxItems: 3
         items:
           type: string
 llm:

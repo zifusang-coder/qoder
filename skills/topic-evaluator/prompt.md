@@ -10,6 +10,6 @@
 - score：总分 0-100，整数
 - verdict：advance / revise / drop 之一
 - reasons：3 条以内理由，每条不超过 40 字
-- angles：若建议推进，给出 2-3 个可执行切入角度
+- angles：建议推进时给出 2-3 个可执行切入角度；revise/drop 时可省略
 
-分数低于 60 时 verdict 必须是 revise 或 drop。不要输出 Markdown 代码块之外的解释。
+分数低于 60 时 verdict 必须是 revise 或 drop。不要输出 JSON 以外的任何内容。

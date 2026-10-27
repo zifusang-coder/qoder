@@ -20,6 +20,24 @@ context:
   references: []
 outputs:
   format: json
+  schema:
+    type: object
+    required: [titles]
+    properties:
+      titles:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          required: [text, style, reason]
+          properties:
+            text:
+              type: string
+            style:
+              type: string
+              enum: [信息型, 故事型, 反常识型, 清单型]
+            reason:
+              type: string
 llm:
   tier: fast
   temperature: 0.9
