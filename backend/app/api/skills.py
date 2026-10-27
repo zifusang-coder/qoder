@@ -1,4 +1,4 @@
-import json
+import json  # noqa: I001
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -19,8 +19,7 @@ from app.models.profile import Profile, ProfileMemory
 from app.models.skill import SkillSetting
 from app.models.user import User
 from app.services.profiles import build_profile_block
-from app.services.skill_settings import enabled_map
-from app.services.skill_settings import require_enabled as _require_enabled
+from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import LoadedSkill, ManifestError
 from app.skills.registry import SkillRegistry, get_registry

@@ -47,6 +47,12 @@ async def repurpose_content(
     if source is None:
         raise AppError("not_found", "源内容不存在", 404)
 
+    # 提前固化 ORM 属性：executor.run 内部会 commit，避免依赖实例过期行为的可移植性假设
+    project_id = project.id
+    profile_id = project.profile_id
+    source_kind = source.kind
+    source_title = source.title
+
     version = (
         await session.execute(
             select(ContentVersion)
@@ -60,6 +66,8 @@ async def repurpose_content(
     ).scalar_one_or_none()
     if version is None or not version.body.strip():
         raise AppError("empty_content", "源内容没有正文，无法改写", 409)
+    version_title = version.title
+    version_body = version.body
 
     try:
         registry.get(skill_id)
@@ -68,11 +76,11 @@ async def repurpose_content(
     await require_enabled(session, tenant_id, skill_id)
 
     profile_block = ""
-    if project.profile_id:
+    if profile_id:
         profile = (
             await session.execute(
                 select(Profile).where(
-                    Profile.id == project.profile_id,
+                    Profile.id == profile_id,
                     Profile.tenant_id == tenant_id,
                 )
             )
@@ -81,7 +89,7 @@ async def repurpose_content(
             memories = (
                 await session.execute(
                     select(ProfileMemory).where(
-                        ProfileMemory.profile_id == project.profile_id,
+                        ProfileMemory.profile_id == profile_id,
                         ProfileMemory.tenant_id == tenant_id,
                     )
                 )
@@ -103,17 +111,17 @@ async def repurpose_content(
     result = await executor.run(
         skill_id,
         {
-            "topic": version.title or source.title,
-            "source": version.body,
+            "topic": version_title or source_title,
+            "source": version_body,
             "platform": platform,
-            "text": version.body,
+            "text": version_body,
         },
     )
 
-    # 串行化同一项目内的目标内容选择与版本号分配，避免并发改写产生重复版本
+    # 串行化同一项目内的目标内容选择与版本号分配，避免并发下重复目标与重复版本；Postgres 默认 READ COMMITTED，SQLite 会忽略 FOR UPDATE
     await session.execute(
         select(Project.id)
-        .where(Project.id == project.id, Project.tenant_id == tenant_id)
+        .where(Project.id == project_id, Project.tenant_id == tenant_id)
         .with_for_update()
     )
 
@@ -121,7 +129,7 @@ async def repurpose_content(
         await session.execute(
             select(Content)
             .where(
-                Content.project_id == project.id,
+                Content.project_id == project_id,
                 Content.platform == platform,
                 Content.tenant_id == tenant_id,
             )
@@ -132,20 +140,21 @@ async def repurpose_content(
     if target is None:
         target = Content(
             tenant_id=tenant_id,
-            project_id=project.id,
+            project_id=project_id,
             platform=platform,
-            kind=source.kind,
-            title=source.title,
+            kind=source_kind,
+            title=source_title,
         )
         session.add(target)
         await session.flush()
     elif not target.title:
-        target.title = source.title
+        target.title = source_title
 
     current = (
         await session.execute(
             select(func.max(ContentVersion.version)).where(
-                ContentVersion.content_id == target.id
+                ContentVersion.content_id == target.id,
+                ContentVersion.tenant_id == tenant_id,
             )
         )
     ).scalar()
@@ -154,7 +163,7 @@ async def repurpose_content(
         tenant_id=tenant_id,
         content_id=target.id,
         version=next_no,
-        title=target.title or source.title,
+        title=target.title or source_title,
         body=result.text,
         source="skill",
         skill_run_id=result.run_id,

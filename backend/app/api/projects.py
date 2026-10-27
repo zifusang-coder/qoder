@@ -196,7 +196,7 @@ def _safe_upload_name(name: str | None) -> str:
         not base
         or base in {".", ".."}
         or "\x00" in base
-        or any(ord(ch) < 32 for ch in base)
+        or any(ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F for ch in base)
         or len(base) > 200
         or len(base.encode("utf-8")) > 200
     ):

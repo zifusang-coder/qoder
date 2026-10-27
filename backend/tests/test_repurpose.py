@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.errors import AppError
@@ -360,4 +361,111 @@ async def test_repurpose_uses_production_default_skill(client, tmp_path, monkeyp
         assert "改写后的正文" in result.json()["body"]
     finally:
         app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_target_ordering_and_title_backfill(
+    client, tmp_path, monkeypatch, db_session
+):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (
+            await client.post("/api/projects", json={"title": "目标顺序"})
+        ).json()
+        source = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        older_id = uuid.uuid4()
+        newer_id = uuid.uuid4()
+        db_session.add_all(
+            [
+                Content(
+                    id=older_id,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    project_id=uuid.UUID(project["id"]),
+                    platform="zhihu",
+                    title="",
+                    created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),  # noqa: UP017
+                ),
+                Content(
+                    id=newer_id,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    project_id=uuid.UUID(project["id"]),
+                    platform="zhihu",
+                    title="较新目标",
+                    created_at=datetime(2024, 6, 1, tzinfo=timezone.utc),  # noqa: UP017
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": source["id"],
+                "platform": "zhihu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert result.status_code == 201
+        assert result.json()["content_id"] == str(older_id)
+
+        contents = (
+            await client.get(f"/api/projects/{project['id']}/contents")
+        ).json()
+        zhihu = [c for c in contents if c["platform"] == "zhihu"]
+        assert len(zhihu) == 2
+        older = next(c for c in zhihu if c["id"] == str(older_id))
+        assert older["title"] == "主稿"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_upload_rejects_control_char_filename(client, tmp_path):
+    from app.main import app
+
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+    try:
+        project = (
+            await client.post("/api/projects", json={"title": "非法文件名"})
+        ).json()
+
+        # httpx 会把 0x01 转义成 %01，这里手工构造 multipart 以发送真正的控制字符
+        boundary = "control-char-boundary"
+        control_body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="\x01bad.md"\r\n'
+            "Content-Type: text/markdown\r\n\r\n"
+            "ok\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        control = await client.post(
+            f"/api/projects/{project['id']}/files",
+            content=control_body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        assert control.status_code == 422
+        assert control.json()["code"] == "invalid_filename"
+
+        long_name = "文" * 70 + ".md"
+        too_long = await client.post(
+            f"/api/projects/{project['id']}/files",
+            files={"file": (long_name, b"ok", "text/markdown")},
+        )
+        assert too_long.status_code == 422
+        assert too_long.json()["code"] == "invalid_filename"
+    finally:
         app.dependency_overrides.pop(get_storage, None)
