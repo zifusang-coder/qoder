@@ -1,5 +1,4 @@
 import uuid
-from pathlib import Path
 from typing import Annotated
 
 import jsonschema
@@ -13,7 +12,11 @@ from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import load_gateway_default
 from app.models.user import User
-from app.services.outputs import adhoc_output_dir, prepare_inputs
+from app.services.outputs import (
+    adhoc_output_dir,
+    prepare_inputs,
+    public_output_data,
+)
 from app.services.profiles import profile_block_for
 from app.services.router import route_intent
 from app.services.skill_settings import require_enabled
@@ -51,17 +54,6 @@ class ChatOut(BaseModel):
     run_id: str | None = None
     data: dict | None = None
     missing: list[str] | None = None
-
-
-def _public_data(data: dict | None, outputs_root: Path) -> dict | None:
-    if not data or "path" not in data:
-        return data
-    path = Path(str(data["path"]))
-    try:
-        rel = path.resolve().relative_to(outputs_root.resolve())
-    except ValueError:
-        return data
-    return {**data, "path": str(rel)}
 
 
 def _score_value(data: dict) -> str | None:
@@ -224,7 +216,7 @@ async def chat(
     except ValueError as exc:
         raise AppError("skill_output_invalid", "模型输出格式异常", 502) from exc
 
-    data = _public_data(result.data, settings.outputs_dir)
+    data = public_output_data(result.data, settings.outputs_dir)
     reply = result.text if data is None else _summarize(data)
     return ChatOut(
         reply=reply,

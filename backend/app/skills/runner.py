@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -37,9 +38,12 @@ async def run_script(
     finally:
         if proc.returncode is None:
             try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
             await proc.wait()
     if proc.returncode != 0:
         raise ScriptError(stderr.decode(errors="ignore")[-1000:] or "脚本执行失败")

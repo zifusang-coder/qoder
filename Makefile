@@ -17,4 +17,4 @@ migrate: setup
 test: setup
 	cd backend && uv run pytest -q
 fmt: setup
-	cd backend && uv run ruff check --fix . || true
+	cd backend && uv run ruff check --fix .

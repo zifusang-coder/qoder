@@ -37,6 +37,15 @@ EXPORT_IN_FLIGHT_MESSAGE = "导出请求已提交，等待完成"
 EXPORT_LEASE_SECONDS = 60
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        # 部分驱动（SQLite）会把带时区的 UTC 时间读成 naive
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 class JobNotFound(LookupError):
     pass
 
@@ -300,10 +309,16 @@ async def execute_job(
     *,
     tenant_id: str,
     actor: str,
+    require_due: datetime | None = None,
 ) -> PublishJob:
     job = await _locked_job(session, job_id, tenant_id)
     if job.status != "approved":
         raise AppError("invalid_state", "只有审核通过的任务可以执行发布", 409)
+    if require_due is not None:
+        scheduled = _as_utc(job.scheduled_at)
+        if scheduled is None or scheduled > _as_utc(require_due):
+            # worker 选中任务后用户可能已重排发布时间，锁内必须再次确认
+            raise AppError("not_due", "发布任务尚未到执行时间", 409)
     if job.attempts >= MAX_PUBLISH_ATTEMPTS:
         raise AppError(
             "too_many_attempts", "发布尝试次数已达上限，请人工确认平台状态", 409

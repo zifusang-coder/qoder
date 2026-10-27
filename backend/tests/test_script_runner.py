@@ -51,6 +51,32 @@ async def test_script_timeout_kills_child(tmp_path):
         os.kill(pid, 0)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 进程语义")
+async def test_script_timeout_kills_grandchildren(tmp_path):
+    heartbeat = tmp_path / "heartbeat.txt"
+    child = _write(
+        tmp_path,
+        "child.py",
+        "import pathlib,time\n"
+        "while True:\n"
+        "    pathlib.Path('heartbeat.txt').write_text(str(time.time()))\n"
+        "    time.sleep(0.05)\n",
+    )
+    script = _write(
+        tmp_path,
+        "tree.py",
+        "import subprocess,sys,time\n"
+        f"subprocess.Popen([sys.executable, {str(child)!r}])\n"
+        "time.sleep(30)\n",
+    )
+    with pytest.raises(ScriptError, match="脚本超时"):
+        await run_script(script, {}, tmp_path, timeout=1)
+    assert heartbeat.exists(), "孙进程未启动"
+    last = heartbeat.read_text()
+    await asyncio.sleep(0.3)
+    assert heartbeat.read_text() == last, "超时后孙进程仍在运行"
+
+
 async def test_script_nonzero_exit_includes_stderr(tmp_path):
     script = _write(
         tmp_path,

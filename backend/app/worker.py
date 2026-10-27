@@ -173,6 +173,7 @@ async def publish_due_jobs(
                     adapter,
                     tenant_id=tenant_id,
                     actor="scheduler",
+                    require_due=current,
                 )
                 executed += 1
             except ContentChanged as exc:
@@ -183,6 +184,11 @@ async def publish_due_jobs(
                 if exc.code == "invalid_state":
                     # 用户取消或另一执行者已抢占，属于正常竞态
                     logger.info("定时发布任务已被其他路径处理，跳过 job=%s", job_id)
+                    await session.rollback()
+                    continue
+                if exc.code == "not_due":
+                    # 选中后用户重排发布时间，留待下一次扫描
+                    logger.info("定时发布任务已改期，跳过 job=%s", job_id)
                     await session.rollback()
                     continue
                 if exc.code in BLOCKED_ERROR_CODES:

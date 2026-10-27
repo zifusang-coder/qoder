@@ -137,6 +137,20 @@ describe("streamSse", () => {
     await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("boom");
   });
 
+  it("throws the message from a structured error event", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          bytes('data: {"error":{"code":"skill_stream_failed","message":"生成失败"}}\n\n'),
+        ]),
+      ),
+    );
+
+    await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("生成失败");
+  });
+
   it("calls the unauthorized helper on a 401 response", async () => {
     const { store, location } = stubBrowser("stale-token");
     vi.stubGlobal(

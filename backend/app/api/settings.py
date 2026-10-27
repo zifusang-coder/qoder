@@ -63,7 +63,8 @@ class ProviderOut(BaseModel):
 
 
 def _mask(key: str) -> str:
-    return f"{key[:3]}****{key[-4:]}" if len(key) > 8 else "****"
+    # 不返回任何前缀，避免短密钥在掩码中泄露可用信息
+    return f"****{key[-4:]}" if len(key) > 8 else "****"
 
 
 def _to_out(provider: LLMProvider) -> ProviderOut:

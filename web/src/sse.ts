@@ -1,6 +1,7 @@
 import { getToken, handleUnauthorized } from "./client";
 
-type SseEvent = { delta?: string; error?: string };
+type SseError = string | { code: string; message: string };
+type SseEvent = { delta?: string; error?: SseError };
 
 function eventData(block: string): string | null {
   const dataLines: string[] = [];
@@ -61,7 +62,11 @@ export async function streamSse(
       onChunk(joined);
       return false;
     }
-    if (event.error) throw new Error(event.error);
+    if (event.error) {
+      throw new Error(
+        typeof event.error === "string" ? event.error : event.error.message,
+      );
+    }
     if (event.delta) onChunk(event.delta);
     return false;
   };

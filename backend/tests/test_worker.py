@@ -448,6 +448,48 @@ async def test_publish_due_jobs_executes_once(worker_factory):
     ]
 
 
+async def test_publish_due_jobs_rechecks_schedule_after_selection(
+    worker_factory, monkeypatch
+):
+    now = datetime.now(UTC)
+    async with worker_factory() as session:
+        content = await _seed_content(session)
+        account = await _seed_account(session)
+        job = _job(
+            content,
+            key="rescheduled",
+            status="approved",
+            scheduled_at=now + timedelta(hours=1),
+            account_id=account.id,
+        )
+        session.add(job)
+        await session.commit()
+        job_id = job.id
+
+    async def stale_selection(session, current, *, limit=MAX_BATCH_SIZE):
+        return [
+            (
+                await session.execute(
+                    select(PublishJob).where(PublishJob.id == job_id)
+                )
+            ).scalar_one()
+        ]
+
+    monkeypatch.setattr("app.worker.list_due_jobs", stale_selection)
+    adapter = FakeAdapter()
+    executed = await publish_due_jobs(
+        session_factory=worker_factory,
+        adapter_factory=lambda: adapter,
+        now=now,
+    )
+
+    assert executed == 0
+    assert adapter.calls == 0
+    state = await _job_state(worker_factory, job_id)
+    assert state["status"] == "approved"
+    assert state["attempts"] == 0
+
+
 async def test_missing_account_fails_job_and_continues_batch(worker_factory):
     now = datetime.now(UTC)
     async with worker_factory() as session:

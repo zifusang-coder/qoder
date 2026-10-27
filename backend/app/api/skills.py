@@ -11,13 +11,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.skill import SkillSetting
 from app.models.user import User
-from app.services.outputs import prepare_inputs
+from app.services.outputs import prepare_inputs, public_output_data
 from app.services.profiles import profile_block_for
 from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
 from app.skills.executor import SkillExecutor
@@ -224,7 +225,7 @@ async def run_skill(
         run_id=result.run_id,
         skill_id=result.skill_id,
         text=result.text,
-        data=result.data,
+        data=public_output_data(result.data, get_settings().outputs_dir),
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
         duration_ms=result.duration_ms,

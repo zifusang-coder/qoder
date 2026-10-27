@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -23,6 +24,7 @@ from app.logging_setup import configure_http_logging
 from app.seed import ensure_admin
 
 configure_http_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -50,10 +52,22 @@ async def validation_error_handler(
     )
 
 
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    # 未预期异常只记录在服务端，响应体不携带堆栈或内部细节
+    logger.error(
+        "未处理异常 %s %s", request.method, request.url.path, exc_info=exc
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"code": "internal_error", "message": "服务器内部错误"},
+    )
+
+
 settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
+app.add_exception_handler(Exception, unhandled_error_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.cors_origins.split(",")],

@@ -7,7 +7,7 @@
 - [x] 画像 6 维字段可创建、读取、编辑、删除（验证方式：自动化 `tests/test_profiles.py`）
 - [x] 画像记忆可手工添加，复盘可自动写入并标注来源（验证方式：自动化 `tests/test_profiles.py`、`tests/test_postmortem.py`、`tests/test_e2e.py`）
 - [x] 内置技能可从 `skills/` 加载（当前 12 个目录），可列表、启停，停用后执行返回 409（验证方式：自动化 `tests/test_builtin_skills.py`、`tests/test_skills_api.py`；真实模型质量未验收）
-- [x] 技能执行写入 `skill_runs` 审计记录（耗时、token、状态、错误）（验证方式：自动化 `tests/test_skill_executor.py`）
+- [x] 技能执行写入 `skill_runs` 审计记录（耗时、token、状态、错误）；`/stream` 仅为预览，不写审计也不做后处理，完整执行走 `/run`（验证方式：自动化 `tests/test_skill_executor.py`、`tests/test_skills_api.py`）
 - [x] 项目可创建，内容可创建多个版本并按版本号回溯（验证方式：自动化 `tests/test_projects.py`、`tests/test_e2e.py`）
 - [x] 上传文件限制 10MB；文件名剥离路径分隔符，存储层拒绝越界路径，控制字符文件名返回 422（验证方式：自动化 `tests/test_repurpose.py`、`tests/test_projects.py`）
 - [x] 一稿多改复用/创建目标平台内容并生成独立版本（验证方式：自动化 `tests/test_repurpose.py`、`tests/test_e2e.py`）
@@ -26,15 +26,16 @@
 - [x] 自动发布必须经过 `awaiting_review → approved`；人工导出仅为素材打包，允许 `draft`/`awaiting_review`/`approved`，不会向平台发布内容（验证方式：自动化 `tests/test_publish.py`、`tests/test_export.py`、`tests/test_e2e.py`）
 - [x] 后处理脚本无 shell、环境变量白名单、30 秒超时（验证方式：自动化 `tests/test_script_runner.py` + 代码审查 `app/skills/runner.py`）
 - [x] 受保护接口未认证访问返回 401（验证方式：自动化 `tests/test_auth.py`、`tests/test_profiles.py` 等）
+- [x] 未预期异常统一返回 500 通用错误，响应不含堆栈或内部细节（验证方式：自动化 `tests/test_health.py`）
 - [x] 业务查询按 `tenant_id` 过滤，跨租户资源不可见（验证方式：自动化 `tests/test_profiles.py`、`tests/test_publish.py`、`tests/test_analytics.py`、`tests/test_postmortem.py`）
 - [x] 发布边界符合合规要求：公众号仅建草稿，其他平台导出人工上传，不使用逆向接口或自动化点击（验证方式：代码与自动化导出/公众号测试，详见 README「发布边界」）
 
 ## 工程
 
 - [ ] `alembic upgrade head` / `downgrade base` 可往返（Phase 0 的 PostgreSQL 验证只覆盖当时 4 个迁移；Phase 1 新增 10 个迁移，当前 head 尚未在 PostgreSQL 复跑，见下方人工验收）
-- [x] 后端 `uv run pytest -q` 全绿：499 passed（本次运行）
+- [x] 后端 `uv run pytest -q` 全绿：502 passed（本次运行）
 - [x] 后端 `uv run ruff check .` 通过（本次运行）
-- [x] 前端 `npm run test` 与 `npm run build` 通过（验证方式：Task 1.19 已记录 25 passed、`tsc -b && vite build` 成功；本次未复跑前端）
+- [x] 前端 `npm run test` 与 `npm run build` 通过（本次运行：26 passed、`tsc -b && vite build` 成功）
 - [ ] `README` 可在新机器 30 分钟内复现（见下方人工验收）
 
 ## 待人工验收（本环境无凭据/无浏览器）

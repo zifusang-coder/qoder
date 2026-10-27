@@ -54,7 +54,7 @@ async def test_create_provider_masks_key(auth_client, auth_headers, db_session):
 
     assert resp.status_code == 201
     body = resp.json()
-    assert body["api_key_masked"] == "sk-****3456"
+    assert body["api_key_masked"] == "****3456"
     assert body["base_url"] == "https://api.example.com/v1"
     assert body["is_default"] is True
     assert payload["api_key"] not in resp.text
@@ -244,7 +244,7 @@ async def test_api_key_whitespace_stripped(auth_client, auth_headers, db_session
     )
 
     assert resp.status_code == 201
-    assert resp.json()["api_key_masked"] == "sk-****7890"
+    assert resp.json()["api_key_masked"] == "****7890"
 
     row = (await db_session.execute(select(LLMProvider))).scalar_one()
     assert decrypt_secret(row.api_key_enc) == "sk-1234567890"

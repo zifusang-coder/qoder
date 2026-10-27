@@ -16,3 +16,15 @@ def prepare_inputs(skill: LoadedSkill, inputs: dict, tenant_id: str) -> dict:
         # 服务端生成按租户隔离的单次运行目录，避免调用方写入任意路径
         prepared["output_dir"] = str(adhoc_output_dir(tenant_id))
     return prepared
+
+
+def public_output_data(data: dict | None, outputs_root: Path) -> dict | None:
+    """把 outputs 内的绝对路径转为相对路径，避免向客户端泄露部署目录。"""
+    if not data or "path" not in data:
+        return data
+    path = Path(str(data["path"]))
+    try:
+        rel = path.resolve().relative_to(outputs_root.resolve())
+    except ValueError:
+        return data
+    return {**data, "path": str(rel)}

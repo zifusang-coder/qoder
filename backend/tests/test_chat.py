@@ -5,12 +5,12 @@ from types import SimpleNamespace
 from sqlalchemy import select
 
 from app.api import chat as chat_module
-from app.api.chat import _public_data, _summarize
+from app.api.chat import _summarize
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.profile import Profile
 from app.models.skill import SkillRun, SkillSetting
-from app.services.outputs import adhoc_output_dir
+from app.services.outputs import adhoc_output_dir, public_output_data
 from app.services.router import route_intent
 from app.skills.registry import SkillRegistry, get_registry
 
@@ -338,14 +338,14 @@ def test_public_data_and_summarize(tmp_path):
     inside.parent.mkdir(parents=True)
     inside.write_bytes(b"png")
 
-    assert _public_data({"path": str(inside)}, outputs_root) == {
+    assert public_output_data({"path": str(inside)}, outputs_root) == {
         "path": "adhoc/x/cover.png"
     }
     outside = tmp_path / "elsewhere" / "cover.png"
-    assert _public_data({"path": str(outside)}, outputs_root) == {
+    assert public_output_data({"path": str(outside)}, outputs_root) == {
         "path": str(outside)
     }
-    assert _public_data(None, outputs_root) is None
+    assert public_output_data(None, outputs_root) is None
 
     assert _summarize({"titles": [{"text": "A"}, {"text": "B"}]}) == "1. A\n2. B"
     assert (

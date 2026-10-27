@@ -130,7 +130,6 @@ async def generate_postmortem(
 
     profile: Profile | None = None
     profile_block = ""
-    existing_contents: set[str] = set()
     if project.profile_id:
         profile = (
             await session.execute(
@@ -157,15 +156,6 @@ async def generate_postmortem(
                 )
             ).scalars().all()
             profile_block = build_profile_block(profile, list(memories))
-            existing_rows = (
-                await session.execute(
-                    select(ProfileMemory.content).where(
-                        ProfileMemory.tenant_id == tenant_id,
-                        ProfileMemory.profile_id == profile.id,
-                    )
-                )
-            ).scalars().all()
-            existing_contents = {_memory_key(item) for item in existing_rows}
 
     # 执行器内部会 commit，提前固化后续需要的值，避免依赖实例过期行为
     content_title = content.title
@@ -216,7 +206,21 @@ async def generate_postmortem(
 
     memory_ids: list[str] = []
     if profile_id is not None:
-        seen = set(existing_contents)
+        # 锁住画像行并在锁内重新读取，避免并发复盘写入重复记忆
+        await session.execute(
+            select(Profile.id)
+            .where(Profile.id == profile_id, Profile.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        existing_rows = (
+            await session.execute(
+                select(ProfileMemory.content).where(
+                    ProfileMemory.tenant_id == tenant_id,
+                    ProfileMemory.profile_id == profile_id,
+                )
+            )
+        ).scalars().all()
+        seen = {_memory_key(item) for item in existing_rows}
         for kind, memory_content, weight in _memory_candidates(
             report.get("memories")
         ):

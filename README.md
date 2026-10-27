@@ -57,7 +57,7 @@ content_id,platform,captured_at,views,likes,comments,shares,saves,followers_delt
 
 ## 测试
 
-前置：先安装前端依赖（`npm --prefix web install`）并启动 Docker 服务（`make up`），再运行下列测试与构建命令。
+后端测试使用内存 SQLite 与 respx 模拟外部接口，前端测试与构建同样不依赖 Docker；运行下列命令无需启动 PostgreSQL/Redis：
 
 ```bash
 make test                   # 后端：uv run pytest -q
@@ -65,9 +65,17 @@ npm --prefix web run test   # 前端单测（vitest run）
 npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build）
 ```
 
+首次运行前安装依赖：`make setup`（后端）与 `npm --prefix web install`（前端）。只有本地联调与人工验收需要 `make up` 启动 PostgreSQL 和 Redis。
+
+## Phase 1 已知限制
+
+- 技能 `/api/skills/{id}/stream` 仅用于低延迟预览：不写 `skill_runs` 审计、不做输出校验与后处理、不统计 token；需要审计时调用 `/api/skills/{id}/run`。
+- 公众号草稿需要先通过 `/api/accounts` 完成授权并传入 `account_id`；前端尚未提供账号管理与选择界面。
+- 发布任务的驳回、取消、重试与定时重排目前仅提供后端 API，前端只覆盖创建、审核通过与导出/执行。
+
 ## 约定
 
 - 发布默认人工审核；LLM 不直接触发发布。
 - 平台密钥仅加密存储，接口只返回掩码。
-- 产物写入 `outputs/<project_id>/`，不进版本库。
+- 产物写入 `outputs/<project_id>/`（项目内容）或 `outputs/adhoc/<tenant_id>/<run>/`（技能与对话临时产物），不进版本库。
 - 后处理脚本以独立子进程运行，初始工作目录设为技能目录，环境变量白名单、30 秒超时、无 shell；这不是 OS 级隔离，生产环境应迁移到容器执行（Phase 2）。
