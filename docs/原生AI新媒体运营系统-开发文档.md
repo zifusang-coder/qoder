@@ -391,8 +391,8 @@ exported / published: 终态
   - 一期已落地:手动 CSV 导入(见 4.5.1);公众号官方数据统计接口(阅读、分享、涨粉)的每日定时拉取尚未实现。
   - 其它平台:一期手动录入/CSV 导入(字段映射模板),二期探索官方开放数据或授权采集。
 - **指标快照**:`analytics_snapshots` 按 `内容 × 平台 × 日期` 唯一,六项指标(阅读/点赞/评论/转发/收藏/涨粉)使用 bigint,保留原始 `raw` jsonb 以便指标扩展。
-- **复盘报告**:`postmortem` 技能基于快照 + 画像生成结论(有效结构、失败原因、下步建议)。
-- **回写**:报告确认后抽取记忆写入 `profile_memories`,标注数据来源,可人工编辑/删除。
+- **复盘报告**:`postmortem` 技能基于最新快照 + 画像生成结论(有效结构、失败原因、下步建议),结果随内容归档(Task 1.18 已落地,见 4.5.2)。
+- **回写**:复盘结果自动抽取最多 3 条记忆写入 `profile_memories`,标注来源 `postmortem`,可人工删除;非法或低质量候选不落库。
 
 #### 4.5.1 CSV 指标导入与项目概览(Task 1.17 已落地)
 
@@ -401,6 +401,16 @@ exported / published: 终态
 - 概览:`GET /api/analytics/overview?project_id=`,按租户校验项目;用窗口函数一次取出每个内容的最新快照,合计只累加最新值,并计算互动率 `(点赞+评论+转发+收藏)/阅读`;无数据内容返回 `has_data=false`。
 - 错误语义:缺少/重复列、编码错误、CSV 结构错误 → 422 `invalid_csv`;超限 → 413 `file_too_large`;并发冲突 → 409 `import_conflict`;数值/写入数据错误 → 422 `invalid_data`。
 - 边界:平台维度必须与内容自身平台一致(内容本身即单平台,跨平台内容通过一稿多改生成独立内容);未接入平台官方自动采集。
+
+#### 4.5.2 复盘与画像记忆回写(Task 1.18 已落地)
+
+- 接口:`POST /api/analytics/contents/{content_id}/postmortem`,请求体 `{"skill_id":"postmortem"}`;内容与项目按租户过滤,无指标返回 409 `no_metrics`,技能停用返回 409 `skill_disabled`,未知技能在加载 LLM 网关前返回 404。
+- 输入:最新快照六项指标、按 `content.current_version` 固定的版本正文摘录(500 字)、标题 / 平台 / 快照日期;画像存在时注入画像描述与按权重排序的前 12 条记忆。
+- 执行:内容 / 指标 / 技能校验通过后才解析租户默认 LLM 提供商(未配置返回 400 `llm_not_configured`),经 `SkillExecutor` 执行并写 `skill_runs` 审计。
+- 输出清洗:必须是 JSON 对象;候选 `content` 必须为非空字符串(截断 200 字),`kind` 回退 `insight`,权重仅接受有限数值并钳制 0–1(缺省 0.5),每次最多回写 3 条;按“去空白 → 截断 → 压缩空白”与既有记忆及本批候选去重。
+- 归档:报告、`postmortem_at`、`postmortem_run_id` 合并写入 `content.meta`;项目无画像时仍生成报告但不回写。
+- 错误语义:`ManifestError` → 404;输入 schema → 422 `skill_inputs_invalid`;沙箱脚本 → 500 `skill_script_failed`;输出异常 → 502 `skill_output_invalid`(固定文案,细节仅进 `skill_runs.error`)。
+- 边界:无批量复盘与定时复盘;`publish_time` 暂用快照采集日期;生成记忆权重与手工记忆量纲尚未统一。
 
 ### 4.6 内容日历与排期
 
@@ -435,7 +445,7 @@ exported / published: 终态
 | `tenants` | id, name, plan, created_at | MVP 仅 default 一行 |
 | `users` | id, tenant_id, email, password_hash, role | role: owner/editor/viewer(预留) |
 | `profiles` | id, tenant_id, name, positioning, style, audience, platforms(jsonb), preferences_redlines(jsonb) | 画像主体 |
-| `profile_memories` | id, profile_id, kind, content, source_ref, weight, embedding(vector, 二期) | 长期记忆 |
+| `profile_memories` | id, tenant_id, profile_id, kind, content, weight, source, tags(jsonb) | 长期记忆;(tenant_id, profile_id) 外键兜底;复盘回写 source=postmortem |
 | `projects` | id, tenant_id, profile_id, title, topic, status, created_at | 一个选题 = 一个项目 |
 | `contents` | id, project_id, platform, content_type, title, body_md, adapted(jsonb), status, current_version | 平台版本 |
 | `content_versions` | id, content_id, body_md, assets(jsonb), change_note, created_at | 版本快照 |
@@ -480,7 +490,7 @@ exported / published: 终态
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
 | 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15 已落地,手动导出四平台) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing`;到期任务由 arq worker 每分钟扫描执行(Task 1.16 已落地) |
 | 账号 | `GET/POST /accounts` `PATCH/DELETE /accounts/{id}` | 公众号 AppID/Secret 绑定;凭据加密落库、响应仅掩码;DELETE 为软停用 |
-| 归因 | `POST /analytics/import` `GET /analytics/overview`(Task 1.17 已落地) `POST /content/{id}/postmortem` | CSV 导入 + 项目概览 + 复盘 |
+| 归因 | `POST /analytics/import` `GET /analytics/overview`(Task 1.17 已落地) `POST /analytics/contents/{id}/postmortem`(Task 1.18 已落地) | CSV 导入 + 项目概览 + 复盘与画像记忆回写 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
 | 设置 | `GET/PUT /settings/llm-providers` `POST /settings/llm-providers/{id}/test` `GET /settings/models` | 密钥掩码返回 |
 
