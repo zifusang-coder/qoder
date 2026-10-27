@@ -125,6 +125,25 @@ async def test_executor_runs_and_audits(db_session):
     assert run.finished_at is not None
 
 
+async def test_executor_drops_undeclared_inputs(db_session):
+    from sqlalchemy import select
+
+    from app.models.skill import SkillRun
+
+    gateway = FakeGateway()
+    executor = SkillExecutor(
+        registry=SkillRegistry(FIXTURE),
+        gateway=gateway,
+        session=db_session,
+        tenant_id=TENANT,
+    )
+    await executor.run("demo-skill", {"topic": "AI", "junk": "x"})
+
+    run = (await db_session.execute(select(SkillRun))).scalar_one()
+    assert run.inputs == {"topic": "AI"}
+    assert gateway.messages[1] == {"role": "user", "content": '{"topic": "AI"}'}
+
+
 async def test_executor_audits_failure(db_session):
     from sqlalchemy import select
 

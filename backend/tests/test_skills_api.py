@@ -1,11 +1,13 @@
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
 from app.api import skills as skills_module
+from app.api.skills import _prepare_inputs
 from app.llm.types import Usage
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
@@ -14,6 +16,7 @@ from app.services.skill_settings import enabled_map as _enabled_map
 from app.skills.registry import SkillRegistry, get_registry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
+SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
 class FakeGateway:
@@ -320,3 +323,28 @@ async def test_toggle_reraises_integrity_error_without_winner(db_session, monkey
             registry=SkillRegistry(FIXTURE),
         )
     assert calls["execute"] == 2  # first read + retry read both returned no row
+
+
+def test_prepare_inputs_drops_undeclared_and_scopes_output_dir(tmp_path, monkeypatch):
+    import app.services.outputs as outputs_module
+
+    monkeypatch.setattr(
+        outputs_module,
+        "get_settings",
+        lambda: SimpleNamespace(outputs_dir=tmp_path),
+    )
+    skill = SkillRegistry(SKILLS_DIR).get("cover-card")
+
+    first = _prepare_inputs(
+        skill,
+        {"title": "周报", "output_dir": "../evil", "junk": "x"},
+        DEFAULT_TENANT_ID,
+    )
+    second = _prepare_inputs(skill, {"title": "周报"}, DEFAULT_TENANT_ID)
+
+    assert first["title"] == "周报"
+    assert "junk" not in first
+    assert first["output_dir"] != "../evil"
+    assert Path(first["output_dir"]).parent == tmp_path / "adhoc" / DEFAULT_TENANT_ID
+    assert Path(second["output_dir"]).parent == tmp_path / "adhoc" / DEFAULT_TENANT_ID
+    assert first["output_dir"] != second["output_dir"]

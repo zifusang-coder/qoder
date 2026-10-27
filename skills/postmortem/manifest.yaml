@@ -9,14 +9,19 @@ inputs:
   properties:
     title:
       type: string
+      description: 内容标题
     platform:
       type: string
+      description: 目标平台，如 wechat/xiaohongshu/douyin
     metrics:
       type: object
+      description: '发布数据，如 {"views": 1000, "likes": 50}'
     content_excerpt:
       type: string
+      description: 内容摘要（可选）
     publish_time:
       type: string
+      description: 发布时间，ISO 8601（可选）
 context:
   profile: true
   references: []

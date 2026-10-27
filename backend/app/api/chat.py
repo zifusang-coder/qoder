@@ -1,4 +1,3 @@
-import json
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -14,10 +13,11 @@ from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import load_gateway_default
 from app.models.user import User
+from app.services.outputs import adhoc_output_dir
 from app.services.profiles import profile_block_for
 from app.services.router import route_intent
 from app.services.skill_settings import require_enabled
-from app.skills.executor import SkillExecutor
+from app.skills.executor import SkillExecutor, declared_inputs
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
 from app.skills.runner import ScriptError
@@ -30,8 +30,6 @@ SYSTEM_CHAT = (
     "不要承诺发布结果，不要编造平台数据。"
 )
 
-MISSING_INPUTS_MESSAGE = "还缺少必要信息，请补充标题、目标平台与数据指标后再试"
-
 VERDICT_LABELS = {"advance": "建议推进", "revise": "需要修改", "drop": "建议放弃"}
 RISK_LABELS = {"low": "低", "medium": "中", "high": "高"}
 
@@ -43,6 +41,7 @@ class ChatIn(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
     ]
     profile_id: uuid.UUID | None = None
+    inputs: dict | None = None
 
 
 class ChatOut(BaseModel):
@@ -66,32 +65,50 @@ def _public_data(data: dict | None, outputs_root: Path) -> dict | None:
 
 
 def _summarize(data: dict) -> str:
-    for key in ("verdict", "summary", "reply"):
-        value = data.get(key)
-        if value:
-            if key == "verdict" and value in VERDICT_LABELS:
-                return VERDICT_LABELS[value]
-            if key == "summary" and value in RISK_LABELS:
-                return f"风险等级：{RISK_LABELS[value]}"
-            return str(value)
-    titles = data.get("titles")
-    if isinstance(titles, list) and titles:
-        lines = [
-            item.get("text") if isinstance(item, dict) else str(item)
-            for item in titles
-        ]
-        return "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
     scan = data.get("scan")
     if isinstance(scan, dict):
-        level = RISK_LABELS.get(scan.get("risk_level"), scan.get("risk_level"))
-        return f"风险等级：{level}；命中 {scan.get('total', 0)} 处"
-    if data.get("score") is not None:
-        fixes = data.get("fixes") or data.get("drift") or []
-        suffix = f"；建议：{'；'.join(map(str, fixes[:3]))}" if fixes else ""
-        return f"评分 {data['score']}{suffix}"
-    if data.get("path"):
-        return f"已生成文件：{data['path']}"
-    return json.dumps(data, ensure_ascii=False)[:2000]
+        level = scan.get("risk_level")
+        label = RISK_LABELS.get(level, level) if isinstance(level, str) else "未知"
+        total = scan.get("total")
+        if isinstance(total, int) and not isinstance(total, bool):
+            return f"风险等级：{label}；命中 {total} 处"
+        return f"风险等级：{label}"
+    verdict = data.get("verdict")
+    if isinstance(verdict, str) and verdict:
+        head = VERDICT_LABELS.get(verdict, verdict)
+        score = data.get("score")
+        if isinstance(score, int) and not isinstance(score, bool):
+            head += f"（{score} 分）"
+        reasons = data.get("reasons")
+        if isinstance(reasons, list) and reasons:
+            head += f"；理由：{'；'.join(str(r) for r in reasons[:3])}"
+        return head
+    summary = data.get("summary")
+    if isinstance(summary, str) and summary:
+        return f"风险等级：{RISK_LABELS[summary]}" if summary in RISK_LABELS else summary
+    reply = data.get("reply")
+    if isinstance(reply, str) and reply:
+        return reply
+    titles = data.get("titles")
+    if isinstance(titles, list):
+        lines = []
+        for item in titles:
+            text = item.get("text") if isinstance(item, dict) else item
+            if text is not None and str(text):
+                lines.append(str(text))
+        if lines:
+            return "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
+    score = data.get("score")
+    if isinstance(score, int) and not isinstance(score, bool):
+        fixes = data.get("fixes") or data.get("drift")
+        suffix = ""
+        if isinstance(fixes, (list, tuple)) and fixes:
+            suffix = f"；建议：{'；'.join(str(item) for item in fixes[:3])}"
+        return f"评分 {score}{suffix}"
+    path = data.get("path")
+    if isinstance(path, str) and path:
+        return f"已生成文件：{path}"
+    return "已完成，请查看结构化结果。"
 
 
 @router.post("", response_model=ChatOut)
@@ -102,9 +119,7 @@ async def chat(
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> ChatOut:
     settings = get_settings()
-    output_dir = str(
-        settings.outputs_dir / "adhoc" / user.tenant_id / uuid.uuid4().hex
-    )
+    output_dir = str(adhoc_output_dir(user.tenant_id))
     intent = route_intent(payload.message, output_dir=output_dir)
     if intent.kind == "chat":
         profile_block = await profile_block_for(
@@ -131,15 +146,29 @@ async def chat(
         raise AppError("not_found", str(exc), 404) from exc
     await require_enabled(session, user.tenant_id, skill_id)
 
-    declared = skill.manifest.inputs.get("properties", {})
-    inputs = {k: v for k, v in intent.inputs.items() if k in declared}
+    declared = skill.manifest.inputs.get("properties") or {}
+    merged = {**intent.inputs, **(payload.inputs or {})}
+    inputs = declared_inputs(skill, merged)
+    if "output_dir" in declared:
+        inputs["output_dir"] = output_dir
     missing = [
         key for key in skill.manifest.inputs.get("required", [])
         if key not in inputs or inputs[key] in (None, "", [], {})
     ]
+    profile_block = await profile_block_for(
+        session, payload.profile_id, user.tenant_id
+    )
     if missing:
+        labels = []
+        for key in missing:
+            spec = declared.get(key)
+            desc = spec.get("description") if isinstance(spec, dict) else None
+            labels.append(f"{key}（{desc}）" if desc else key)
         return ChatOut(
-            reply=f"要执行「{skill.manifest.name}」，还需要：{'、'.join(missing)}。请补充这些信息后再试。",
+            reply=(
+                f"要执行「{skill.manifest.name}」，还需要：{'、'.join(labels)}。"
+                "请通过 inputs 补充后重试。"
+            ),
             intent="skill",
             skill_id=skill_id,
             missing=missing,
@@ -148,14 +177,8 @@ async def chat(
         jsonschema.validate(inputs, skill.manifest.inputs)
     except jsonschema.ValidationError as exc:
         raise AppError(
-            "missing_inputs",
-            MISSING_INPUTS_MESSAGE,
-            400,
-            detail={"reason": exc.message},
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
         ) from exc
-    profile_block = await profile_block_for(
-        session, payload.profile_id, user.tenant_id
-    )
     gateway = await load_gateway_default(session, user.tenant_id)
     executor = SkillExecutor(
         registry=registry,
@@ -171,10 +194,7 @@ async def chat(
         raise AppError("not_found", str(exc), 404) from exc
     except jsonschema.ValidationError as exc:
         raise AppError(
-            "missing_inputs",
-            MISSING_INPUTS_MESSAGE,
-            400,
-            detail={"reason": exc.message},
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
         ) from exc
     except ScriptError as exc:
         raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc

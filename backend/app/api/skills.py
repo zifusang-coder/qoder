@@ -17,9 +17,10 @@ from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.skill import SkillSetting
 from app.models.user import User
+from app.services.outputs import adhoc_output_dir
 from app.services.profiles import profile_block_for
 from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
-from app.skills.executor import SkillExecutor
+from app.skills.executor import SkillExecutor, declared_inputs
 from app.skills.manifest import LoadedSkill, ManifestError
 from app.skills.registry import SkillRegistry, get_registry
 from app.skills.runner import ScriptError
@@ -91,10 +92,12 @@ def _registry_skill(registry: SkillRegistry, skill_id: str) -> LoadedSkill:
         raise AppError("not_found", str(exc), 404) from exc
 
 
-async def _profile_block(
-    session: AsyncSession, profile_id: uuid.UUID | None, user: User
-) -> str:
-    return await profile_block_for(session, profile_id, user.tenant_id)
+def _prepare_inputs(skill: LoadedSkill, inputs: dict, tenant_id: str) -> dict:
+    prepared = declared_inputs(skill, inputs)
+    if "output_dir" in (skill.manifest.inputs.get("properties") or {}):
+        # 服务端生成按租户隔离的单次运行目录，避免调用方写入任意路径
+        prepared["output_dir"] = str(adhoc_output_dir(tenant_id))
+    return prepared
 
 
 def _validate_inputs(skill: LoadedSkill, inputs: dict) -> None:
@@ -192,8 +195,11 @@ async def run_skill(
 ) -> RunOut:
     skill = _registry_skill(registry, skill_id)
     await _require_enabled(session, user.tenant_id, skill_id)
-    _validate_inputs(skill, payload.inputs)
-    profile_block = await _profile_block(session, payload.profile_id, user)
+    inputs = _prepare_inputs(skill, payload.inputs, user.tenant_id)
+    _validate_inputs(skill, inputs)
+    profile_block = await profile_block_for(
+        session, payload.profile_id, user.tenant_id
+    )
     gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
         registry=registry,
@@ -204,7 +210,7 @@ async def run_skill(
         created_by=user.id,
     )
     try:
-        result = await executor.run(skill_id, payload.inputs)
+        result = await executor.run(skill_id, inputs)
     except ManifestError as exc:
         raise AppError("not_found", str(exc), 404) from exc
     except jsonschema.ValidationError as exc:
@@ -240,8 +246,11 @@ async def stream_skill(
 ) -> EventSourceResponse:
     skill = _registry_skill(registry, skill_id)
     await _require_enabled(session, user.tenant_id, skill_id)
-    _validate_inputs(skill, payload.inputs)
-    profile_block = await _profile_block(session, payload.profile_id, user)
+    inputs = _prepare_inputs(skill, payload.inputs, user.tenant_id)
+    _validate_inputs(skill, inputs)
+    profile_block = await profile_block_for(
+        session, payload.profile_id, user.tenant_id
+    )
     gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
         registry=registry,
@@ -251,7 +260,7 @@ async def stream_skill(
         profile_block=profile_block,
         created_by=user.id,
     )
-    messages = executor.build_messages(skill, payload.inputs)
+    messages = executor.build_messages(skill, inputs)
 
     async def event_gen() -> AsyncIterator[dict[str, str]]:
         try:

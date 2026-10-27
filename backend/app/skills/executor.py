@@ -46,6 +46,11 @@ def _repair_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+def declared_inputs(skill: LoadedSkill, inputs: dict) -> dict:
+    properties = skill.manifest.inputs.get("properties") or {}
+    return {key: value for key, value in inputs.items() if key in properties}
+
+
 def parse_json_output(text: str) -> dict:
     cleaned = strip_fences(text)
     try:
@@ -76,6 +81,7 @@ class SkillExecutor:
         self.created_by = created_by
 
     def build_messages(self, skill: LoadedSkill, inputs: dict) -> list[dict[str, str]]:
+        inputs = declared_inputs(skill, inputs)
         system = skill.prompt.strip()
         if skill.manifest.profile and self.profile_block:
             system += "\n\n" + self.profile_block
@@ -146,6 +152,7 @@ class SkillExecutor:
 
     async def run(self, skill_id: str, inputs: dict) -> SkillRunResult:
         skill = self.registry.get(skill_id)
+        inputs = declared_inputs(skill, inputs)
         started = time.monotonic()
         record = await self._open_run(skill_id, inputs)
         run_id = record.id

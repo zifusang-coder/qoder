@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
+from typing import Literal
 
 # 规则按“先具体、后泛化”排列：具体动作（改写/风险/复盘等）优先于
 # 平台或体裁名词（公众号/小红书/笔记/标题），避免被泛词抢先命中。
 RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("content-repurposing", ("改写", "一稿多改", "改成", "转成")),
+    ("content-repurposing", ("改写", "一稿多改")),
     ("cover-card", ("封面",)),
     ("risk-scan", ("风险", "合规", "违规")),
     ("postmortem", ("复盘", "数据分析")),
@@ -12,7 +13,7 @@ RULES: list[tuple[str, tuple[str, ...]]] = [
     ("article-outline", ("大纲", "提纲")),
     ("wechat-article", ("公众号文章", "公众号长文", "写公众号", "微信文章")),
     ("xhs-note", ("小红书", "笔记")),
-    ("copywriting", ("口播", "短视频文案", "抖音文案", "知乎回答")),
+    ("copywriting", ("口播", "短视频文案", "抖音", "知乎")),
 ]
 
 PLATFORM_HINTS = {
@@ -30,7 +31,7 @@ PLATFORM_HINTS = {
 
 @dataclass
 class Intent:
-    kind: str
+    kind: Literal["chat", "skill"]
     skill_id: str | None = None
     inputs: dict = field(default_factory=dict)
 
@@ -60,7 +61,7 @@ def _skill_inputs(skill_id: str, text: str, platform: str, output_dir: str) -> d
     return {"topic": text, "platform": platform}
 
 
-def route_intent(message: str, *, output_dir: str = "outputs/adhoc") -> Intent:
+def route_intent(message: str, *, output_dir: str) -> Intent:
     text = message.strip()
     for skill_id, keywords in RULES:
         if any(word in text for word in keywords):
