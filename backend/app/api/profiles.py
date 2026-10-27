@@ -56,8 +56,16 @@ class ProfileUpdate(BaseModel):
     is_active: bool | None = None
 
 
-class ProfileOut(ProfileIn):
+class ProfileOut(BaseModel):
     id: str
+    name: str
+    account_name: str
+    positioning: str
+    audience: str
+    tone: str
+    taboos: list[str]
+    goals: list[str]
+    platform_focus: list[str]
     is_active: bool
 
 
@@ -74,8 +82,12 @@ class MemoryIn(BaseModel):
     tags: list[_TAG] = Field(default_factory=list, max_length=20)
 
 
-class MemoryOut(MemoryIn):
+class MemoryOut(BaseModel):
     id: str
+    content: str
+    kind: str
+    weight: float
+    tags: list[str]
     source: str
 
 

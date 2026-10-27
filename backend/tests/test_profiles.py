@@ -589,3 +589,51 @@ async def test_delete_profile_cascades_memories(client, db_session):
     ).scalars().all()
     assert rows == []
     assert await db_session.get(ProfileMemory, memory_id) is None
+
+
+async def test_profile_response_accepts_out_of_band_values(client, db_session):
+    # 绕过输入校验直接写库，响应模型不应因超长内容而 500
+    positioning = "x" * 6000
+    profile = Profile(
+        tenant_id=DEFAULT_TENANT_ID,
+        name="越界画像",
+        positioning=positioning,
+    )
+    db_session.add(profile)
+    await db_session.commit()
+    profile_id = profile.id
+
+    listed = await client.get("/api/profiles")
+    assert listed.status_code == 200
+    [item] = listed.json()["items"]
+    assert item["name"] == "越界画像"
+    assert item["positioning"] == positioning
+
+    fetched = await client.get(f"/api/profiles/{profile_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["positioning"] == positioning
+
+
+async def test_memory_response_accepts_out_of_band_values(client, db_session):
+    # 绕过输入校验直接写库，响应模型不应因超长内容或越界权重而 500
+    profile = Profile(tenant_id=DEFAULT_TENANT_ID, name="越界画像")
+    db_session.add(profile)
+    await db_session.commit()
+
+    content = "y" * 6000
+    db_session.add(
+        ProfileMemory(
+            tenant_id=DEFAULT_TENANT_ID,
+            profile_id=profile.id,
+            content=content,
+            weight=150.0,
+        )
+    )
+    await db_session.commit()
+
+    listed = await client.get(f"/api/profiles/{profile.id}/memories")
+    assert listed.status_code == 200
+    [item] = listed.json()
+    assert item["content"] == content
+    assert item["weight"] == 150.0
+
