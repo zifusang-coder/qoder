@@ -785,7 +785,7 @@ async def test_login_rejects_wrong_password(db_session):
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cd backend && python -m pytest tests/test_auth.py -q`
+Run: `cd backend && uv run pytest tests/test_auth.py -q`
 Expected: FAIL（404 或导入错误）
 
 - [ ] **Step 3: 写 `backend/app/errors.py`**
@@ -825,8 +825,10 @@ class User(TenantScoped):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(100), default="运营同学")
-    is_admin: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
 ```
+
+管理员身份由 `seed.py` 显式传入 `is_admin=True`；普通用户默认非管理员。
 
 - [ ] **Step 5: 写 `backend/app/security.py`**
 
@@ -837,7 +839,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerificationError
 from cryptography.fernet import Fernet
 
 from app.config import get_settings
@@ -852,7 +854,7 @@ def hash_password(raw: str) -> str:
 def verify_password(raw: str, hashed: str) -> bool:
     try:
         return _hasher.verify(hashed, raw)
-    except VerifyMismatchError:
+    except (VerificationError, InvalidHashError):
         return False
 
 
@@ -869,7 +871,12 @@ def create_token(subject: str, tenant_id: str) -> str:
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"])
+    return jwt.decode(
+        token,
+        get_settings().jwt_secret,
+        algorithms=["HS256"],
+        options={"require": ["sub", "tid", "iat", "exp"]},
+    )
 
 
 def _fernet() -> Fernet:
@@ -908,11 +915,13 @@ async def get_current_user(
         payload = decode_token(authorization.removeprefix("Bearer ").strip())
     except Exception as exc:  # token 过期、签名错误统一按未授权处理
         raise AppError("unauthorized", "登录已失效，请重新登录", 401) from exc
+    subject = payload.get("sub")
+    tenant_id = payload.get("tid")
+    if not subject or not tenant_id:
+        raise AppError("unauthorized", "登录已失效，请重新登录", 401)
     user = (
         await session.execute(
-            select(User).where(
-                User.email == payload["sub"], User.tenant_id == payload["tid"]
-            )
+            select(User).where(User.email == subject, User.tenant_id == tenant_id)
         )
     ).scalar_one_or_none()
     if user is None:
@@ -924,6 +933,7 @@ async def get_current_user(
 
 ```python
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -933,19 +943,24 @@ from app.security import hash_password
 
 async def ensure_admin(session: AsyncSession) -> None:
     settings = get_settings()
+    email = settings.admin_email.strip().lower()
     existing = (
-        await session.execute(select(User).where(User.email == settings.admin_email))
+        await session.execute(select(User).where(User.email == email))
     ).scalar_one_or_none()
     if existing:
         return
     session.add(
         User(
-            email=settings.admin_email,
+            email=email,
             password_hash=hash_password(settings.admin_password),
             display_name="管理员",
+            is_admin=True,
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
 ```
 
 - [ ] **Step 8: 写 `backend/app/api/auth.py` 与 `backend/app/api/__init__.py`**
@@ -954,7 +969,7 @@ async def ensure_admin(session: AsyncSession) -> None:
 
 ```python
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -962,14 +977,21 @@ from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
 from app.models.user import User
-from app.security import create_token, verify_password
+from app.security import create_token, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+_DUMMY_HASH = hash_password("timing-only-dummy-password")
+
 
 class LoginIn(BaseModel):
-    email: EmailStr
+    email: str
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
 
 
 class TokenOut(BaseModel):
@@ -988,7 +1010,10 @@ async def login(payload: LoginIn, session: AsyncSession = Depends(get_session)) 
     user = (
         await session.execute(select(User).where(User.email == payload.email))
     ).scalar_one_or_none()
-    if user is None or not verify_password(payload.password, user.password_hash):
+    if user is None:
+        verify_password(payload.password, _DUMMY_HASH)
+        raise AppError("invalid_credentials", "邮箱或密码错误", 401)
+    if not verify_password(payload.password, user.password_hash):
         raise AppError("invalid_credentials", "邮箱或密码错误", 401)
     return TokenOut(
         access_token=create_token(user.email, user.tenant_id),
@@ -1071,13 +1096,20 @@ async def test_login_rejects_wrong_password(db_session):
 
 - [ ] **Step 10: 运行测试**
 
-Run: `cd backend && python -m pytest tests/test_auth.py -q`
-Expected: `1 passed`（401 来自真实校验而非 404）
+Run: `cd backend && uv run pytest tests/test_auth.py -q`
+Expected: `7 passed`（401 来自真实校验而非 404）
+
+除计划中的错误密码用例外，再补齐以下用例（同一 override 模式）：登录成功并访问 `/me`、无 token 访问 `/me`、未知邮箱、过期 token、签名被篡改、密码哈希损坏。它们分别覆盖主路径与三类失败路径，保证后续所有依赖 `get_current_user` 的路由都被可信地保护。
 
 - [ ] **Step 11: 生成迁移并提交**
 
 ```bash
-cd backend && alembic revision --autogenerate -m "add users"
+make up                                # 需要 Postgres 才能 autogenerate
+cd backend
+uv run alembic revision --autogenerate -m "add users"
+uv run alembic upgrade head
+uv run alembic check                   # 期望：No new upgrade operations detected.
+cd .. && make down                     # 验证后收掉本项目容器
 git add backend/app backend/tests backend/migrations
 git commit -m "feat: add JWT auth, password hashing and admin seed"
 ```
