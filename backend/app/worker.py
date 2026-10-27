@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
 from app.models.publish import PublishJob
-from app.publish.base import PublisherAdapter
+from app.publish.base import PublisherAdapter, PublishError
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
 from app.services.publish import (
@@ -97,6 +97,9 @@ async def reconcile_stale_publishing(
                 fields={"error": STALE_PUBLISH_MESSAGE},
             )
             reconciled += 1
+        except (InvalidTransition, JobNotFound):
+            # 任务在 SELECT 与 fail 之间被其他执行者推进，属于正常竞态
+            await session.rollback()
         except Exception:
             logger.exception("悬挂发布任务对账失败 job=%s", job_id)
             await session.rollback()
@@ -148,13 +151,15 @@ async def publish_due_jobs(
         except Exception:
             logger.exception("悬挂发布任务对账失败")
             await session.rollback()
-        due = await list_due_jobs(session, current)
-        if len(due) >= MAX_BATCH_SIZE:
+        # 多取一条用于判断是否仍有剩余任务，避免恰好一批时误报截断
+        due = await list_due_jobs(session, current, limit=MAX_BATCH_SIZE + 1)
+        truncated = len(due) > MAX_BATCH_SIZE
+        if truncated:
             logger.warning(
                 "到期发布任务达到单批上限 %s，剩余任务将在下一次扫描执行",
                 MAX_BATCH_SIZE,
             )
-        targets = [(job.id, job.tenant_id) for job in due]
+        targets = [(job.id, job.tenant_id) for job in due[:MAX_BATCH_SIZE]]
 
     adapter = adapter_factory()
     executed = 0
@@ -187,9 +192,13 @@ async def publish_due_jobs(
                     continue
                 logger.warning("定时发布任务执行失败 job=%s: %s", job_id, exc.message)
                 await session.rollback()
-            except Exception as exc:  # noqa: BLE001 - 未预期异常不能阻断同批后续任务
-                # 适配器失败已由 execute_job 落库 publish_failed，这里只记录并继续
-                logger.warning("定时发布任务执行失败 job=%s: %s", job_id, exc)
+            except Exception as exc:
+                # 未预期异常不能阻断同批后续任务
+                if isinstance(exc, PublishError):
+                    # 适配器失败已由 execute_job 落库 publish_failed，只记录即可
+                    logger.warning("定时发布失败 job=%s error=%s", job_id, exc)
+                else:
+                    logger.exception("定时发布异常 job=%s", job_id)
                 await session.rollback()
     return executed
 
