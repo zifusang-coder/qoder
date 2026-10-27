@@ -13,7 +13,7 @@
 - [x] 一稿多改复用/创建目标平台内容并生成独立版本（验证方式：自动化 `tests/test_repurpose.py`、`tests/test_e2e.py`）
 - [x] 对话可按关键词路由到技能，未命中时进入通用问答（验证方式：自动化 `tests/test_chat.py`；真实模型回答未验收）
 - [x] 发布前检查定位禁用词字符位置，人设禁区仅告警不阻断（验证方式：自动化 `tests/test_precheck.py`）
-- [x] 非法状态跃迁返回 409 `invalid_transition`（验证方式：自动化 `tests/test_publish.py`）
+- [x] 非法状态跃迁返回 409：人工动作返回 `invalid_transition`，发布前检查/执行/导出守卫返回 `invalid_state`（验证方式：自动化 `tests/test_publish.py`）
 - [x] 公众号发布经审核后创建草稿并记录 `media_id`（验证方式：自动化 `tests/test_wechat_publish.py`，使用 respx 模拟微信接口；真实公众号未验收）
 - [x] 小红书/知乎/快手/视频号导出 zip，包含 `manifest.json`、`content.md`、`publish_guide.md`（验证方式：自动化 `tests/test_export.py`、`tests/test_e2e.py`）
 - [x] 定时任务只扫描到期的已审核公众号任务，执行幂等且不重复发布（验证方式：自动化 `tests/test_worker.py`；真实 Redis + arq 未验收）
@@ -23,7 +23,7 @@
 ## 安全与合规
 
 - [x] LLM 提供商与平台密钥加密存储，接口只返回掩码（验证方式：自动化 `tests/test_settings_api.py`、`tests/test_wechat_publish.py`）
-- [x] 发布必须经过 `awaiting_review → approved`，导出不绕过人工审核（验证方式：自动化 `tests/test_publish.py`、`tests/test_export.py`、`tests/test_e2e.py`）
+- [x] 自动发布必须经过 `awaiting_review → approved`；人工导出仅为素材打包，允许 `draft`/`awaiting_review`/`approved`，不会向平台发布内容（验证方式：自动化 `tests/test_publish.py`、`tests/test_export.py`、`tests/test_e2e.py`）
 - [x] 后处理脚本无 shell、环境变量白名单、30 秒超时（验证方式：自动化 `tests/test_script_runner.py`）
 - [x] 受保护接口未认证访问返回 401（验证方式：自动化 `tests/test_auth.py`、`tests/test_profiles.py` 等）
 - [x] 业务查询按 `tenant_id` 过滤，跨租户资源不可见（验证方式：自动化 `tests/test_profiles.py`、`tests/test_publish.py`、`tests/test_analytics.py`、`tests/test_postmortem.py`）
