@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,14 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
-from app.models.analytics import AnalyticsSnapshot
 from app.models.project import Content, Project
 from app.models.user import User
-from app.services.analytics import import_csv
+from app.services.analytics import import_csv, latest_snapshots
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 MAX_CSV_BYTES = 5 * 1024 * 1024
+# multipart 边界与表单字段的容差，超过该声明长度直接拒绝
+CONTENT_LENGTH_SLACK = 1024 * 1024
 
 
 class ImportResult(BaseModel):
@@ -56,10 +57,20 @@ class OverviewOut(BaseModel):
 
 @router.post("/import", response_model=ImportResult)
 async def import_analytics(
+    request: Request,
     file: Annotated[UploadFile, File()],
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ImportResult:
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except ValueError:
+            declared_size = 0
+        if declared_size > MAX_CSV_BYTES + CONTENT_LENGTH_SLACK:
+            raise AppError("file_too_large", "CSV 超过 5MB", 413)
+
     chunks: list[bytes] = []
     size = 0
     while chunk := await file.read(1024 * 1024):
@@ -99,23 +110,9 @@ async def get_overview(
         )
     ).scalars().all()
 
-    latest: dict[uuid.UUID, AnalyticsSnapshot] = {}
-    if contents:
-        snapshots = (
-            await session.execute(
-                select(AnalyticsSnapshot)
-                .where(
-                    AnalyticsSnapshot.tenant_id == user.tenant_id,
-                    AnalyticsSnapshot.content_id.in_([c.id for c in contents]),
-                )
-                .order_by(
-                    AnalyticsSnapshot.captured_at.desc(),
-                    AnalyticsSnapshot.created_at.desc(),
-                )
-            )
-        ).scalars().all()
-        for snapshot in snapshots:
-            latest.setdefault(snapshot.content_id, snapshot)
+    latest = await latest_snapshots(
+        session, user.tenant_id, [content.id for content in contents]
+    )
 
     items: list[OverviewItem] = []
     totals = OverviewTotals()

@@ -26,12 +26,12 @@ def upgrade() -> None:
         sa.Column("content_id", sa.Uuid(), nullable=False),
         sa.Column("platform", sa.String(length=32), nullable=False),
         sa.Column("captured_at", sa.Date(), nullable=False),
-        sa.Column("views", sa.Integer(), nullable=False),
-        sa.Column("likes", sa.Integer(), nullable=False),
-        sa.Column("comments", sa.Integer(), nullable=False),
-        sa.Column("shares", sa.Integer(), nullable=False),
-        sa.Column("saves", sa.Integer(), nullable=False),
-        sa.Column("followers_delta", sa.Integer(), nullable=False),
+        sa.Column("views", sa.BigInteger(), nullable=False),
+        sa.Column("likes", sa.BigInteger(), nullable=False),
+        sa.Column("comments", sa.BigInteger(), nullable=False),
+        sa.Column("shares", sa.BigInteger(), nullable=False),
+        sa.Column("saves", sa.BigInteger(), nullable=False),
+        sa.Column("followers_delta", sa.BigInteger(), nullable=False),
         sa.Column(
             "raw",
             sa.JSON().with_variant(
@@ -80,10 +80,20 @@ def upgrade() -> None:
         ["tenant_id"],
         unique=False,
     )
+    op.create_index(
+        "ix_analytics_snapshots_tenant_content_captured",
+        "analytics_snapshots",
+        ["tenant_id", "content_id", "captured_at"],
+        unique=False,
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    op.drop_index(
+        "ix_analytics_snapshots_tenant_content_captured",
+        table_name="analytics_snapshots",
+    )
     op.drop_index(
         op.f("ix_analytics_snapshots_tenant_id"),
         table_name="analytics_snapshots",
