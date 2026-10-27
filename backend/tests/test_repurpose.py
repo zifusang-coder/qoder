@@ -71,6 +71,7 @@ async def test_upload_rejects_oversized_and_sanitizes_filename(
     from app.api import projects as projects_api
     from app.main import app
 
+    assert projects_api.MAX_UPLOAD_BYTES == 10 * 1024 * 1024
     app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
     monkeypatch.setattr(projects_api, "MAX_UPLOAD_BYTES", 4)
     try:

@@ -3,13 +3,14 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from app.llm.types import Usage
 from app.skills.registry import SkillRegistry, get_registry
 from app.storage import Storage, get_storage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
-CLEAN_BODY = "# 一稿多改实战\n\n" + "把一件事讲清楚，比堆砌概念更重要。" * 30
-REPURPOSED_BODY = "# 小红书版\n\n" + "把一件事讲清楚，比堆砌概念更重要。" * 30
+PARAGRAPH = "把一件事讲清楚，比堆砌概念更重要。"
+# 正文需超过平台最短长度阈值，避免发布前检查出现 too_short 警告。
+CLEAN_BODY = "# 一稿多改实战\n\n" + PARAGRAPH * 30
+REPURPOSED_BODY = "# 小红书版\n\n" + PARAGRAPH * 30
 POSTMORTEM = {
     "verdict": "超预期",
     "what_worked": ["开头具体"],
@@ -26,13 +27,17 @@ CSV_HEADER = (
 
 
 class E2EGateway:
-    last_usage = Usage(30, 40)
+    def __init__(self):
+        self.calls: list[dict] = []
 
     async def complete(self, messages, **kwargs):
         inputs = json.loads(messages[-1]["content"])
+        self.calls.append(inputs)
         if "metrics" in inputs:
             return json.dumps(POSTMORTEM, ensure_ascii=False)
-        return REPURPOSED_BODY
+        if "topic" in inputs:
+            return REPURPOSED_BODY
+        raise AssertionError(f"未预期的 LLM 输入: {sorted(inputs)}")
 
 
 async def test_full_mvp_flow(client, tmp_path, monkeypatch):
@@ -99,11 +104,12 @@ async def test_full_mvp_flow(client, tmp_path, monkeypatch):
         contents = (
             await client.get(f"/api/projects/{project['id']}/contents")
         ).json()
-        assert isinstance(contents, list)
+        assert len(contents) == 2
         xiaohongshu = next(
             item for item in contents if item["platform"] == "xiaohongshu"
         )
         assert xiaohongshu["id"] == repurposed["content_id"]
+        assert xiaohongshu["id"] != content["id"]
         assert xiaohongshu["current_version"] == 1
 
         # 发布：创建任务 → 发布前检查 → 人工审核 → 导出
@@ -162,19 +168,34 @@ async def test_full_mvp_flow(client, tmp_path, monkeypatch):
         assert manifest["content_version"] == 1
         assert REPURPOSED_BODY in exported_body
 
-        # 数据导入：CSV 平台必须与内容平台一致
+        # 数据导入：重复导入同一天应 upsert，不产生重复行
         csv_body = (
             CSV_HEADER
             + "\n"
             + f"{xiaohongshu['id']},xiaohongshu,2026-10-22,"
             "2000,120,18,25,10,7\n"
         ).encode("utf-8")
-        imported_response = await client.post(
-            "/api/analytics/import",
-            files={"file": ("analytics.csv", csv_body, "text/csv")},
+        for _ in range(2):
+            imported_response = await client.post(
+                "/api/analytics/import",
+                files={"file": ("analytics.csv", csv_body, "text/csv")},
+            )
+            assert imported_response.status_code == 200
+            assert imported_response.json() == {"upserted": 1, "errors": []}
+
+        overview_response = await client.get(
+            "/api/analytics/overview", params={"project_id": project["id"]}
         )
-        assert imported_response.status_code == 200
-        assert imported_response.json() == {"upserted": 1, "errors": []}
+        assert overview_response.status_code == 200
+        overview = overview_response.json()
+        assert overview["totals"]["views"] == 2000
+        rows = [
+            item
+            for item in overview["items"]
+            if item["content_id"] == xiaohongshu["id"]
+        ]
+        assert len(rows) == 1
+        assert rows[0]["views"] == 2000
 
         # 复盘：生成报告并把经验回写画像记忆
         postmortem_response = await client.post(
@@ -219,6 +240,16 @@ async def test_full_mvp_flow(client, tmp_path, monkeypatch):
         assert versions[0]["title"] == "小红书版二稿"
         assert versions[1]["body"] == REPURPOSED_BODY
         assert versions[1]["source"] == "skill"
+
+        contents_after = (
+            await client.get(f"/api/projects/{project['id']}/contents")
+        ).json()
+        updated = next(
+            item for item in contents_after if item["id"] == xiaohongshu["id"]
+        )
+        assert updated["current_version"] == 2
+        assert len(gateway.calls) == 2
+        assert "metrics" in gateway.calls[1]
     finally:
         app.dependency_overrides.pop(get_registry, None)
         app.dependency_overrides.pop(get_storage, None)
