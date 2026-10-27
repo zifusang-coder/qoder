@@ -46,6 +46,18 @@ async def test_cover_card_rejects_path_escape():
         )
 
 
+async def test_cover_card_rejects_absolute_path_escape():
+    with pytest.raises(ScriptError, match="outputs"):
+        await run_script(
+            SKILLS / "cover-card" / "scripts" / "render_cover.py",
+            {
+                "inputs": {"title": "越界", "output_dir": "/tmp/nmedia-escape"},
+                "output": {"subtitle": "x"},
+            },
+            SKILLS / "cover-card",
+        )
+
+
 async def test_format_check_flags_banned_words():
     result = await run_script(
         SKILLS / "quality-gate" / "scripts" / "format_check.py",
@@ -85,3 +97,31 @@ async def test_keyword_scan_marks_two_hits_high():
     assert result["scan"]["total"] >= 2
     words = {hit["word"] for hit in result["scan"]["hits"]}
     assert {"全网最低", "100%有效"} <= words
+
+
+async def test_keyword_scan_counts_repeated_occurrences():
+    result = await run_script(
+        SKILLS / "risk-scan" / "scripts" / "keyword_scan.py",
+        {
+            "inputs": {"text": "最佳最佳最佳"},
+            "output": {"reviewed_points": [], "summary": "low"},
+        },
+        SKILLS / "risk-scan",
+    )
+    assert result["scan"]["total"] == 3
+    assert result["scan"]["risk_level"] == "high"
+    assert result["summary"] == "high"
+
+
+async def test_keyword_scan_indexes_input_text_only():
+    result = await run_script(
+        SKILLS / "risk-scan" / "scripts" / "keyword_scan.py",
+        {
+            "inputs": {"text": "保证"},
+            "output": {"reviewed_points": ["绝对安全"]},
+        },
+        SKILLS / "risk-scan",
+    )
+    hits = result["scan"]["hits"]
+    assert hits and hits[0]["index"] == 0
+    assert all(hit["word"] == "保证" for hit in hits)

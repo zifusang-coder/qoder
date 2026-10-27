@@ -1,23 +1,16 @@
 import json
+import re
 import sys
 from pathlib import Path
+
+MAX_HITS = 100
 
 
 def main() -> None:
     payload = json.load(sys.stdin)
     inputs = payload.get("inputs") or {}
     output = payload.get("output") or {}
-    parts = [str(inputs.get("text", ""))]
-    if isinstance(output, dict):
-        for key, value in output.items():
-            if key == "reviewed_points":
-                continue
-            if isinstance(value, str):
-                parts.append(value)
-        points = output.get("reviewed_points") or []
-        if isinstance(points, list):
-            parts.extend(str(item) for item in points if isinstance(item, str))
-    text = " ".join(part for part in parts if part)
+    text = str(inputs.get("text", ""))
 
     words = [
         w.strip()
@@ -28,8 +21,8 @@ def main() -> None:
     ]
     hits = []
     for word in words:
-        start = text.find(word)
-        if start >= 0:
+        for match in re.finditer(re.escape(word), text):
+            start = match.start()
             hits.append(
                 {
                     "word": word,
@@ -37,10 +30,20 @@ def main() -> None:
                     "context": text[max(0, start - 10) : start + len(word) + 10],
                 }
             )
+            if len(hits) >= MAX_HITS:
+                break
+        if len(hits) >= MAX_HITS:
+            break
 
     level = "high" if len(hits) >= 2 else "medium" if hits else "low"
-    merged = dict(output) if isinstance(output, dict) else {"text": text}
-    merged["scan"] = {"risk_level": level, "hits": hits, "total": len(hits)}
+    merged = dict(output) if isinstance(output, dict) else {}
+    merged["summary"] = level
+    merged["scan"] = {
+        "risk_level": level,
+        "hits": hits,
+        "total": len(hits),
+        "truncated": len(hits) >= MAX_HITS,
+    }
     print(json.dumps(merged, ensure_ascii=False))
 
 

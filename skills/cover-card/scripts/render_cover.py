@@ -11,8 +11,10 @@ THEMES = {
 }
 FONT_CANDIDATES = [
     "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 ]
 W, H = 1080, 1440
 ROOT = Path(__file__).resolve().parents[3]
@@ -26,6 +28,7 @@ def load_font(size: int):
                 return ImageFont.truetype(candidate, size)
             except OSError:
                 continue
+    print("警告：未找到中文字体，使用默认字体", file=sys.stderr)
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
@@ -55,10 +58,12 @@ def main() -> None:
     inputs = payload.get("inputs", {})
     output = payload.get("output") or {}
     title = str(inputs.get("title", "")).strip()
-    subtitle = str(output.get("subtitle") or inputs.get("subtitle") or "").strip()
+    subtitle = str(inputs.get("subtitle") or output.get("subtitle") or "").strip()
     theme_name = str(inputs.get("theme", "dark"))
     if not title:
         raise SystemExit("title 不能为空")
+    if len(subtitle) > 18:
+        subtitle = subtitle[:17] + "…"
     if theme_name not in THEMES:
         raise SystemExit(f"非法 theme：{theme_name}")
     raw_dir = str(inputs.get("output_dir") or "").strip()
