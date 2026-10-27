@@ -388,11 +388,19 @@ exported / published: 终态
 ### 4.5 归因与画像回写
 
 - **数据采集**:
-  - 公众号:官方数据统计接口(阅读、分享、涨粉),每日定时拉取。
+  - 一期已落地:手动 CSV 导入(见 4.5.1);公众号官方数据统计接口(阅读、分享、涨粉)的每日定时拉取尚未实现。
   - 其它平台:一期手动录入/CSV 导入(字段映射模板),二期探索官方开放数据或授权采集。
-- **指标快照**:`analytics_snapshots` 按 `publish_receipt × 日期` 存储,保留原始 jsonb 以便指标扩展。
+- **指标快照**:`analytics_snapshots` 按 `内容 × 平台 × 日期` 唯一,六项指标(阅读/点赞/评论/转发/收藏/涨粉)使用 bigint,保留原始 `raw` jsonb 以便指标扩展。
 - **复盘报告**:`postmortem` 技能基于快照 + 画像生成结论(有效结构、失败原因、下步建议)。
 - **回写**:报告确认后抽取记忆写入 `profile_memories`,标注数据来源,可人工编辑/删除。
+
+#### 4.5.1 CSV 指标导入与项目概览(Task 1.17 已落地)
+
+- 导入:`POST /api/analytics/import`,multipart CSV,5MB 上限;必需列 `content_id / platform / captured_at`;逐行校验租户归属、严格 `YYYY-MM-DD`、ASCII 非负整数、平台与内容一致、拒绝 NUL/控制字符;坏行跳过并返回错误列表(最多 100 条),不中断整批。
+- 幂等:按 `(tenant_id, content_id, platform, captured_at)` 使用方言 `INSERT ... ON CONFLICT DO UPDATE` 批量 upsert,同一日期重复导入覆盖指标与原始行;`upserted` 统计成功处理行数。
+- 概览:`GET /api/analytics/overview?project_id=`,按租户校验项目;用窗口函数一次取出每个内容的最新快照,合计只累加最新值,并计算互动率 `(点赞+评论+转发+收藏)/阅读`;无数据内容返回 `has_data=false`。
+- 错误语义:缺少/重复列、编码错误、CSV 结构错误 → 422 `invalid_csv`;超限 → 413 `file_too_large`;并发冲突 → 409 `import_conflict`;数值/写入数据错误 → 422 `invalid_data`。
+- 边界:平台维度必须与内容自身平台一致(内容本身即单平台,跨平台内容通过一稿多改生成独立内容);未接入平台官方自动采集。
 
 ### 4.6 内容日历与排期
 
@@ -435,7 +443,7 @@ exported / published: 终态
 | `platform_accounts` | id, tenant_id, platform, name, credential_enc, status, meta(jsonb) | 平台账号;密文落库、响应恒为掩码;停用清空密文;名称仅在 active 行唯一 |
 | `publish_jobs` | id, content_id, platform_account_id, mode, status, scheduled_at, idempotency_key, checks(jsonb) | 发布任务,`checks` 存 precheck 报告 |
 | `publish_receipts` | id, publish_job_id, platform_post_id, url, published_at, raw(jsonb) | 发布回执 |
-| `analytics_snapshots` | id, publish_receipt_id, captured_at, metrics(jsonb) | 指标快照 |
+| `analytics_snapshots` | id, tenant_id, content_id, platform, captured_at, views/likes/comments/shares/saves/followers_delta(bigint), raw(jsonb) | 指标快照,内容×平台×日期唯一 |
 | `skills` | id, skill_id, name, layer, version, manifest(jsonb), enabled | 技能注册表 |
 | `skill_runs` | id, skill_id, skill_version, content_id?, input(jsonb), output(jsonb), prompt_tokens, completion_tokens, cost, status, error, started_at, finished_at | 审计与成本 |
 | `conversations` / `messages` | id, tenant_id, profile_id, title / id, conversation_id, role, content, tool_calls(jsonb) | 对话 |
@@ -472,7 +480,7 @@ exported / published: 终态
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
 | 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15 已落地,手动导出四平台) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing`;到期任务由 arq worker 每分钟扫描执行(Task 1.16 已落地) |
 | 账号 | `GET/POST /accounts` `PATCH/DELETE /accounts/{id}` | 公众号 AppID/Secret 绑定;凭据加密落库、响应仅掩码;DELETE 为软停用 |
-| 归因 | `POST /analytics/import` `GET /analytics/snapshots` `POST /content/{id}/postmortem` | 手动/CSV 导入 + 复盘 |
+| 归因 | `POST /analytics/import` `GET /analytics/overview`(Task 1.17 已落地) `POST /content/{id}/postmortem` | CSV 导入 + 项目概览 + 复盘 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
 | 设置 | `GET/PUT /settings/llm-providers` `POST /settings/llm-providers/{id}/test` `GET /settings/models` | 密钥掩码返回 |
 
