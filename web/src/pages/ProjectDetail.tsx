@@ -65,7 +65,7 @@ export default function ProjectDetail() {
       }),
     onSuccess: (_content, payload) => {
       qc.invalidateQueries({ queryKey: ["contents", projectId] });
-      setTitle((prev) => (prev === payload.title ? "" : prev));
+      setTitle((prev) => (prev.trim() === payload.title ? "" : prev));
       setBody((prev) => (prev === payload.body ? "" : prev));
     },
   });

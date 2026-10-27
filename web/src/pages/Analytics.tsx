@@ -164,6 +164,9 @@ export default function Analytics() {
               {importCsv.isPending ? "导入中…" : "导入"}
             </button>
           </div>
+          {file && (
+            <p className="truncate text-xs text-slate-500">已选择：{file.name}</p>
+          )}
         </div>
       </div>
 

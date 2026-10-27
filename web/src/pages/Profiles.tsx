@@ -45,11 +45,11 @@ function formMatchesPayload(
   payload: ProfilePayload,
 ): boolean {
   return (
-    form.name === payload.name &&
-    form.account_name === payload.account_name &&
-    form.positioning === payload.positioning &&
-    form.audience === payload.audience &&
-    form.tone === payload.tone &&
+    form.name.trim() === payload.name &&
+    form.account_name.trim() === payload.account_name &&
+    form.positioning.trim() === payload.positioning &&
+    form.audience.trim() === payload.audience &&
+    form.tone.trim() === payload.tone &&
     sameList(form.taboos, payload.taboos) &&
     sameList(form.goals, payload.goals) &&
     sameList(form.platform_focus, payload.platform_focus)
@@ -101,6 +101,7 @@ export default function Profiles() {
       );
       qc.invalidateQueries({ queryKey: ["profiles"] });
       setSelectedId(profile.id);
+      resetMemoryForm();
       setForm((prev) => (formMatchesPayload(prev, payload) ? EMPTY_FORM : prev));
       setFormMessage("");
     },
@@ -126,6 +127,12 @@ export default function Profiles() {
       setMemoryContent((prev) => (prev === vars.content ? "" : prev));
     },
   });
+
+  function resetMemoryForm() {
+    setMemoryContent("");
+    setMemoryMessage("");
+    addMemory.reset();
+  }
 
   function submitProfile(event: FormEvent) {
     event.preventDefault();
@@ -313,9 +320,7 @@ export default function Profiles() {
                   onClick={() => {
                     if (profile.id === selected?.id) return;
                     setSelectedId(profile.id);
-                    setMemoryContent("");
-                    setMemoryMessage("");
-                    addMemory.reset();
+                    resetMemoryForm();
                   }}
                 >
                   <span className="flex items-center justify-between gap-2">

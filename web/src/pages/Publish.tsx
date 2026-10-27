@@ -29,6 +29,12 @@ function successText(result: ActionResult): string {
   return "已导出素材包";
 }
 
+function issueLevelLabel(level: string): string {
+  if (level === "error") return "错误";
+  if (level === "warn") return "警告";
+  return level;
+}
+
 export default function Publish() {
   const qc = useQueryClient();
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -159,7 +165,7 @@ export default function Publish() {
                           : "text-sm text-amber-400"
                       }
                     >
-                      [{issue.level}] {issue.message}
+                      [{issueLevelLabel(issue.level)}] {issue.message}
                     </li>
                   ))}
                 </ul>

@@ -43,8 +43,8 @@ export default function Projects() {
     onSuccess: (project, payload) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       setCreatedId(project.id);
-      setTitle((prev) => (prev === payload.title ? "" : prev));
-      setTopic((prev) => (prev === payload.topic ? "" : prev));
+      setTitle((prev) => (prev.trim() === payload.title ? "" : prev));
+      setTopic((prev) => (prev.trim() === payload.topic ? "" : prev));
       setProfileId((prev) =>
         prev === (payload.profile_id ?? "") ? "" : prev,
       );
