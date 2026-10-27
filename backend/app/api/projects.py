@@ -1,7 +1,9 @@
 import uuid
-from typing import Annotated
+from pathlib import PurePosixPath
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends
+import jsonschema
+from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -19,6 +21,11 @@ from app.errors import AppError
 from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
+from app.services.repurpose import repurpose_content
+from app.skills.manifest import ManifestError
+from app.skills.registry import SkillRegistry, get_registry
+from app.skills.runner import ScriptError
+from app.storage import Storage, get_storage
 
 router = APIRouter(tags=["projects"])
 
@@ -28,6 +35,9 @@ ShortText = Annotated[
 Title300 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
 ProjectTitle = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+Platform = Literal[
+    "wechat", "xiaohongshu", "douyin", "zhihu", "kuaishou", "channels", "bilibili"
 ]
 
 
@@ -100,6 +110,18 @@ class VersionList(BaseModel):
     items: list[VersionOut]
 
 
+class RepurposeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_content_id: str
+    platform: Platform
+    skill_id: ShortText = "content-repurposing"
+
+
+class RepurposeOut(VersionOut):
+    platform: Platform
+
+
 def _parse_uuid(value: str, message: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -162,6 +184,17 @@ async def _next_version(session: AsyncSession, content_id: uuid.UUID) -> int:
         )
     ).scalar()
     return int(current or 0) + 1
+
+
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _safe_upload_name(name: str | None) -> str:
+    raw = (name or "upload.bin").replace("\\", "/")
+    base = PurePosixPath(raw).name
+    if not base or base in {".", ".."} or "\x00" in base or len(base) > 200:
+        raise AppError("invalid_filename", "文件名不合法", 422)
+    return base
 
 
 @router.get("/projects", response_model=ProjectList)
@@ -312,3 +345,72 @@ async def create_version(
         raise AppError("version_conflict", "版本冲突，请重试", 409) from None
     await session.refresh(version)
     return _version_out(version)
+
+
+@router.get("/projects/{project_id}/files")
+async def list_project_files(
+    project_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: Storage = Depends(get_storage),  # noqa: B008
+) -> dict:
+    project = await _owned_project(session, project_id, user)
+    return {"items": storage.list_files(str(project.id))}
+
+
+@router.post("/projects/{project_id}/files", status_code=201)
+async def upload_project_file(
+    project_id: str,
+    file: Annotated[UploadFile, File()],
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: Storage = Depends(get_storage),  # noqa: B008
+) -> dict:
+    project = await _owned_project(session, project_id, user)
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > MAX_UPLOAD_BYTES:
+            raise AppError("file_too_large", "文件超过 10MB", 413)
+        chunks.append(chunk)
+    name = _safe_upload_name(file.filename)
+    relpath = storage.save_bytes(str(project.id), f"files/{name}", b"".join(chunks))
+    return {"path": relpath, "size": size}
+
+
+@router.post(
+    "/projects/{project_id}/repurpose",
+    response_model=RepurposeOut,
+    status_code=201,
+)
+async def repurpose(
+    project_id: str,
+    payload: RepurposeIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+) -> RepurposeOut:
+    project = await _owned_project(session, project_id, user)
+    try:
+        version = await repurpose_content(
+            session=session,
+            registry=registry,
+            tenant_id=user.tenant_id,
+            project=project,
+            source_content_id=payload.source_content_id,
+            platform=payload.platform,
+            skill_id=payload.skill_id,
+            created_by=user.id,
+        )
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except jsonschema.ValidationError as exc:
+        raise AppError("skill_inputs_invalid", "技能输入参数校验失败", 422) from exc
+    except ScriptError as exc:
+        raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc
+    except ValueError as exc:
+        raise AppError("skill_output_invalid", "模型输出格式异常", 502) from exc
+    return RepurposeOut(
+        **_version_out(version).model_dump(), platform=payload.platform
+    )
