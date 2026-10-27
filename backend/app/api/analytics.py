@@ -2,17 +2,24 @@ import uuid
 from datetime import date
 from typing import Annotated
 
+import jsonschema
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.skills import get_llm_gateway
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
+from app.llm.gateway import LLMGateway
 from app.models.project import Content, Project
 from app.models.user import User
 from app.services.analytics import import_csv, latest_snapshots
+from app.services.postmortem import generate_postmortem
+from app.skills.manifest import ManifestError
+from app.skills.registry import SkillRegistry, get_registry
+from app.skills.runner import ScriptError
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -53,6 +60,20 @@ class OverviewOut(BaseModel):
     items: list[OverviewItem]
     totals: OverviewTotals
     engagement_rate: float
+
+
+class PostmortemIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    skill_id: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
+    ] = "postmortem"
+
+
+class PostmortemOut(BaseModel):
+    report: dict
+    memory_ids: list[str]
+    run_id: str
 
 
 @router.post("/import", response_model=ImportResult)
@@ -149,3 +170,39 @@ async def get_overview(
     return OverviewOut(
         items=items, totals=totals, engagement_rate=engagement_rate
     )
+
+
+@router.post("/contents/{content_id}/postmortem", response_model=PostmortemOut)
+async def postmortem(
+    content_id: uuid.UUID,
+    payload: PostmortemIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+    gateway: LLMGateway = Depends(get_llm_gateway),  # noqa: B008
+) -> PostmortemOut:
+    try:
+        result = await generate_postmortem(
+            session=session,
+            registry=registry,
+            gateway=gateway,
+            tenant_id=user.tenant_id,
+            content_id=content_id,
+            skill_id=payload.skill_id,
+            created_by=user.id,
+        )
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except jsonschema.ValidationError as exc:
+        raise AppError(
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
+        ) from exc
+    except ScriptError as exc:
+        raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc
+    except ValueError as exc:
+        raise AppError(
+            "skill_output_invalid",
+            str(exc)[:200] or "模型输出格式异常",
+            502,
+        ) from exc
+    return PostmortemOut(**result)

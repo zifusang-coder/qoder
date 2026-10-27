@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 
-async def get_llm_gateway(session: AsyncSession, user: User) -> LLMGateway:
+async def get_llm_gateway(
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    user: User = Depends(get_current_user),  # noqa: B008
+) -> LLMGateway:
     return await load_gateway_default(session, user.tenant_id)
 
 
