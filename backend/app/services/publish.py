@@ -65,6 +65,22 @@ async def _locked_job(
     return job
 
 
+async def _reload_job(
+    session: AsyncSession, job_id: uuid.UUID, tenant_id: str
+) -> PublishJob | None:
+    try:
+        return (
+            await session.execute(
+                select(PublishJob)
+                .where(PublishJob.id == job_id, PublishJob.tenant_id == tenant_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+    except Exception:
+        logger.exception("导出任务状态回读失败 job=%s", job_id)
+        return None
+
+
 def _validate_fields(fields: dict) -> None:
     for key, value in fields.items():
         if key == "attempts":
@@ -429,11 +445,17 @@ async def export_job(
             )
         )
     except Exception:  # 原始异常不能进入响应或 job.error
-        logger.exception("导出失败 job=%s", job.id)
+        logger.exception("导出失败 job=%s", job_id)
+        # 会话可能因异常处于失效事务；回读前必须先回滚
+        await session.rollback()
+        current = await _reload_job(session, job_id, tenant_id)
+        # 慢请求租约过期后，另一路径可能已成功落库，不能把 exported 改成失败
+        if current is not None and current.status == "exported":
+            return current
         try:
             await apply_action(
                 session,
-                job.id,
+                job_id,
                 "fail",
                 tenant_id=tenant_id,
                 actor=actor,
@@ -441,14 +463,14 @@ async def export_job(
                 fields={"error": EXPORT_FAILED_MESSAGE},
             )
         except Exception:  # 状态写入失败只记录日志，响应仍归一化
-            logger.exception("导出失败状态写入失败 job=%s", job.id)
+            logger.exception("导出失败状态写入失败 job=%s", job_id)
             await session.rollback()
         raise AppError("export_failed", EXPORT_FAILED_MESSAGE, 500) from None
 
     try:
         return await apply_action(
             session,
-            job.id,
+            job_id,
             "export_done",
             tenant_id=tenant_id,
             actor=actor,
@@ -458,16 +480,10 @@ async def export_job(
         logger.exception("导出完成状态写入失败 job=%s", job_id)
         await session.rollback()
         # commit 已成功但后续 refresh/ack 失败时不能误删有效产物
-        current = (
-            await session.execute(
-                select(PublishJob)
-                .where(PublishJob.id == job_id, PublishJob.tenant_id == tenant_id)
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
+        current = await _reload_job(session, job_id, tenant_id)
         if current is not None and current.status == "exported":
             return current
-        exporter.discard(project_id, relpath)
+        # 确定性导出的产物可被后续重试复用，失败时保留而不是删除
         try:
             await apply_action(
                 session,

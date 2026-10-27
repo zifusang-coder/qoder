@@ -1,9 +1,13 @@
 import os
+import re
 import uuid
 from functools import lru_cache
 from pathlib import Path
 
 from app.config import get_settings
+
+# save_bytes 的临时文件命名为 "<name>.<uuid4().hex>.tmp"，只过滤这一种
+_TMP_FILE = re.compile(r"\.[0-9a-f]{32}\.tmp$")
 
 
 class StorageError(ValueError):
@@ -70,9 +74,6 @@ class Storage:
             raise
         return str(path.relative_to(self.project_dir(project_id)))
 
-    def delete(self, project_id: str, relpath: str) -> None:
-        self.resolve(project_id, relpath, create=False).unlink(missing_ok=True)
-
     def read_text(self, project_id: str, relpath: str) -> str:
         return self.resolve(project_id, relpath).read_text(encoding="utf-8")
 
@@ -81,7 +82,7 @@ class Storage:
         return sorted(
             str(p.relative_to(base))
             for p in base.rglob("*")
-            if p.is_file() and not p.name.endswith(".tmp")
+            if p.is_file() and _TMP_FILE.search(p.name) is None
         )
 
 

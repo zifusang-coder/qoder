@@ -331,6 +331,8 @@ async def test_export_second_call_while_in_flight_returns_409(
     while not blocking.started.is_set():
         assert loop.time() < deadline, "导出未在超时前开始"
         await asyncio.sleep(0.01)
+    # 续租（含行锁）必须在进入 I/O 前持久提交，否则第二个请求的 409 只是同会话可见
+    assert not db_session.in_transaction()
     try:
         second = await asyncio.wait_for(_export(client, job["id"]), timeout=5)
     finally:
@@ -376,7 +378,7 @@ async def test_export_tolerates_failure_after_commit(
     assert referenced == zips[0]
 
 
-async def test_export_discards_bundle_when_finish_transition_fails(
+async def test_export_finish_failure_leaves_reusable_bundle(
     client, db_session, storage, monkeypatch
 ):
     import app.services.publish as publish_service
@@ -390,18 +392,44 @@ async def test_export_discards_bundle_when_finish_transition_fails(
 
     monkeypatch.setattr(publish_service, "apply_action", flaky)
 
-    _, _, job = await _create_job(client)
+    project, _, job = await _create_job(client)
+    job_hex = job["id"].replace("-", "")
+    expected_relpath = f"exports/xiaohongshu-{job_hex}-v1.zip"
+    expected_path = storage.root / project["id"] / expected_relpath
+
     response = await _export(client, job["id"])
     assert response.status_code == 500
     body = response.json()
     assert body["code"] == "export_failed"
     assert body["message"] == "导出失败，请稍后重试"
-    assert list(storage.root.rglob("*.zip")) == []
-    assert list(storage.root.rglob("*.tmp")) == []
 
     stored = await _stored_job(db_session, job["id"])
     assert stored.status == "export_failed"
     assert stored.error == "导出失败，请稍后重试"
+
+    # 确定性路径上的产物保留下来供下一次重试复用
+    assert expected_path.is_file()
+    assert list(storage.root.rglob("*.tmp")) == []
+    assert [p.name for p in storage.root.rglob("*.zip")] == [expected_path.name]
+
+    monkeypatch.undo()
+
+    retried = await _act(client, job["id"], "retry")
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "exporting"
+
+    response = await _export(client, job["id"])
+    assert response.status_code == 200
+    exported = response.json()
+    assert exported["status"] == "exported"
+    assert exported["export_path"] == expected_relpath
+
+    zips = list(storage.root.rglob("*.zip"))
+    assert zips == [expected_path]
+    with _zip(expected_path) as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+    assert manifest["job_id"] == job["id"]
+    assert manifest["content_version"] == 1
 
 
 async def test_export_missing_version_returns_409(client, db_session, storage):
@@ -512,6 +540,17 @@ async def test_export_paths_are_unique(client, db_session, storage):
         (second_project, second_path),
     ):
         assert (storage.root / project["id"] / relpath).is_file()
+
+
+async def test_list_files_ignores_only_export_temp_files(storage):
+    project_id = str(uuid.uuid4())
+    storage.save_text(project_id, "notes.tmp", "keep")
+
+    exports = storage.project_dir(project_id) / "exports"
+    exports.mkdir(parents=True)
+    (exports / f"bundle.zip.{uuid.uuid4().hex}.tmp").write_text("junk")
+
+    assert storage.list_files(project_id) == ["notes.tmp"]
 
 
 def test_adapter_guides_per_platform(tmp_path):
