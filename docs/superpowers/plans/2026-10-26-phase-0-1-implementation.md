@@ -452,19 +452,24 @@ git commit -m "chore: add local postgres/redis compose and dev commands"
 - Create: `backend/app/models/base.py`
 - Create: `backend/alembic.ini`
 - Create: `backend/migrations/env.py`
+- Create: `backend/migrations/script.py.mako`
 - Create: `backend/tests/conftest.py`
 - Create: `backend/tests/test_db.py`
 
 - [ ] **Step 1: 写失败测试 `backend/tests/test_db.py`**
 
 ```python
-from sqlalchemy import select
+from sqlalchemy import String, select, text
+from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import DEFAULT_TENANT_ID, TenantScoped
+from app.config import DEFAULT_TENANT_ID
+from app.models.base import TenantScoped
 
 
 class _Thing(TenantScoped):
     __tablename__ = "test_things"
+
+    label: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 async def test_tenant_default_and_session(db_session):
@@ -473,11 +478,25 @@ async def test_tenant_default_and_session(db_session):
     row = (await db_session.execute(select(_Thing))).scalar_one()
     assert row.tenant_id == DEFAULT_TENANT_ID
     assert row.id is not None
+
+
+async def test_updated_at_available_after_update(db_session):
+    thing = _Thing()
+    db_session.add(thing)
+    await db_session.commit()
+    thing.label = "changed"
+    await db_session.commit()
+    assert thing.updated_at is not None
+
+
+async def test_sqlite_foreign_keys_enabled(db_session):
+    value = (await db_session.execute(text("PRAGMA foreign_keys"))).scalar_one()
+    assert value == 1
 ```
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cd backend && python -m pytest tests/test_db.py -q`
+Run: `cd backend && uv run pytest tests/test_db.py -q`
 Expected: FAIL（`ModuleNotFoundError: app.models.base`）
 
 - [ ] **Step 3: 写 `backend/app/models/base.py`**
@@ -485,8 +504,9 @@ Expected: FAIL（`ModuleNotFoundError: app.models.base`）
 ```python
 import uuid
 from datetime import datetime
+from typing import Any, ClassVar
 
-from sqlalchemy import DateTime, JSON, String, Uuid, func
+from sqlalchemy import JSON, DateTime, MetaData, String, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -494,9 +514,18 @@ from app.config import DEFAULT_TENANT_ID
 
 JSONType = JSON().with_variant(JSONB, "postgresql")
 
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
 
 class Base(DeclarativeBase):
-    pass
+    metadata = metadata
 
 
 class TimestampMixin:
@@ -520,9 +549,12 @@ class TenantMixin:
 
 class TenantScoped(Base, UUIDMixin, TenantMixin, TimestampMixin):
     __abstract__ = True
+    __mapper_args__: ClassVar[dict[str, Any]] = {"eager_defaults": True}
 ```
 
-同时创建 `backend/app/models/__init__.py`（本阶段留空，Task 0.5 再补充模型导出）。
+`eager_defaults=True` 不能省略：`updated_at` 是服务端 `onupdate`，没有它时 UPDATE 提交后属性处于过期状态，异步上下文读取会抛 `MissingGreenlet`。
+
+同时创建 `backend/app/models/__init__.py`（本阶段留空，后续任务再补充模型导出）。
 
 - [ ] **Step 4: 写 `backend/app/db.py`**
 
@@ -545,8 +577,8 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 - [ ] **Step 5: 写 `backend/tests/conftest.py`**
 
 ```python
-import pytest
 import pytest_asyncio
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -560,6 +592,13 @@ async def db_session() -> AsyncSession:
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_fks(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -568,14 +607,16 @@ async def db_session() -> AsyncSession:
     await engine.dispose()
 ```
 
+SQLite 默认不校验外键；不开 `PRAGMA foreign_keys=ON`，后续 `ondelete="CASCADE"` 的测试会假通过。
+
 - [ ] **Step 6: 配置 Alembic**
 
 `backend/alembic.ini`：
 
 ```ini
 [alembic]
-script_location = migrations
-prepend_sys_path = .
+script_location = %(here)s/migrations
+prepend_sys_path = %(here)s
 
 [loggers]
 keys = root
@@ -600,18 +641,21 @@ formatter = generic
 format = %(levelname)-5.5s [%(name)s] %(message)s
 ```
 
+`%(here)s` 让迁移路径不依赖当前工作目录；配置里不写 `sqlalchemy.url`，由 `env.py` 从 settings 注入。
+
 `backend/migrations/env.py`：
 
 ```python
+import asyncio
 import importlib
 import pkgutil
 from logging.config import fileConfig
 
-import app.models as models_pkg
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.models as models_pkg
 from app.config import get_settings
 from app.models.base import Base
 
@@ -619,13 +663,19 @@ for _module in pkgutil.iter_modules(models_pkg.__path__):
     importlib.import_module(f"app.models.{_module.name}")
 
 config = context.config
-fileConfig(config.config_file_name)
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=config.get_main_option("sqlalchemy.url"), target_metadata=target_metadata)
+    context.configure(
+        url=config.get_main_option("sqlalchemy.url"),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -650,31 +700,45 @@ async def run_migrations_online() -> None:
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    import asyncio
-
     asyncio.run(run_migrations_online())
+```
+
+`script.py.mako` 直接从已安装的 Alembic 模板复制（`alembic revision` 缺了它无法运行）：
+
+```bash
+cd backend && cp "$(uv run python -c 'import alembic, pathlib; print(pathlib.Path(alembic.__file__).parent / "templates/generic/script.py.mako")')" migrations/script.py.mako
+```
+
+在 `backend/pyproject.toml` 末尾追加，避免 ruff 检查 Alembic 生成的样板文件：
+
+```toml
+[tool.ruff]
+extend-exclude = ["migrations/versions"]
 ```
 
 - [ ] **Step 7: 运行测试确认通过**
 
-Run: `cd backend && python -m pytest tests/test_db.py -q`
-Expected: `1 passed`
+Run: `cd backend && uv run pytest -q`
+Expected: `8 passed`
 
 - [ ] **Step 8: 生成首个迁移**
 
 ```bash
+make up                      # 启动并等待 Postgres/Redis 健康
 cd backend
-alembic revision --autogenerate -m "init tenant base"
-alembic upgrade head
-alembic downgrade base
-alembic upgrade head
+uv run alembic revision --autogenerate -m "init tenant base"
+uv run alembic upgrade head
+uv run alembic downgrade base
+uv run alembic upgrade head
+uv run alembic check         # 期望：No new upgrade operations detected.
+cd .. && make down           # 验证后收掉本项目的容器
 ```
-Expected: 迁移执行无错误（首次 autogenerate 若为空属正常，后续任务会持续叠加）
+Expected: 迁移执行无错误（首次 autogenerate 为空属正常，后续任务会持续叠加）
 
 - [ ] **Step 9: 提交**
 
 ```bash
-git add backend/app/db.py backend/app/models backend/alembic.ini backend/migrations backend/tests
+git add backend/app/db.py backend/app/models backend/alembic.ini backend/migrations backend/tests backend/pyproject.toml
 git commit -m "feat: add db base, tenant scoping and alembic setup"
 ```
 
