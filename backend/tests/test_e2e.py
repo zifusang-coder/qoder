@@ -29,7 +29,8 @@ class E2EGateway:
     last_usage = Usage(30, 40)
 
     async def complete(self, messages, **kwargs):
-        if "metrics" in messages[-1]["content"]:
+        inputs = json.loads(messages[-1]["content"])
+        if "metrics" in inputs:
             return json.dumps(POSTMORTEM, ensure_ascii=False)
         return REPURPOSED_BODY
 
@@ -42,16 +43,17 @@ async def test_full_mvp_flow(client, tmp_path, monkeypatch):
     async def fake_gateway(session, tenant_id):
         return gateway
 
-    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
-    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
-    # 复盘与一稿多改在服务内部延迟加载网关，不经过 FastAPI 依赖覆写
-    monkeypatch.setattr(
-        "app.services.repurpose.load_gateway_default", fake_gateway
-    )
-    monkeypatch.setattr(
-        "app.services.postmortem.load_gateway_default", fake_gateway
-    )
     try:
+        app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+        app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+        # 复盘与一稿多改在服务内部延迟加载网关，不经过 FastAPI 依赖覆写
+        monkeypatch.setattr(
+            "app.services.repurpose.load_gateway_default", fake_gateway
+        )
+        monkeypatch.setattr(
+            "app.services.postmortem.load_gateway_default", fake_gateway
+        )
+
         profile_response = await client.post(
             "/api/profiles",
             json={"name": "主号", "taboos": ["收益承诺"]},

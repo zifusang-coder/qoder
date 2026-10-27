@@ -16,4 +16,5 @@ EXPECTED = {
 def test_builtin_skills_load_cleanly():
     registry = SkillRegistry(ROOT)
     assert registry.errors == []
+    assert len(registry.skills) == 12
     assert EXPECTED <= set(registry.skills)

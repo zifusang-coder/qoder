@@ -37,11 +37,11 @@ cd web && npm install && npm run dev
 make worker
 ```
 
-等价于 `cd backend && uv run arq app.worker.WorkerSettings`。worker 每分钟扫描 `approved` 且到期的公众号任务并执行，不在 docker-compose 中常驻。
+等价于 `cd backend && uv run arq app.worker.WorkerSettings`。worker 每分钟扫描 `approved` 且到期的公众号任务并执行；执行前会先对账卡在 `publishing` 的陈旧任务，不在 docker-compose 中常驻。
 
 ### 数据导入
 
-`POST /api/analytics/import` 接收 UTF-8 CSV（上限 5MB），列固定为：
+`POST /api/analytics/import` 接收 UTF-8 CSV（上限 5MB）。必需列为 `content_id,platform,captured_at`，六项指标列可留空（按 0 处理）；额外列会被忽略。完整列如下：
 
 ```text
 content_id,platform,captured_at,views,likes,comments,shares,saves,followers_delta
