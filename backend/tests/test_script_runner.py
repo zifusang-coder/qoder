@@ -33,10 +33,22 @@ async def test_script_runs_in_skill_dir(tmp_path):
     assert Path(result["cwd"]).resolve() == tmp_path.resolve()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 进程语义")
 async def test_script_timeout_kills_child(tmp_path):
-    script = _write(tmp_path, "slow.py", "import time\ntime.sleep(5)")
+    pid_file = tmp_path / "timeout-pid.txt"
+    script = _write(
+        tmp_path,
+        "slow.py",
+        "import os,pathlib,time\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(5)\n",
+    )
     with pytest.raises(ScriptError, match="脚本超时"):
-        await run_script(script, {}, tmp_path, timeout=0.2)
+        await run_script(script, {}, tmp_path, timeout=1)
+    assert pid_file.exists(), "子进程未启动"
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 async def test_script_nonzero_exit_includes_stderr(tmp_path):
@@ -68,17 +80,20 @@ async def test_script_empty_stdout_is_empty_object(tmp_path):
 
 async def test_script_env_is_whitelisted(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENMEMORY_API_KEY", "secret-value")
+    monkeypatch.setenv("JWT_SECRET", "should-not-leak")
     script = _write(
         tmp_path,
         "env.py",
-        "import json,os\nprint(json.dumps({'keys': sorted(os.environ)}))",
+        "import json,os\nprint(json.dumps({'env': dict(os.environ)}))",
     )
     result = await run_script(script, {}, tmp_path)
-    keys = set(result["keys"])
+    keys = set(result["env"])
     assert "OPENMEMORY_API_KEY" not in keys
+    assert "JWT_SECRET" not in keys
     assert {"PATH", "PYTHONIOENCODING", "LANG"} <= keys
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 进程语义")
 async def test_cancellation_reaps_child(tmp_path):
     pid_file = tmp_path / "pid.txt"
     script = _write(
@@ -90,7 +105,7 @@ async def test_cancellation_reaps_child(tmp_path):
     )
     task = asyncio.create_task(run_script(script, {}, tmp_path, timeout=10))
     for _ in range(500):
-        if pid_file.exists():
+        if pid_file.exists() and pid_file.read_text().strip():
             break
         await asyncio.sleep(0.01)
     assert pid_file.exists(), "子进程未启动"
