@@ -122,8 +122,15 @@ async def delete_provider(
         parsed_id = uuid.UUID(provider_id)
     except ValueError:
         raise AppError("not_found", "提供商不存在", 404) from None
-    provider = await session.get(LLMProvider, parsed_id)
-    if provider is None or provider.tenant_id != user.tenant_id:
+    provider = (
+        await session.execute(
+            select(LLMProvider).where(
+                LLMProvider.id == parsed_id,
+                LLMProvider.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if provider is None:
         raise AppError("not_found", "提供商不存在", 404)
     await session.delete(provider)
     await session.commit()

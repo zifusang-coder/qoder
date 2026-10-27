@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import select
 
+from app.config import DEFAULT_TENANT_ID
 from app.models.settings import LLMProvider
 from app.security import decrypt_secret, encrypt_secret
 
@@ -58,6 +59,23 @@ async def test_create_provider_masks_key(auth_client, auth_headers, db_session):
     row = (await db_session.execute(select(LLMProvider))).scalar_one()
     assert row.api_key_enc != payload["api_key"]
     assert decrypt_secret(row.api_key_enc) == payload["api_key"]
+
+
+async def test_validation_error_does_not_echo_api_key(auth_client, auth_headers):
+    resp = await auth_client.post(
+        "/api/settings/providers",
+        json=_payload("短密钥", api_key="sk-9"),
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == "validation_error"
+    assert "sk-9" not in resp.text
+    entry = next(d for d in body["detail"] if d["loc"][-1] == "api_key")
+    assert entry["loc"] == ["body", "api_key"]
+    assert "input" not in entry
+    assert "ctx" not in entry
 
 
 async def test_list_providers_scoped_to_tenant(auth_client, auth_headers, db_session):
@@ -139,6 +157,31 @@ async def test_delete_provider_404_cases(auth_client, auth_headers, db_session):
     )
     assert deleted.status_code == 204
     assert await db_session.get(LLMProvider, provider_id) is None
+
+
+async def test_corrupt_ciphertext_falls_back_to_placeholder(
+    auth_client, auth_headers, db_session
+):
+    corrupt = "not-a-valid-fernet-token"
+    db_session.add(
+        LLMProvider(
+            tenant_id=DEFAULT_TENANT_ID,
+            name="损坏密文",
+            kind="openai_compatible",
+            base_url="https://broken.example.com/v1",
+            api_key_enc=corrupt,
+            tiers={},
+            is_default=False,
+        )
+    )
+    await db_session.commit()
+
+    resp = await auth_client.get("/api/settings/providers", headers=auth_headers)
+
+    assert resp.status_code == 200
+    by_name = {p["name"]: p for p in resp.json()}
+    assert by_name["损坏密文"]["api_key_masked"] == "****"
+    assert corrupt not in resp.text
 
 
 async def test_providers_require_auth(auth_client):
