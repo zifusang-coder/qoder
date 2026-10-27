@@ -9,7 +9,9 @@ from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.profile import Profile, ProfileMemory
 from app.models.project import Content, ContentVersion, Project
 from app.services.profiles import build_profile_block
+from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
+from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry
 
 
@@ -56,8 +58,14 @@ async def repurpose_content(
             .limit(1)
         )
     ).scalar_one_or_none()
-    if version is None:
+    if version is None or not version.body.strip():
         raise AppError("empty_content", "源内容没有正文，无法改写", 409)
+
+    try:
+        registry.get(skill_id)
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    await require_enabled(session, tenant_id, skill_id)
 
     profile_block = ""
     if project.profile_id:
@@ -102,6 +110,13 @@ async def repurpose_content(
         },
     )
 
+    # 串行化同一项目内的目标内容选择与版本号分配，避免并发改写产生重复版本
+    await session.execute(
+        select(Project.id)
+        .where(Project.id == project.id, Project.tenant_id == tenant_id)
+        .with_for_update()
+    )
+
     target = (
         await session.execute(
             select(Content)
@@ -110,7 +125,7 @@ async def repurpose_content(
                 Content.platform == platform,
                 Content.tenant_id == tenant_id,
             )
-            .order_by(Content.created_at)
+            .order_by(Content.created_at, Content.id)
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -124,6 +139,8 @@ async def repurpose_content(
         )
         session.add(target)
         await session.flush()
+    elif not target.title:
+        target.title = source.title
 
     current = (
         await session.execute(

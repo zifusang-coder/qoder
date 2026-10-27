@@ -3,12 +3,15 @@ from pathlib import Path
 
 from app.errors import AppError
 from app.llm.types import Usage
+from app.models.base import DEFAULT_TENANT_ID
 from app.models.project import Content, Project
+from app.models.skill import SkillSetting
 from app.services import repurpose as repurpose_module
 from app.skills.registry import SkillRegistry, get_registry
 from app.storage import Storage, get_storage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
+SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
 class FakeGateway:
@@ -179,10 +182,182 @@ async def test_repurpose_validates_source_before_gateway(
         ).json()
         no_llm = await client.post(
             f"/api/projects/{project_id}/repurpose",
-            json={"source_content_id": content["id"], "platform": "zhihu"},
+            json={
+                "source_content_id": content["id"],
+                "platform": "zhihu",
+                "skill_id": "demo-skill",
+            },
         )
         assert no_llm.status_code == 400
         assert no_llm.json()["code"] == "llm_not_configured"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_reuses_target_content(client, tmp_path, monkeypatch):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (await client.post("/api/projects", json={"title": "复用目标"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        payload = {
+            "source_content_id": content["id"],
+            "platform": "xiaohongshu",
+            "skill_id": "demo-skill",
+        }
+        first = await client.post(
+            f"/api/projects/{project['id']}/repurpose", json=payload
+        )
+        assert first.status_code == 201
+        assert first.json()["version"] == 1
+
+        second = await client.post(
+            f"/api/projects/{project['id']}/repurpose", json=payload
+        )
+        assert second.status_code == 201
+        assert second.json()["version"] == 2
+
+        contents = (
+            await client.get(f"/api/projects/{project['id']}/contents")
+        ).json()
+        targets = [c for c in contents if c["platform"] == "xiaohongshu"]
+        assert len(targets) == 1
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_rejects_title_only_source(client, tmp_path, monkeypatch):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def must_not_load(session, tenant_id):
+        raise AssertionError("gateway must not load")
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", must_not_load)
+    try:
+        project = (await client.post("/api/projects", json={"title": "空稿"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "只有标题"},
+            )
+        ).json()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert result.status_code == 409
+        assert result.json()["code"] == "empty_content"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_rejects_disabled_and_unknown_skills(
+    client, tmp_path, monkeypatch, db_session
+):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def must_not_load(session, tenant_id):
+        raise AssertionError("gateway must not load")
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", must_not_load)
+    try:
+        project = (await client.post("/api/projects", json={"title": "技能校验"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        db_session.add(
+            SkillSetting(
+                tenant_id=DEFAULT_TENANT_ID, skill_id="demo-skill", enabled=False
+            )
+        )
+        await db_session.flush()
+
+        disabled = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert disabled.status_code == 409
+        assert disabled.json()["code"] == "skill_disabled"
+
+        unknown = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "nope",
+            },
+        )
+        assert unknown.status_code == 404
+        assert unknown.json()["code"] == "not_found"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_uses_production_default_skill(client, tmp_path, monkeypatch):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (await client.post("/api/projects", json={"title": "默认技能"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+            },
+        )
+        assert result.status_code == 201
+        assert result.json()["platform"] == "xiaohongshu"
+        assert "改写后的正文" in result.json()["body"]
     finally:
         app.dependency_overrides.pop(get_registry, None)
         app.dependency_overrides.pop(get_storage, None)

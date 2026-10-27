@@ -6,11 +6,11 @@ import pytest
 from sqlalchemy import func, select
 
 from app.api import skills as skills_module
-from app.api.skills import _enabled_map
 from app.llm.types import Usage
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.skill import SkillRun, SkillSetting
+from app.services.skill_settings import enabled_map as _enabled_map
 from app.skills.registry import SkillRegistry, get_registry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"

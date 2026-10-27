@@ -19,6 +19,8 @@ from app.models.profile import Profile, ProfileMemory
 from app.models.skill import SkillSetting
 from app.models.user import User
 from app.services.profiles import build_profile_block
+from app.services.skill_settings import enabled_map
+from app.services.skill_settings import require_enabled as _require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import LoadedSkill, ManifestError
 from app.skills.registry import SkillRegistry, get_registry
@@ -91,23 +93,6 @@ def _registry_skill(registry: SkillRegistry, skill_id: str) -> LoadedSkill:
         raise AppError("not_found", str(exc), 404) from exc
 
 
-async def _enabled_map(session: AsyncSession, tenant_id: str) -> dict[str, bool]:
-    rows = (
-        await session.execute(
-            select(SkillSetting).where(SkillSetting.tenant_id == tenant_id)
-        )
-    ).scalars().all()
-    return {row.skill_id: row.enabled for row in rows}
-
-
-async def _require_enabled(
-    session: AsyncSession, tenant_id: str, skill_id: str
-) -> None:
-    enabled = (await _enabled_map(session, tenant_id)).get(skill_id, True)
-    if not enabled:
-        raise AppError("skill_disabled", "该技能已停用", 409)
-
-
 async def _profile_block(
     session: AsyncSession, profile_id: uuid.UUID | None, user: User
 ) -> str:
@@ -149,7 +134,7 @@ async def list_skills(
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> SkillList:
-    enabled = await _enabled_map(session, user.tenant_id)
+    enabled = await enabled_map(session, user.tenant_id)
     items = [
         _skill_out(skill, enabled.get(skill.manifest.id, True))
         for skill in sorted(
@@ -167,7 +152,7 @@ async def get_skill(
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> SkillOut:
     skill = _registry_skill(registry, skill_id)
-    enabled = (await _enabled_map(session, user.tenant_id)).get(skill_id, True)
+    enabled = (await enabled_map(session, user.tenant_id)).get(skill_id, True)
     return _skill_out(skill, enabled)
 
 
