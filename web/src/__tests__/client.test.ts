@@ -62,6 +62,27 @@ describe("api", () => {
     expect(apiErr.detail).toEqual(envelope.detail);
   });
 
+  it("does not set a JSON content type for FormData uploads", async () => {
+    stubBrowser("tok");
+    const fetchMock = vi.fn(
+      async (_input: string, _init: RequestInit) =>
+        new Response(JSON.stringify({ upserted: 0, errors: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const formData = new FormData();
+    formData.append("file", new Blob(["content_id,views\n"], { type: "text/csv" }), "stats.csv");
+
+    await api("/analytics/import", { method: "POST", body: formData });
+
+    const [, init] = fetchMock.mock.calls[0];
+    const headers = new Headers(init.headers);
+    expect(headers.has("Content-Type")).toBe(false);
+    expect(headers.get("Authorization")).toBe("Bearer tok");
+  });
+
   it("does not clear a newer token when a stale request gets a 401", async () => {
     const { location } = stubBrowser("old-token");
     let resolveFetch!: (resp: Response) => void;

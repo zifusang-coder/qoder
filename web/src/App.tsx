@@ -1,8 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { ApiError, api, getToken } from "./client";
+import Layout from "./components/Layout";
+import Analytics from "./pages/Analytics";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
+import Profiles from "./pages/Profiles";
+import ProjectDetail from "./pages/ProjectDetail";
+import Projects from "./pages/Projects";
+import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
 
 function ProtectedLayout() {
@@ -31,8 +37,15 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route element={<ProtectedLayout />}>
-        <Route path="/settings" element={<Settings />} />
-        <Route path="/chat" element={<Chat />} />
+        <Route element={<Layout />}>
+          <Route path="/chat" element={<Chat />} />
+          <Route path="/profiles" element={<Profiles />} />
+          <Route path="/projects" element={<Projects />} />
+          <Route path="/projects/:id" element={<ProjectDetail />} />
+          <Route path="/publish" element={<Publish />} />
+          <Route path="/analytics" element={<Analytics />} />
+          <Route path="/settings" element={<Settings />} />
+        </Route>
       </Route>
       <Route path="*" element={<Navigate to={getToken() ? "/chat" : "/login"} replace />} />
     </Routes>

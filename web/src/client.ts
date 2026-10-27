@@ -31,7 +31,12 @@ export class ApiError extends Error {
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const requestToken = getToken();
   const headers = new Headers(init.headers);
-  if (init.body != null && !headers.has("Content-Type")) {
+  // Let the browser set the multipart boundary for FormData uploads.
+  if (
+    init.body != null &&
+    !(typeof FormData !== "undefined" && init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
     headers.set("Content-Type", "application/json");
   }
   if (requestToken && !headers.has("Authorization")) {
