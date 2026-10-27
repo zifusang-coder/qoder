@@ -360,6 +360,14 @@ exported / published: 终态
 
 后续扩展(尚未实现):图片/视频规则、版权提示、人设一致性评分、结构完整性检查。
 
+#### 4.4.5 公众号自动发布(Task 1.14 已落地)
+
+- 账号绑定:`POST /accounts` 提交 AppID/Secret,Fernet 加密落库;所有响应仅返回 `credential_masked`,每个值恒为 `****`,不下发任何前缀。`PATCH /accounts/{id}` 可轮换凭据或补全 `meta`(合并语义);`DELETE /accounts/{id}` 软停用并清空密文与 meta,停用后的名称可复用(仅 active 行参与唯一约束)。
+- 发布流程:`stable_token` 获取 access_token → `draft/add` 创建草稿,`media_id` 作为 `external_id` 回写。默认只建草稿,群发仍由人工在公众号后台完成;`thumb_media_id` 必填,`author` 与评论开关来自账号 `meta`。
+- 人工审核边界:`POST /publish/jobs/{id}/execute` 只接受 `approved` 任务;平台异常落 `publish_failed` 并可人工 `retry`,最多 5 次;配置类错误(缺封面、凭据失效)返回 409 `account_misconfigured` 且不消耗尝试次数。
+- 安全:凭据与 access_token 不入响应与日志;httpx/httpcore 日志级别固定 WARNING;失败落库再失败只记录任务 id。
+- 遗留:进程崩溃导致 `publishing` 悬挂的对账恢复在 Task 1.16 实现;超时重试可能产生重复草稿,恢复流程需人工确认。
+
 ### 4.5 归因与画像回写
 
 - **数据采集**:
@@ -407,7 +415,7 @@ exported / published: 终态
 | `contents` | id, project_id, platform, content_type, title, body_md, adapted(jsonb), status, current_version | 平台版本 |
 | `content_versions` | id, content_id, body_md, assets(jsonb), change_note, created_at | 版本快照 |
 | `assets` | id, project_id, content_id?, kind, storage_key, meta(jsonb) | 图片/音频/视频 |
-| `platform_accounts` | id, tenant_id, platform, account_name, credentials_encrypted, status, last_verified_at | 登录态/密钥 |
+| `platform_accounts` | id, tenant_id, platform, name, credential_enc, status, meta(jsonb) | 平台账号;密文落库、响应恒为掩码;停用清空密文;名称仅在 active 行唯一 |
 | `publish_jobs` | id, content_id, platform_account_id, mode, status, scheduled_at, idempotency_key, checks(jsonb) | 发布任务,`checks` 存 precheck 报告 |
 | `publish_receipts` | id, publish_job_id, platform_post_id, url, published_at, raw(jsonb) | 发布回执 |
 | `analytics_snapshots` | id, publish_receipt_id, captured_at, metrics(jsonb) | 指标快照 |
@@ -445,8 +453,8 @@ exported / published: 终态
 | 内容 | `GET/POST /contents` `GET/PATCH /contents/{id}` `POST /contents/{id}/versions` `POST /contents/{id}/repurpose` | 多平台改写 |
 | 技能 | `GET /skills` `POST /skills/{id}/run` `POST /skills/{id}/run/stream`(SSE) `GET /skill-runs` | 执行与审计 |
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
-| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/export`(Task 1.15) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用 |
-| 账号 | `GET/POST /platform-accounts` `POST /platform-accounts/{id}/verify` | 公众号 AppID/Secret 绑定 |
+| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing` |
+| 账号 | `GET/POST /accounts` `PATCH/DELETE /accounts/{id}` | 公众号 AppID/Secret 绑定;凭据加密落库、响应仅掩码;DELETE 为软停用 |
 | 归因 | `POST /analytics/import` `GET /analytics/snapshots` `POST /content/{id}/postmortem` | 手动/CSV 导入 + 复盘 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
 | 设置 | `GET/PUT /settings/llm-providers` `POST /settings/llm-providers/{id}/test` `GET /settings/models` | 密钥掩码返回 |
