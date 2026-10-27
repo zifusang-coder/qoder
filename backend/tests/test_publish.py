@@ -217,6 +217,54 @@ def test_illegal_transitions(current, action):
         next_status(current, action)
 
 
+@pytest.mark.parametrize("current", ["exported", "published"])
+@pytest.mark.parametrize(
+    "action",
+    [
+        "submit",
+        "approve",
+        "reject",
+        "publish",
+        "export",
+        "retry",
+        "cancel",
+        "reopen",
+        "pass",
+        "fail",
+        "succeed",
+        "export_done",
+    ],
+)
+def test_terminal_states_reject_all_actions(current, action):
+    with pytest.raises(InvalidTransition):
+        next_status(current, action)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "submit",
+        "approve",
+        "reject",
+        "publish",
+        "export",
+        "retry",
+        "cancel",
+        "pass",
+        "fail",
+        "succeed",
+        "export_done",
+    ],
+)
+def test_cancelled_rejects_all_actions_except_reopen(action):
+    with pytest.raises(InvalidTransition):
+        next_status("cancelled", action)
+
+
+def test_cancelled_can_be_reopened():
+    assert next_status("cancelled", "reopen") == "draft"
+
+
 async def test_create_job_from_current_version(client, db_session):
     content = await _create_content(client)
     response = await _create_job(client, content["id"])
