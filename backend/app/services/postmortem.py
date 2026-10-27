@@ -207,41 +207,45 @@ async def generate_postmortem(
     memory_ids: list[str] = []
     if profile_id is not None:
         # 锁住画像行并在锁内重新读取，避免并发复盘写入重复记忆
-        await session.execute(
-            select(Profile.id)
-            .where(Profile.id == profile_id, Profile.tenant_id == tenant_id)
-            .with_for_update()
-        )
-        existing_rows = (
+        locked = (
             await session.execute(
-                select(ProfileMemory.content).where(
-                    ProfileMemory.tenant_id == tenant_id,
-                    ProfileMemory.profile_id == profile_id,
+                select(Profile.id)
+                .where(Profile.id == profile_id, Profile.tenant_id == tenant_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        # 画像可能在 LLM 调用期间被删除，此时跳过记忆回写但仍保存复盘结果
+        if locked is not None:
+            existing_rows = (
+                await session.execute(
+                    select(ProfileMemory.content).where(
+                        ProfileMemory.tenant_id == tenant_id,
+                        ProfileMemory.profile_id == profile_id,
+                    )
                 )
-            )
-        ).scalars().all()
-        seen = {_memory_key(item) for item in existing_rows}
-        for kind, memory_content, weight in _memory_candidates(
-            report.get("memories")
-        ):
-            key = _memory_key(memory_content)
-            if key in seen:
-                continue
-            seen.add(key)
-            memory = ProfileMemory(
-                tenant_id=tenant_id,
-                profile_id=profile_id,
-                kind=kind,
-                content=memory_content,
-                weight=weight,
-                source="postmortem",
-                tags=[],
-            )
-            session.add(memory)
-            await session.flush()
-            memory_ids.append(str(memory.id))
-            if len(memory_ids) >= MAX_MEMORIES_PER_RUN:
-                break
+            ).scalars().all()
+            seen = {_memory_key(item) for item in existing_rows}
+            for kind, memory_content, weight in _memory_candidates(
+                report.get("memories")
+            ):
+                key = _memory_key(memory_content)
+                if key in seen:
+                    continue
+                seen.add(key)
+                memory = ProfileMemory(
+                    tenant_id=tenant_id,
+                    profile_id=profile_id,
+                    kind=kind,
+                    content=memory_content,
+                    weight=weight,
+                    source="postmortem",
+                    tags=[],
+                )
+                session.add(memory)
+                await session.flush()
+                memory_ids.append(str(memory.id))
+                if len(memory_ids) >= MAX_MEMORIES_PER_RUN:
+                    break
 
     meta = dict(content.meta) if isinstance(content.meta, dict) else {}
     meta["postmortem"] = report

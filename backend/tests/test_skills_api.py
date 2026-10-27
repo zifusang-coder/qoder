@@ -23,10 +23,11 @@ class FakeGateway:
     def __init__(self):
         self.last_usage = Usage(2, 3)
         self.messages = []
+        self.reply = "你好，这是结果"
 
     async def complete(self, messages, **kwargs):
         self.messages = messages
-        return "你好，这是结果"
+        return self.reply
 
     async def stream(self, messages, **kwargs):
         for char in "你好":
@@ -81,6 +82,28 @@ async def test_list_toggle_and_run(client, skills_api, db_session):
     assert len(runs) == 1
     assert runs[0].skill_id == "demo-skill"
     assert runs[0].status == "succeeded"
+
+
+async def test_run_sanitizes_postprocess_output_path(
+    client, skills_api, tmp_path, monkeypatch
+):
+    import app.services.outputs as outputs_module
+
+    settings = SimpleNamespace(outputs_dir=tmp_path)
+    monkeypatch.setattr(skills_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(outputs_module, "get_settings", lambda: settings)
+    skills_api.reply = "{}"
+
+    response = await client.post(
+        "/api/skills/output-skill/run",
+        json={"inputs": {}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"]["path"].startswith("adhoc/")
+    assert json.loads(body["text"]) == body["data"]
+    assert str(tmp_path) not in response.text
 
 
 async def test_disabled_skill_blocks_run_and_stream(client, skills_api):

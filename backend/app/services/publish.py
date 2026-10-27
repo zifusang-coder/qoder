@@ -37,15 +37,6 @@ EXPORT_IN_FLIGHT_MESSAGE = "导出请求已提交，等待完成"
 EXPORT_LEASE_SECONDS = 60
 
 
-def _as_utc(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        # 部分驱动（SQLite）会把带时区的 UTC 时间读成 naive
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
 class JobNotFound(LookupError):
     pass
 
@@ -415,8 +406,13 @@ async def execute_job(
     )
 
 
-def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        # 部分驱动（SQLite）会把带时区的 UTC 时间读成 naive
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def export_job(

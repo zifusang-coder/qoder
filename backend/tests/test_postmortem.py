@@ -11,7 +11,7 @@ from app.config import DEFAULT_TENANT_ID
 from app.llm.types import Usage
 from app.main import app
 from app.models.analytics import AnalyticsSnapshot
-from app.models.profile import ProfileMemory
+from app.models.profile import Profile, ProfileMemory
 from app.models.project import Content, Project
 from app.models.skill import SkillRun, SkillSetting
 from app.skills.registry import SkillRegistry, get_registry
@@ -363,6 +363,31 @@ async def test_postmortem_without_profile_skips_writeback(
 
     system = postmortem_env.gateway.messages[0]["content"]
     assert "<profile_context>" not in system
+
+
+async def test_postmortem_skips_writeback_when_profile_deleted_during_run(
+    client, db_session, postmortem_env
+):
+    profile_id, _project_id, content_id = await _setup(client)
+    await _import_metrics(client, content_id)
+
+    async def complete(messages, **kwargs):
+        profile = await db_session.get(Profile, uuid.UUID(profile_id))
+        await db_session.delete(profile)
+        await db_session.commit()
+        return postmortem_env.gateway.reply
+
+    postmortem_env.gateway.complete = complete
+
+    response = await _postmortem(client, content_id)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["memory_ids"] == []
+    assert body["report"]["verdict"] == "值得复用"
+    assert await _count(db_session, ProfileMemory) == 0
+
+    content = await _content(db_session, content_id)
+    assert content.meta["postmortem"]["verdict"] == "值得复用"
 
 
 async def test_postmortem_invalid_json_marks_run_failed(

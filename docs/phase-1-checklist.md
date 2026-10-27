@@ -33,7 +33,7 @@
 ## 工程
 
 - [ ] `alembic upgrade head` / `downgrade base` 可往返（Phase 0 的 PostgreSQL 验证只覆盖当时 4 个迁移；Phase 1 新增 10 个迁移，当前 head 尚未在 PostgreSQL 复跑，见下方人工验收）
-- [x] 后端 `uv run pytest -q` 全绿：502 passed（本次运行）
+- [x] 后端 `uv run pytest -q` 全绿：505 passed（本次运行）
 - [x] 后端 `uv run ruff check .` 通过（本次运行）
 - [x] 前端 `npm run test` 与 `npm run build` 通过（本次运行：26 passed、`tsc -b && vite build` 成功）
 - [ ] `README` 可在新机器 30 分钟内复现（见下方人工验收）

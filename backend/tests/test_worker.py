@@ -448,8 +448,9 @@ async def test_publish_due_jobs_executes_once(worker_factory):
     ]
 
 
+@pytest.mark.parametrize("offset", [timedelta(hours=1), None])
 async def test_publish_due_jobs_rechecks_schedule_after_selection(
-    worker_factory, monkeypatch
+    worker_factory, monkeypatch, offset
 ):
     now = datetime.now(UTC)
     async with worker_factory() as session:
@@ -459,7 +460,7 @@ async def test_publish_due_jobs_rechecks_schedule_after_selection(
             content,
             key="rescheduled",
             status="approved",
-            scheduled_at=now + timedelta(hours=1),
+            scheduled_at=None if offset is None else now + offset,
             account_id=account.id,
         )
         session.add(job)

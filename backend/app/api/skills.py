@@ -221,11 +221,18 @@ async def run_skill(
         raise AppError(
             "skill_output_invalid", "模型输出格式异常", 502
         ) from exc
+    data = public_output_data(result.data, get_settings().outputs_dir)
+    # 后处理技能的 text 是 data 的 JSON 序列化，必须同步使用脱敏后的路径
+    text = (
+        json.dumps(data, ensure_ascii=False)
+        if skill.manifest.postprocess and data is not None
+        else result.text
+    )
     return RunOut(
         run_id=result.run_id,
         skill_id=result.skill_id,
-        text=result.text,
-        data=public_output_data(result.data, get_settings().outputs_dir),
+        text=text,
+        data=data,
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
         duration_ms=result.duration_ms,
