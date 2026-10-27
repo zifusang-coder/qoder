@@ -243,10 +243,8 @@ async def update_account(
     meta = None
     if payload.meta is not None:
         # PATCH 只合并本次提交的键，未提交的 meta（如 thumb_media_id）必须保留
-        try:
-            meta = _clean_meta({**(account.meta or {}), **payload.meta})
-        except ValueError as exc:
-            raise AppError("validation_error", str(exc), 422) from None
+        stored = account.meta if isinstance(account.meta, dict) else {}
+        meta = {**{k: v for k, v in stored.items() if k in ALLOWED_META}, **payload.meta}
     if name is not None:
         account.name = name
     if credential_enc is not None:

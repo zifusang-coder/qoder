@@ -1,11 +1,14 @@
 import json
 import logging
+import subprocess
+import sys
 import uuid
 
 import httpx
 import pytest
 import respx
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.project import Content, ContentVersion, Project
@@ -477,6 +480,62 @@ async def test_update_meta_merges_instead_of_replacing(client, db_session):
     assert article["thumb_media_id"] == "thumb-0"
 
 
+async def test_update_meta_tolerates_legacy_stored_keys(client, db_session):
+    legacy = PlatformAccount(
+        tenant_id=DEFAULT_TENANT_ID,
+        platform="wechat",
+        name="旧账号",
+        credential_enc=encrypt_secret(json.dumps(CREDENTIAL)),
+        status="active",
+        meta={"legacy_key": "x", "author": "旧作者"},
+    )
+    db_session.add(legacy)
+    await db_session.commit()
+    await db_session.refresh(legacy)
+
+    response = await client.patch(
+        f"/api/accounts/{legacy.id}", json={"meta": {"author": "新作者"}}
+    )
+    assert response.status_code == 200, response.text
+    legacy_id = legacy.id
+    db_session.expire_all()
+    refreshed = (
+        await db_session.execute(
+            select(PlatformAccount).where(PlatformAccount.id == legacy_id)
+        )
+    ).scalar_one()
+    assert refreshed.meta == {"author": "新作者"}
+
+
+async def test_update_meta_tolerates_non_dict_stored_meta(client, db_session):
+    # SQLite 的 JSON 列接受 JSON 数组，用来覆盖历史遗留的非 dict meta
+    legacy = PlatformAccount(
+        tenant_id=DEFAULT_TENANT_ID,
+        platform="wechat",
+        name="非dict账号",
+        credential_enc=encrypt_secret(json.dumps(CREDENTIAL)),
+        status="active",
+        meta=["legacy"],
+    )
+    db_session.add(legacy)
+    await db_session.commit()
+    await db_session.refresh(legacy)
+    assert legacy.meta == ["legacy"]
+
+    response = await client.patch(
+        f"/api/accounts/{legacy.id}", json={"meta": {"author": "新作者"}}
+    )
+    assert response.status_code == 200, response.text
+    legacy_id = legacy.id
+    db_session.expire_all()
+    refreshed = (
+        await db_session.execute(
+            select(PlatformAccount).where(PlatformAccount.id == legacy_id)
+        )
+    ).scalar_one()
+    assert refreshed.meta == {"author": "新作者"}
+
+
 async def test_update_account_cross_tenant_or_malformed_404(client, db_session):
     foreign = PlatformAccount(
         tenant_id=OTHER_TENANT,
@@ -502,7 +561,7 @@ async def test_update_account_cross_tenant_or_malformed_404(client, db_session):
     assert malformed.json()["code"] == "not_found"
 
 
-async def test_update_invalid_credential_is_422_without_leak(client):
+async def test_update_invalid_credential_is_422_without_leak(client, db_session):
     account = await _create_account(client)
 
     response = await client.patch(
@@ -512,6 +571,10 @@ async def test_update_invalid_credential_is_422_without_leak(client):
     assert response.json()["code"] == "validation_error"
     assert "wx-new" not in response.text
     assert CREDENTIAL["app_secret"] not in response.text
+
+    stored = await _stored_account(db_session, account["id"])
+    assert stored.name == "主号"
+    assert json.loads(decrypt_secret(stored.credential_enc)) == CREDENTIAL
 
 
 @pytest.mark.parametrize(
@@ -528,6 +591,30 @@ async def test_account_field_length_limits(client, overrides):
     )
     assert response.status_code == 422
     assert response.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"name": "n" * 101},
+        {"meta": {"author": "a" * 65}},
+        {"meta": {"thumb_media_id": "t" * 201}},
+    ],
+)
+async def test_update_field_length_limits(client, db_session, overrides):
+    account = await _create_account(client)
+
+    response = await client.patch(
+        f"/api/accounts/{account['id']}", json=overrides
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+    listed = await client.get("/api/accounts")
+    item = next(i for i in listed.json() if i["id"] == account["id"])
+    assert item["name"] == "主号"
+    stored = await _stored_account(db_session, account["id"])
+    assert stored.meta == {"author": "作者甲", "thumb_media_id": "thumb-0"}
 
 
 @pytest.mark.parametrize(
@@ -694,9 +781,21 @@ async def test_digest_unescapes_html_entities():
     assert article["digest"] == "A & B"
 
 
-def test_httpx_logging_is_suppressed():
-    import app.publish.wechat  # noqa: F401  适配器导入即生效，worker 也不会泄露 URL
-
+def test_httpx_loggers_configured_by_adapter_import():
+    # 子进程从干净的 logger 状态验证适配器导入即生效（本模块已导入过适配器）
+    script = (
+        "import logging, app.publish.wechat; "
+        "assert logging.getLogger('httpx').level == logging.WARNING; "
+        "assert logging.getLogger('httpcore').level == logging.WARNING"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=".",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
     assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
 
@@ -924,12 +1023,13 @@ async def test_in_flight_marker_is_persisted_before_adapter_call(
         capability = "auto"
 
         async def publish(self, *, account, title, body):
-            db_session.expire_all()
-            current = (
-                await db_session.execute(
-                    select(PublishJob).where(PublishJob.id == job_uuid)
-                )
-            ).scalar_one()
+            # 用独立会话读取同一引擎，验证服务在调用适配器前已提交进行中标记
+            async with AsyncSession(bind=db_session.bind) as probe:
+                current = (
+                    await probe.execute(
+                        select(PublishJob).where(PublishJob.id == job_uuid)
+                    )
+                ).scalar_one()
             observed["status"] = current.status
             observed["error"] = current.error
             return PublishResult(external_id="media-inspected")
@@ -1095,7 +1195,7 @@ async def test_execute_published_job_returns_invalid_state(client, db_session):
     assert response.json()["code"] == "invalid_state"
 
 
-async def test_corrupted_credentials_returns_sanitized_502(client, db_session):
+async def test_corrupted_credentials_returns_sanitized_409(client, db_session):
     account = await _create_account(client)
     content = await _create_content(client)
     job = await _create_job(client, content["id"], account_id=account["id"])
@@ -1110,14 +1210,15 @@ async def test_corrupted_credentials_returns_sanitized_502(client, db_session):
     assert listed.json()[0]["credential_masked"] == "{}"
 
     response = await _execute(client, job["id"])
-    assert response.status_code == 502
-    assert response.json()["code"] == "publish_failed"
+    assert response.status_code == 409
+    assert response.json()["code"] == "account_misconfigured"
     assert response.json()["message"] == "账号凭据不可用，请重新授权"
     assert "broken" not in response.text
 
     failed = await _stored_job(db_session, job["id"])
     assert failed.status == "publish_failed"
     assert failed.error == "账号凭据不可用，请重新授权"
+    assert failed.attempts == 0
 
 
 async def test_apply_action_rejects_opaque_fields(client, db_session):

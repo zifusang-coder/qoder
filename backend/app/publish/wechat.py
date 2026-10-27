@@ -76,9 +76,9 @@ class WeChatMPAdapter:
             raw = decrypt_secret(account.credential_enc)
             creds = json.loads(raw)
         except (InvalidToken, ValueError, TypeError, UnicodeError):
-            raise PublishError("账号凭据不可用，请重新授权") from None
+            raise PublishConfigError("账号凭据不可用，请重新授权") from None
         if not isinstance(creds, dict):
-            raise PublishError("公众号凭据不完整，请重新授权")
+            raise PublishConfigError("公众号凭据不完整，请重新授权")
         app_id = creds.get("app_id")
         app_secret = creds.get("app_secret")
         if (
@@ -87,7 +87,7 @@ class WeChatMPAdapter:
             or not isinstance(app_secret, str)
             or not app_secret.strip()
         ):
-            raise PublishError("公众号凭据不完整，请重新授权")
+            raise PublishConfigError("公众号凭据不完整，请重新授权")
         return {"app_id": app_id.strip(), "app_secret": app_secret.strip()}
 
     @staticmethod
