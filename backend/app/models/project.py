@@ -11,7 +11,12 @@ class Project(TenantScoped):
 
     title: Mapped[str] = mapped_column(String(200))
     topic: Mapped[str] = mapped_column(Text, default="")
-    profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(32), default="draft")
     platforms: Mapped[list] = mapped_column(JSONType, default=list)
     meta: Mapped[dict] = mapped_column(JSONType, default=dict)
@@ -36,7 +41,7 @@ class ContentVersion(TenantScoped):
     __table_args__ = (UniqueConstraint("content_id", "version", name="uq_content_version"),)
 
     content_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), ForeignKey("contents.id", ondelete="CASCADE"), index=True
+        Uuid(as_uuid=True), ForeignKey("contents.id", ondelete="CASCADE")
     )
     version: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(300), default="")

@@ -1,8 +1,16 @@
 import uuid
+from typing import Annotated
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -14,12 +22,29 @@ from app.models.user import User
 
 router = APIRouter(tags=["projects"])
 
+ShortText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)
+]
+Title300 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
+ProjectTitle = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+
 
 class ProjectIn(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    model_config = ConfigDict(extra="forbid")
+
+    title: ProjectTitle
     topic: str = ""
     profile_id: str | None = None
-    platforms: list[str] = Field(default_factory=list)
+    platforms: list[
+        Annotated[str, StringConstraints(min_length=1, max_length=32)]
+    ] = Field(default_factory=list, max_length=20)
+
+    @field_validator("profile_id", mode="before")
+    @classmethod
+    def _blank_profile_to_none(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 class ProjectOut(BaseModel):
@@ -36,9 +61,11 @@ class ProjectList(BaseModel):
 
 
 class ContentIn(BaseModel):
-    platform: str
-    kind: str = "article"
-    title: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    platform: ShortText
+    kind: ShortText = "article"
+    title: Title300 = ""
     body: str = ""
 
 
@@ -53,9 +80,11 @@ class ContentOut(BaseModel):
 
 
 class VersionIn(BaseModel):
-    title: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    title: Title300 = ""
     body: str = ""
-    source: str = "manual"
+    source: ShortText = "manual"
 
 
 class VersionOut(BaseModel):
@@ -81,7 +110,8 @@ def _parse_uuid(value: str, message: str) -> uuid.UUID:
 def _project_out(p: Project) -> ProjectOut:
     return ProjectOut(
         id=str(p.id), title=p.title, topic=p.topic, status=p.status,
-        profile_id=p.profile_id, platforms=p.platforms or [],
+        profile_id=str(p.profile_id) if p.profile_id else None,
+        platforms=p.platforms or [],
     )
 
 
@@ -155,18 +185,22 @@ async def create_project(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProjectOut:
-    if payload.profile_id:
+    data = payload.model_dump()
+    profile_id = data.pop("profile_id")
+    profile_uuid = None
+    if profile_id:
+        profile_uuid = _parse_uuid(profile_id, "账号画像不存在")
         profile = (
             await session.execute(
                 select(Profile).where(
-                    Profile.id == _parse_uuid(payload.profile_id, "账号画像不存在"),
+                    Profile.id == profile_uuid,
                     Profile.tenant_id == user.tenant_id,
                 )
             )
         ).scalar_one_or_none()
         if profile is None:
             raise AppError("not_found", "账号画像不存在", 404)
-    project = Project(tenant_id=user.tenant_id, **payload.model_dump())
+    project = Project(tenant_id=user.tenant_id, profile_id=profile_uuid, **data)
     session.add(project)
     await session.commit()
     await session.refresh(project)
@@ -271,6 +305,10 @@ async def create_version(
     content.current_version = version_no
     if payload.title:
         content.title = payload.title
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise AppError("version_conflict", "版本冲突，请重试", 409) from None
     await session.refresh(version)
     return _version_out(version)
