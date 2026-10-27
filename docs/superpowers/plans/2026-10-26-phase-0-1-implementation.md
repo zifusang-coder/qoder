@@ -7758,84 +7758,439 @@ git commit -m "feat: add project file upload and cross-platform repurposing"
 **Files:**
 - Create: `backend/app/services/router.py`
 - Create: `backend/app/api/chat.py`
+- Create: `backend/app/services/outputs.py`
+- Modify: `backend/app/api/skills.py`
+- Modify: `backend/app/skills/executor.py`
+- Modify: `backend/app/services/profiles.py`
 - Modify: `backend/app/main.py`
+- Modify: `skills/postmortem/manifest.yaml`
 - Create: `backend/tests/test_chat.py`
+- Modify: `backend/tests/test_skills_api.py`
+- Modify: `backend/tests/test_skill_executor.py`
 
 - [ ] **Step 1: 写失败测试 `backend/tests/test_chat.py`**
 
-```python
-from pathlib import Path
+测试使用真实的 `SkillRegistry(SKILLS_DIR)`（`backend/../skills`），只 monkeypatch `chat_module.load_gateway_default`；**不要**再通过 `app.dependency_overrides[get_llm_gateway]` 注入网关（`get_llm_gateway` 不是 FastAPI 依赖，且会把 400 提前到 404/409 之前）。
 
-from app.llm.gateway import get_llm_gateway
-from app.llm.types import Usage
+```python
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+
+from sqlalchemy import select
+
+from app.api import chat as chat_module
+from app.api.chat import _public_data, _summarize
+from app.main import app
+from app.models.base import DEFAULT_TENANT_ID
+from app.models.profile import Profile
+from app.models.skill import SkillRun, SkillSetting
+from app.services.outputs import adhoc_output_dir
 from app.services.router import route_intent
 from app.skills.registry import SkillRegistry, get_registry
 
-FIXTURE = Path(__file__).parent / "fixtures" / "skills"
+SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
+OUT = "outputs/adhoc"
 
 
 class FakeGateway:
-    last_usage = Usage(5, 5)
-
     async def complete(self, messages, **kwargs):
         return "这是运营建议"
 
 
+def _gateway_must_not_load():
+    async def _load(_session, _tenant_id):
+        raise AssertionError("gateway must not load")
+
+    return _load
+
+
 def test_route_keywords():
-    assert route_intent("帮我评估一下这个选题").skill_id == "topic-evaluator"
-    assert route_intent("写个小红书笔记：通勤穿搭").skill_id == "xhs-note"
-    assert route_intent("生成 8 个标题").skill_id == "title-hook"
-    assert route_intent("你好").kind == "chat"
+    evaluated = route_intent("帮我评估一下这个选题", output_dir=OUT)
+    assert evaluated.kind == "skill"
+    assert evaluated.skill_id == "topic-evaluator"
+
+    note = route_intent("写个小红书笔记：通勤穿搭", output_dir=OUT)
+    assert note.kind == "skill"
+    assert note.skill_id == "xhs-note"
+    assert note.inputs == {"topic": "写个小红书笔记：通勤穿搭"}
+
+    titles = route_intent("生成 8 个标题", output_dir=OUT)
+    assert titles.kind == "skill"
+    assert titles.skill_id == "title-hook"
+
+    assert route_intent("你好", output_dir=OUT).kind == "chat"
+
+    # 具体意图优先于平台/体裁名词
+    title_with_platform = route_intent("公众号标题怎么写", output_dir=OUT)
+    assert title_with_platform.skill_id == "title-hook"
+
+    repurpose = route_intent("把公众号文章改写成小红书笔记", output_dir=OUT)
+    assert repurpose.skill_id == "content-repurposing"
+
+    cover = route_intent("帮我做个封面，标题叫周报模板", output_dir=OUT)
+    assert cover.kind == "skill"
+    assert cover.skill_id == "cover-card"
+    assert cover.inputs["title"] == "帮我做个封面，标题叫周报模板"
+    assert cover.inputs["output_dir"] == OUT
+
+    risk = route_intent("评估这篇内容的违规风险", output_dir=OUT)
+    assert risk.skill_id == "risk-scan"
+
+    assert route_intent("公众号怎么涨粉", output_dir=OUT).kind == "chat"
+
+    douyin = route_intent("写个抖音口播文案", output_dir=OUT)
+    assert douyin.skill_id == "copywriting"
+    assert douyin.inputs["platform"] == "douyin"
+
+    zhihu = route_intent("写个知乎回答", output_dir=OUT)
+    assert zhihu.skill_id == "copywriting"
+    assert zhihu.inputs["platform"] == "zhihu"
+
+    fallback = route_intent("写个公众号口播", output_dir=OUT)
+    assert fallback.skill_id == "copywriting"
+    assert fallback.inputs["platform"] == "douyin"
 
 
-async def test_chat_runs_skill_and_plain_chat(client):
-    from app.main import app
+def test_route_avoids_generic_rewrite_collisions():
+    assert (
+        route_intent("帮我把封面改成浅色", output_dir=OUT).skill_id == "cover-card"
+    )
+    assert (
+        route_intent("把这段标题改成更吸引人", output_dir=OUT).skill_id
+        == "title-hook"
+    )
+    assert (
+        route_intent("把这篇笔记改成合规一些", output_dir=OUT).skill_id
+        == "risk-scan"
+    )
+    assert (
+        route_intent("写个抖音脚本", output_dir=OUT).skill_id == "copywriting"
+    )
 
-    class StubRegistry:
+
+async def test_chat_plain_and_skill(client, monkeypatch, db_session):
+    async def _load(_session, _tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(chat_module, "load_gateway_default", _load)
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        plain = await client.post("/api/chat", json={"message": "你好"})
+        assert plain.status_code == 200
+        body = plain.json()
+        assert body["intent"] == "chat"
+        assert body["reply"] == "这是运营建议"
+        assert body["skill_id"] is None
+        assert body["missing"] is None
+
+        routed = await client.post(
+            "/api/chat", json={"message": "写个小红书笔记：通勤穿搭"}
+        )
+        assert routed.status_code == 200
+        body = routed.json()
+        assert body["intent"] == "skill"
+        assert body["skill_id"] == "xhs-note"
+        assert body["run_id"]
+        assert body["missing"] is None
+        assert body["reply"] == "这是运营建议"
+
+        runs = (await db_session.execute(select(SkillRun))).scalars().all()
+        assert len(runs) == 1
+        assert runs[0].skill_id == "xhs-note"
+        assert runs[0].status == "succeeded"
+        assert runs[0].inputs == {"topic": "写个小红书笔记：通勤穿搭"}
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_rejects_disabled_skill(client, monkeypatch, db_session):
+    db_session.add(
+        SkillSetting(
+            tenant_id=DEFAULT_TENANT_ID, skill_id="xhs-note", enabled=False
+        )
+    )
+    await db_session.flush()
+    monkeypatch.setattr(
+        chat_module, "load_gateway_default", _gateway_must_not_load()
+    )
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        resp = await client.post(
+            "/api/chat", json={"message": "写个小红书笔记：通勤穿搭"}
+        )
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "skill_disabled"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_plain_injects_profile(client, monkeypatch, db_session):
+    class CapturingGateway:
         def __init__(self):
-            self._demo = SkillRegistry(FIXTURE).get("demo-skill")
+            self.messages = []
 
-        def get(self, skill_id):
-            return self._demo
+        async def complete(self, messages, **kwargs):
+            self.messages = messages
+            return "收到"
 
-    app.dependency_overrides[get_registry] = lambda: StubRegistry()
-    app.dependency_overrides[get_llm_gateway] = lambda: FakeGateway()
+    gateway = CapturingGateway()
 
-    plain = await client.post("/api/chat", json={"message": "你好"})
-    assert plain.status_code == 200
-    assert plain.json()["intent"] == "chat"
-    assert plain.json()["reply"] == "这是运营建议"
+    async def _load(_session, _tenant_id):
+        return gateway
 
-    routed = await client.post("/api/chat", json={"message": "写个小红书笔记：通勤穿搭"})
-    assert routed.status_code == 200
-    assert routed.json()["intent"] == "skill"
-    assert routed.json()["skill_id"] == "xhs-note"
-    assert routed.json()["run_id"]
+    monkeypatch.setattr(chat_module, "load_gateway_default", _load)
+    profile = Profile(
+        id=uuid.uuid4(),
+        tenant_id=DEFAULT_TENANT_ID,
+        name="主账号",
+        account_name="效率笔记",
+    )
+    db_session.add(profile)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/api/chat", json={"message": "你好", "profile_id": str(profile.id)}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["intent"] == "chat"
+    system = gateway.messages[0]["content"]
+    assert "<profile_context>" in system
+    assert "效率笔记" in system
+
+
+async def test_chat_skill_inputs_continuation(client, monkeypatch, db_session):
+    class PostmortemGateway:
+        async def complete(self, messages, **kwargs):
+            return '{"summary": "ok", "findings": []}'
+
+    async def _load(_session, _tenant_id):
+        return PostmortemGateway()
+
+    monkeypatch.setattr(chat_module, "load_gateway_default", _load)
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "帮我复盘一下上周数据",
+                "inputs": {
+                    "title": "周报",
+                    "metrics": {"views": 100},
+                    "evil": "x",
+                },
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["skill_id"] == "postmortem"
+        assert body["run_id"]
+        assert body["reply"] == "ok"
+
+        runs = (await db_session.execute(select(SkillRun))).scalars().all()
+        assert len(runs) == 1
+        persisted = runs[0].inputs
+        assert persisted["title"] == "周报"
+        assert persisted["metrics"] == {"views": 100}
+        assert persisted["platform"] == "wechat"
+        assert "evil" not in persisted
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_missing_inputs(client, monkeypatch, db_session):
+    monkeypatch.setattr(
+        chat_module, "load_gateway_default", _gateway_must_not_load()
+    )
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        resp = await client.post(
+            "/api/chat", json={"message": "帮我复盘一下上周数据"}
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["intent"] == "skill"
+        assert body["skill_id"] == "postmortem"
+        assert "title" in body["missing"]
+        assert "metrics" in body["missing"]
+        assert "内容标题" in body["reply"]
+        assert body["run_id"] is None
+        runs = (await db_session.execute(select(SkillRun))).scalars().all()
+        assert runs == []
+
+        blank = await client.post(
+            "/api/chat",
+            json={
+                "message": "帮我复盘一下上周数据",
+                "inputs": {"title": "   ", "metrics": {"views": 1}},
+            },
+        )
+        assert blank.status_code == 200
+        assert blank.json()["missing"] == ["title"]
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_forces_server_output_dir(client, monkeypatch):
+    captured = {}
+
+    class StubExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, skill_id, inputs):
+            captured["skill_id"] = skill_id
+            captured["inputs"] = inputs
+            return SimpleNamespace(run_id="run-1", text="ok", data=None)
+
+    async def _load(_session, _tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(chat_module, "SkillExecutor", StubExecutor)
+    monkeypatch.setattr(chat_module, "load_gateway_default", _load)
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "帮我做个封面",
+                "inputs": {"output_dir": "/tmp/escape", "evil": "x"},
+            },
+        )
+        assert resp.status_code == 200
+        assert captured["skill_id"] == "cover-card"
+        out_dir = Path(captured["inputs"]["output_dir"])
+        assert out_dir.parent.name == DEFAULT_TENANT_ID
+        assert out_dir.parent.parent.name == "adhoc"
+        assert "/tmp/escape" not in captured["inputs"]["output_dir"]
+        assert "evil" not in captured["inputs"]
+        assert captured["inputs"]["title"]
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_unknown_profile(client, monkeypatch):
+    monkeypatch.setattr(
+        chat_module, "load_gateway_default", _gateway_must_not_load()
+    )
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "写个小红书笔记：通勤穿搭",
+                "profile_id": str(uuid.uuid4()),
+            },
+        )
+        assert resp.status_code == 404
+        body = resp.json()
+        assert body["code"] == "not_found"
+        assert body["message"] == "账号画像不存在"
+
+        plain = await client.post(
+            "/api/chat",
+            json={"message": "你好", "profile_id": str(uuid.uuid4())},
+        )
+        assert plain.status_code == 404
+        assert plain.json()["message"] == "账号画像不存在"
+
+        clarifying = await client.post(
+            "/api/chat",
+            json={
+                "message": "帮我复盘一下上周数据",
+                "profile_id": str(uuid.uuid4()),
+            },
+        )
+        assert clarifying.status_code == 404
+        assert clarifying.json()["message"] == "账号画像不存在"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+def test_public_data_and_summarize(tmp_path):
+    outputs_root = tmp_path / "outputs"
+    inside = outputs_root / "adhoc" / "x" / "cover.png"
+    inside.parent.mkdir(parents=True)
+    inside.write_bytes(b"png")
+
+    assert _public_data({"path": str(inside)}, outputs_root) == {
+        "path": "adhoc/x/cover.png"
+    }
+    outside = tmp_path / "elsewhere" / "cover.png"
+    assert _public_data({"path": str(outside)}, outputs_root) == {
+        "path": str(outside)
+    }
+    assert _public_data(None, outputs_root) is None
+
+    assert _summarize({"titles": [{"text": "A"}, {"text": "B"}]}) == "1. A\n2. B"
+    assert (
+        _summarize({"summary": "high", "scan": {"risk_level": "high", "total": 3}})
+        == "风险等级：高；命中 3 处"
+    )
+    assert _summarize({"verdict": "advance"}) == "建议推进"
+    assert (
+        _summarize({"verdict": "advance", "score": 82, "reasons": ["时效性强"]})
+        == "建议推进（82 分）；理由：时效性强"
+    )
+    assert _summarize({"verdict": {"x": 1}}) == "已完成，请查看结构化结果。"
+    assert (
+        _summarize({"verdict": "超预期", "next_actions": ["多做对比图"]})
+        == "超预期；建议：多做对比图"
+    )
+    assert _summarize({"score": 82.0, "fixes": []}) == "评分 82"
+    assert _summarize({"score": 82, "fixes": ["改标题"]}) == "评分 82；建议：改标题"
+    assert _summarize({"score": 80, "fixes": 3}) == "评分 80"
+    assert _summarize({}) == "已完成，请查看结构化结果。"
+    assert (
+        _summarize({"titles": [{"text": "A"}, {"style": "x"}, None, "B"]})
+        == "1. A\n2. B"
+    )
+    assert (
+        _summarize({"path": "adhoc/x/cover.png"})
+        == "已生成文件：adhoc/x/cover.png"
+    )
+
+
+def test_adhoc_output_dir_is_tenant_scoped(tmp_path, monkeypatch):
+    import app.services.outputs as outputs_module
+
+    monkeypatch.setattr(
+        outputs_module,
+        "get_settings",
+        lambda: SimpleNamespace(outputs_dir=tmp_path),
+    )
+    first = adhoc_output_dir(DEFAULT_TENANT_ID)
+    second = adhoc_output_dir(DEFAULT_TENANT_ID)
+    assert first != second
+    assert first.parent == tmp_path / "adhoc" / DEFAULT_TENANT_ID
+    assert second.parent == tmp_path / "adhoc" / DEFAULT_TENANT_ID
+    assert len(first.name) == 32
 ```
-
-（真实环境需存在 `xhs-note` 技能；测试用 StubRegistry 验证路由与执行链路。）
 
 - [ ] **Step 2: 运行确认失败**
 
 Run: `cd backend && uv run pytest tests/test_chat.py -q`
-Expected: FAIL（模块不存在）
+Expected: FAIL（`app.services.router` / `app.api.chat` 尚不存在）
 
 - [ ] **Step 3: 写 `backend/app/services/router.py`**
 
 ```python
 from dataclasses import dataclass, field
+from typing import Literal
 
+# 规则按“先具体、后泛化”排列：具体动作（改写/风险/复盘等）优先于
+# 平台或体裁名词（公众号/小红书/笔记/标题），避免被泛词抢先命中。
 RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("topic-evaluator", ("选题", "评估")),
-    ("article-outline", ("大纲", "提纲")),
-    ("wechat-article", ("公众号", "长文")),
-    ("xhs-note", ("小红书", "笔记")),
-    ("title-hook", ("标题",)),
-    ("copywriting", ("口播", "短视频文案", "抖音", "知乎")),
+    ("content-repurposing", ("改写", "一稿多改")),
     ("cover-card", ("封面",)),
     ("risk-scan", ("风险", "合规", "违规")),
-    ("content-repurposing", ("改写", "一稿多改")),
     ("postmortem", ("复盘", "数据分析")),
+    ("title-hook", ("标题",)),
+    ("topic-evaluator", ("选题", "评估")),
+    ("article-outline", ("大纲", "提纲")),
+    ("wechat-article", ("公众号文章", "公众号长文", "写公众号", "微信文章")),
+    ("xhs-note", ("小红书", "笔记")),
+    ("copywriting", ("口播", "短视频文案", "抖音", "知乎")),
 ]
 
 PLATFORM_HINTS = {
@@ -7845,13 +8200,15 @@ PLATFORM_HINTS = {
     "快手": "kuaishou",
     "视频号": "channels",
     "知乎": "zhihu",
+    "b站": "bilibili",
     "B站": "bilibili",
+    "微信": "wechat",
 }
 
 
 @dataclass
 class Intent:
-    kind: str
+    kind: Literal["chat", "skill"]
     skill_id: str | None = None
     inputs: dict = field(default_factory=dict)
 
@@ -7863,7 +8220,25 @@ def detect_platform(message: str) -> str:
     return "wechat"
 
 
-def route_intent(message: str, *, output_dir: str = "outputs/adhoc") -> Intent:
+def _skill_inputs(skill_id: str, text: str, platform: str, output_dir: str) -> dict:
+    if skill_id == "content-repurposing":
+        return {"source": text, "platform": platform}
+    if skill_id == "cover-card":
+        return {"title": text, "output_dir": output_dir}
+    if skill_id == "risk-scan":
+        return {"text": text, "platform": platform}
+    if skill_id == "postmortem":
+        return {"platform": platform}
+    if skill_id == "wechat-article":
+        return {"topic": text, "outline": text}
+    if skill_id == "copywriting":
+        return {"topic": text, "platform": platform}
+    if skill_id == "xhs-note":
+        return {"topic": text}
+    return {"topic": text, "platform": platform}
+
+
+def route_intent(message: str, *, output_dir: str) -> Intent:
     text = message.strip()
     for skill_id, keywords in RULES:
         if any(word in text for word in keywords):
@@ -7872,41 +8247,82 @@ def route_intent(message: str, *, output_dir: str = "outputs/adhoc") -> Intent:
                 "douyin", "channels", "zhihu", "kuaishou", "bilibili",
             }:
                 platform = "douyin"
-            inputs: dict = {
-                "topic": text,
-                "text": text,
-                "source": text,
-                "outline": text,
-                "platform": platform,
-            }
-            if skill_id == "cover-card":
-                inputs["title"] = text
-                inputs["output_dir"] = output_dir
+            inputs = _skill_inputs(skill_id, text, platform, output_dir)
             return Intent(kind="skill", skill_id=skill_id, inputs=inputs)
     return Intent(kind="chat")
 ```
 
-- [ ] **Step 4: 写 `backend/app/api/chat.py`**
+关键约束：
+- `RULES` 必须**先具体动作、后平台/体裁名词**：`改写`/`封面`/`风险`/`复盘`/`标题` 排在 `公众号`/`小红书`/`笔记` 之前。否则“把公众号文章改写成小红书笔记”会命中 `xhs-note`，“公众号标题怎么写”会命中 `wechat-article`。
+- `改成`/`转成` **故意不加入** `content-repurposing` 关键词：它们表达的是“修改某个已有对象”（封面、标题、文案），而不是跨平台一稿多改；“把封面改成浅色”应走 `cover-card`，“把这段标题改成更吸引人”应走 `title-hook`，“把这篇笔记改成合规一些”应走 `risk-scan`。
+- `output_dir` 是**必填仅关键字参数**（`*, output_dir: str`），由调用方（chat API / 测试）在路由前通过 `adhoc_output_dir` 生成并按租户隔离；路由本身不拼路径。
+- `Intent.kind` 用 `Literal["chat", "skill"]`，避免拼写漂移；`inputs` 按技能裁剪，只放该技能 manifest 声明且本次可确定的值：
+  - `content-repurposing`：`source` + `platform`
+  - `cover-card`：`title` + `output_dir`
+  - `risk-scan`：`text` + `platform`
+  - `postmortem`：仅 `platform`（`title`/`metrics` 留给澄清流程补）
+  - `wechat-article`：`topic` + `outline`
+  - `copywriting`：`topic` + `platform`
+  - `xhs-note`：`topic`
+  - 其余：`topic` + `platform`
+- `copywriting` 的平台白名单为 `douyin/channels/zhihu/kuaishou/bilibili`；`xiaohongshu`、`wechat` 等不在白名单时回退 `douyin`（“写个公众号口播” → `douyin`），避免把口播稿错误标成公众号文章。
+- 目前采用**纯子串匹配**，不做分词；“把封面改写一下”会因 `改写` 规则排在前面而路由到 `content-repurposing`（见落地说明中的已知遗留）。
+
+- [ ] **Step 4: 写 `backend/app/services/outputs.py`**
 
 ```python
+import uuid
+from pathlib import Path
+
+from app.config import get_settings
+from app.skills.executor import declared_inputs
+from app.skills.manifest import LoadedSkill
+
+
+def adhoc_output_dir(tenant_id: str) -> Path:
+    return get_settings().outputs_dir / "adhoc" / tenant_id / uuid.uuid4().hex
+
+
+def prepare_inputs(skill: LoadedSkill, inputs: dict, tenant_id: str) -> dict:
+    prepared = declared_inputs(skill, inputs)
+    if "output_dir" in (skill.manifest.inputs.get("properties") or {}):
+        # 服务端生成按租户隔离的单次运行目录，避免调用方写入任意路径
+        prepared["output_dir"] = str(adhoc_output_dir(tenant_id))
+    return prepared
+```
+
+要点：
+- `output_dir` 一律由**服务端**生成：`<outputs_dir>/adhoc/<tenant_id>/<uuid4().hex>`。同一请求内对 `route_intent` 与 `prepare_inputs` 分别调用会得到不同路径，但两者都受限于租户目录；真正传给执行器/落盘的是 `prepare_inputs` 的结果。
+- 调用方传入的 `output_dir`（如 `"/tmp/escape"`、`"../evil"`）会在 `declared_inputs` 后**被覆盖**，chat 与 `/api/skills/{run,stream}` 均无法指定任意写入路径。目录本身不在此处创建，由具体脚本按需创建。
+- 只对 manifest `inputs.properties` 中声明了 `output_dir` 的技能注入（当前为 `cover-card`）；其余技能不会凭空多出该字段。
+- `declared_inputs` 同时丢弃未声明字段，保证审计行与 LLM 输入一致。
+
+- [ ] **Step 5: 写 `backend/app/api/chat.py`**
+
+```python
+import uuid
+from pathlib import Path
+from typing import Annotated
+
+import jsonschema
 from fastapi import APIRouter, Depends
-from jsonschema import ValidationError
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.skills import get_llm_gateway, _profile_block
 from app.config import get_settings
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
-from app.llm.gateway import LLMGateway
-from app.models.skill import SkillSetting
+from app.llm.gateway import load_gateway_default
 from app.models.user import User
+from app.services.outputs import adhoc_output_dir, prepare_inputs
+from app.services.profiles import profile_block_for
+from app.services.router import route_intent
+from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
-from app.services.router import route_intent
+from app.skills.runner import ScriptError
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -7916,10 +8332,18 @@ SYSTEM_CHAT = (
     "不要承诺发布结果，不要编造平台数据。"
 )
 
+VERDICT_LABELS = {"advance": "建议推进", "revise": "需要修改", "drop": "建议放弃"}
+RISK_LABELS = {"low": "低", "medium": "中", "high": "高"}
+
 
 class ChatIn(BaseModel):
-    message: str = Field(min_length=1, max_length=4000)
-    profile_id: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    message: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
+    ]
+    profile_id: uuid.UUID | None = None
+    inputs: dict | None = None
 
 
 class ChatOut(BaseModel):
@@ -7928,21 +8352,112 @@ class ChatOut(BaseModel):
     skill_id: str | None = None
     run_id: str | None = None
     data: dict | None = None
+    missing: list[str] | None = None
+
+
+def _public_data(data: dict | None, outputs_root: Path) -> dict | None:
+    if not data or "path" not in data:
+        return data
+    path = Path(str(data["path"]))
+    try:
+        rel = path.resolve().relative_to(outputs_root.resolve())
+    except ValueError:
+        return data
+    return {**data, "path": str(rel)}
+
+
+def _score_value(data: dict) -> str | None:
+    value = data.get("score")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return None
+
+
+def _is_blank(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return not value
+    return False
+
+
+def _summarize(data: dict) -> str:
+    scan = data.get("scan")
+    if isinstance(scan, dict):
+        level = scan.get("risk_level")
+        label = RISK_LABELS.get(level, level) if isinstance(level, str) else "未知"
+        total = scan.get("total")
+        if isinstance(total, int) and not isinstance(total, bool):
+            return f"风险等级：{label}；命中 {total} 处"
+        return f"风险等级：{label}"
+    verdict = data.get("verdict")
+    if isinstance(verdict, str) and verdict:
+        head = VERDICT_LABELS.get(verdict, verdict)
+        score = _score_value(data)
+        if score is not None:
+            head += f"（{score} 分）"
+        reasons = data.get("reasons")
+        if isinstance(reasons, list) and reasons:
+            head += f"；理由：{'；'.join(str(r) for r in reasons[:3])}"
+        actions = data.get("next_actions")
+        if isinstance(actions, list) and actions:
+            head += f"；建议：{'；'.join(str(a) for a in actions[:3])}"
+        return head
+    summary = data.get("summary")
+    if isinstance(summary, str) and summary:
+        return f"风险等级：{RISK_LABELS[summary]}" if summary in RISK_LABELS else summary
+    reply = data.get("reply")
+    if isinstance(reply, str) and reply:
+        return reply
+    titles = data.get("titles")
+    if isinstance(titles, list):
+        lines = []
+        for item in titles:
+            text = item.get("text") if isinstance(item, dict) else item
+            if text is not None and str(text):
+                lines.append(str(text))
+        if lines:
+            return "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
+    score = _score_value(data)
+    if score is not None:
+        fixes = data.get("fixes") or data.get("drift")
+        suffix = ""
+        if isinstance(fixes, (list, tuple)) and fixes:
+            suffix = f"；建议：{'；'.join(str(item) for item in fixes[:3])}"
+        return f"评分 {score}{suffix}"
+    path = data.get("path")
+    if isinstance(path, str) and path:
+        return f"已生成文件：{path}"
+    return "已完成，请查看结构化结果。"
 
 
 @router.post("", response_model=ChatOut)
 async def chat(
     payload: ChatIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
-    gateway: LLMGateway = Depends(get_llm_gateway),
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> ChatOut:
-    intent = route_intent(payload.message, output_dir=str(get_settings().outputs_dir / "adhoc"))
+    settings = get_settings()
+    output_dir = str(adhoc_output_dir(user.tenant_id))
+    intent = route_intent(payload.message, output_dir=output_dir)
     if intent.kind == "chat":
+        profile_block = await profile_block_for(
+            session, payload.profile_id, user.tenant_id
+        )
+        system_prompt = (
+            f"{SYSTEM_CHAT}\n\n{profile_block}" if profile_block else SYSTEM_CHAT
+        )
+        gateway = await load_gateway_default(session, user.tenant_id)
         reply = await gateway.complete(
             [
-                {"role": "system", "content": SYSTEM_CHAT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": payload.message},
             ],
             tier="standard",
@@ -7952,69 +8467,228 @@ async def chat(
 
     skill_id = intent.skill_id or ""
     try:
-        registry.get(skill_id)
+        skill = registry.get(skill_id)
     except ManifestError as exc:
-        raise AppError("skill_missing", str(exc), 400) from exc
+        raise AppError("not_found", str(exc), 404) from exc
+    await require_enabled(session, user.tenant_id, skill_id)
 
-    enabled = (
-        await session.execute(
-            select(SkillSetting.enabled).where(
-                SkillSetting.skill_id == skill_id, SkillSetting.tenant_id == user.tenant_id
-            )
+    declared = skill.manifest.inputs.get("properties") or {}
+    merged = {**intent.inputs, **(payload.inputs or {})}
+    inputs = prepare_inputs(skill, merged, user.tenant_id)
+    missing = [
+        key
+        for key in skill.manifest.inputs.get("required", [])
+        if key not in inputs or _is_blank(inputs[key])
+    ]
+    profile_block = await profile_block_for(
+        session, payload.profile_id, user.tenant_id
+    )
+    if missing:
+        labels = []
+        for key in missing:
+            spec = declared.get(key)
+            desc = spec.get("description") if isinstance(spec, dict) else None
+            labels.append(f"{key}（{desc}）" if desc else key)
+        return ChatOut(
+            reply=(
+                f"要执行「{skill.manifest.name}」，还需要：{'、'.join(labels)}。"
+                "请通过 inputs 补充后重试。"
+            ),
+            intent="skill",
+            skill_id=skill_id,
+            missing=missing,
         )
-    ).scalar_one_or_none()
-    if enabled is False:
-        raise AppError("skill_disabled", "该技能已停用", 409)
-
+    try:
+        jsonschema.validate(inputs, skill.manifest.inputs)
+    except jsonschema.ValidationError as exc:
+        raise AppError(
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
+        ) from exc
+    gateway = await load_gateway_default(session, user.tenant_id)
     executor = SkillExecutor(
         registry=registry,
         gateway=gateway,
         session=session,
         tenant_id=user.tenant_id,
-        profile_block=await _profile_block(session, payload.profile_id, user),
+        profile_block=profile_block,
         created_by=user.id,
     )
     try:
-        result = await executor.run(skill_id, intent.inputs)
-    except ValidationError as exc:
+        result = await executor.run(skill_id, inputs)
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except jsonschema.ValidationError as exc:
         raise AppError(
-            "missing_inputs",
-            "还缺少必要信息，请补充标题、目标平台与数据指标后再试",
-            400,
-            detail={"reason": exc.message},
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
         ) from exc
-    reply = result.text if result.data is None else _summarize(result.data)
+    except ScriptError as exc:
+        raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc
+    except ValueError as exc:
+        raise AppError("skill_output_invalid", "模型输出格式异常", 502) from exc
+
+    data = _public_data(result.data, settings.outputs_dir)
+    reply = result.text if data is None else _summarize(data)
     return ChatOut(
         reply=reply,
         intent="skill",
         skill_id=skill_id,
         run_id=result.run_id,
-        data=result.data,
+        data=data,
     )
-
-
-def _summarize(data: dict) -> str:
-    for key in ("summary", "verdict", "reply"):
-        if data.get(key):
-            return str(data[key])
-    return "已完成，请查看结构化结果。"
 ```
 
-- [ ] **Step 5: 挂载路由**
+关键约束：
+- 入参：`ChatIn.message` 先 `strip_whitespace`，长度 1–4000；`extra="forbid"` 拒绝未知字段；`profile_id` 为可选 `uuid.UUID`（不是字符串）；`inputs` 为可选字典，用于澄清后的补充回答。`ChatOut` 新增 `missing: list[str] | None`。
+- 普通对话：先 `profile_block_for`（不存在则 404 “账号画像不存在”），再把画像块追加到 `SYSTEM_CHAT` 之后，最后才 `load_gateway_default` 并调用网关。这样画像 404 与 `llm_not_configured` 400 的先后顺序稳定，且画像不进入技能提示词以外的路径。
+- 技能路径的**固定顺序**：`registry.get` 404 → `require_enabled` 409 → 合并 `intent.inputs` 与 `payload.inputs`（后者覆盖前者）→ `prepare_inputs`（丢弃未声明字段 + 服务端 `output_dir`）→ `profile_block_for` 404 → 缺失必填 200（含描述，**不加载网关、不创建 SkillRun**）→ `jsonschema.validate` 422 `skill_inputs_invalid` → 懒加载网关（可能 400 `llm_not_configured`）→ `SkillExecutor.run`。
+- 执行期异常映射：`ManifestError` 404、`jsonschema.ValidationError` 422、`ScriptError` 500 `skill_script_failed`、`ValueError` 502 `skill_output_invalid`（JSON 解析失败或非对象）。
+- `_summarize` 必须是**全函数**（total）：对 `scan`、`verdict`、`summary`、`reply`、`titles`、`score`、`path` 逐形状做类型守卫——非字符串的 verdict（如 dict）、非整数的 `total`、布尔型 `score`、非列表的 `fixes` 都不会抛异常，最终回退“已完成，请查看结构化结果。”。它在 `executor.run` 提交审计之后调用，任何异常都会把一次成功的运行变成 500，因此绝不能抛。
+- `_is_blank`：`None`、纯空白字符串、空列表/空字典都算缺失；数字/布尔不算缺失。
+- `_score_value`：只接受 `int`（排除 `bool`）和整数值 `float`，输出不带小数点的字符串。
+- `_public_data`：仅当 `data["path"]` 解析后位于 `settings.outputs_dir` 之内时改为相对路径（如 `adhoc/<tenant>/<hex>/cover.png`）；越界路径原样返回；无 `path` 或 `data is None` 时原样返回。
 
-`app/main.py` 增加 `chat` 到 `app.api` 导入，并 `app.include_router(chat.router, prefix="/api")`。
+- [ ] **Step 6: 修改 `backend/app/skills/executor.py`**
 
-- [ ] **Step 6: 运行测试确认通过**
+新增模块级函数：
 
-Run: `cd backend && uv run pytest tests/test_chat.py -q`
-Expected: `2 passed`
+```python
+def declared_inputs(skill: LoadedSkill, inputs: dict) -> dict:
+    properties = skill.manifest.inputs.get("properties") or {}
+    return {key: value for key, value in inputs.items() if key in properties}
+```
 
-- [ ] **Step 7: 提交**
+在 `run` 中、`_open_run` 之前过滤（保证审计行写入的是规范化后的输入）：
+
+```python
+    async def run(self, skill_id: str, inputs: dict) -> SkillRunResult:
+        skill = self.registry.get(skill_id)
+        inputs = declared_inputs(skill, inputs)
+        started = time.monotonic()
+        record = await self._open_run(skill_id, inputs)
+```
+
+在 `build_messages` 中同样过滤（SSE `/stream` 路径直接调用它，不经过 `run`）：
+
+```python
+    def build_messages(self, skill: LoadedSkill, inputs: dict) -> list[dict[str, str]]:
+        inputs = declared_inputs(skill, inputs)
+```
+
+要点：
+- 未声明字段既不会进入 `SkillRun.inputs` 审计行，也不会进入 LLM 的 user 消息；`run` 内的 `jsonschema.validate` 也只看过滤后的输入。
+- 两处都过滤是必要的：`/api/skills/{id}/run` 与 chat 走 `run`，`/api/skills/{id}/stream` 先 `build_messages` 再流式调用，不能只覆盖其中一条路径。
+
+- [ ] **Step 7: 修改 `backend/app/services/profiles.py` 与 `backend/app/api/skills.py`**
+
+`profiles.py` 把画像块查询提升为公开函数，按 `(id, tenant_id)` 查询，记忆同样带租户过滤；不存在时抛 404：
+
+```python
+async def profile_block_for(
+    session: AsyncSession, profile_id: uuid.UUID | None, tenant_id: str
+) -> str:
+    if profile_id is None:
+        return ""
+    profile = (
+        await session.execute(
+            select(Profile).where(
+                Profile.id == profile_id,
+                Profile.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise AppError("not_found", "账号画像不存在", 404)
+    memories = (
+        await session.execute(
+            select(ProfileMemory).where(
+                ProfileMemory.tenant_id == tenant_id,
+                ProfileMemory.profile_id == profile.id,
+            )
+        )
+    ).scalars().all()
+    return build_profile_block(profile, list(memories))
+```
+
+`skills.py` 的调整：
+- 删除私有 `_profile_block` 兼容包装，改为 `from app.services.profiles import profile_block_for`；`/run` 与 `/stream` 都调用 `profile_block_for(session, payload.profile_id, user.tenant_id)`。
+- `/run` 与 `/stream` 在 `jsonschema` 校验前统一调用 `prepare_inputs`：
+
+```python
+    inputs = prepare_inputs(skill, payload.inputs, user.tenant_id)
+    _validate_inputs(skill, inputs)
+    profile_block = await profile_block_for(
+        session, payload.profile_id, user.tenant_id
+    )
+```
+
+- `prepare_inputs` 同时完成两件事：丢弃未声明字段、按租户覆盖 `output_dir`，因此 skills API 与 chat 的输入契约一致。
+- chat 与 skills API 共用同一实现，避免两套画像查询/输入清洗逻辑漂移。
+
+- [ ] **Step 8: 挂载路由并补充 manifest 描述**
+
+`backend/app/main.py`：
+
+```python
+from app.api import auth, chat, profiles, projects, skills, settings_api
+
+app.include_router(chat.router, prefix="/api")
+```
+
+`skills/postmortem/manifest.yaml` 为必填/可选输入补充 `description`，澄清回复直接读取这些描述；`metrics` 因含 `{...}` 必须加引号：
+
+```yaml
+    title:
+      type: string
+      description: 内容标题
+    platform:
+      type: string
+      description: 目标平台，如 wechat/xiaohongshu/douyin
+    metrics:
+      type: object
+      description: '发布数据，如 {"views": 1000, "likes": 50}'
+    content_excerpt:
+      type: string
+      description: 内容摘要（可选）
+    publish_time:
+      type: string
+      description: 发布时间，ISO 8601（可选）
+```
+
+- [ ] **Step 9: 运行测试确认通过**
 
 ```bash
-git add backend
-git commit -m "feat: add deterministic intent routing and chat orchestration"
+cd backend
+uv run pytest tests/test_chat.py -q
+uv run pytest -q
+uv run ruff check .
 ```
+
+Expected: `11 passed`；`230 passed`；`All checks passed!`
+
+- [ ] **Step 10: 提交**
+
+```bash
+git add backend/app/services/router.py backend/app/api/chat.py backend/tests/test_chat.py backend/app/main.py
+git commit -m "feat: add deterministic intent routing and chat orchestration"
+
+git add backend/app/api/chat.py backend/app/api/skills.py backend/app/services/profiles.py backend/app/services/router.py backend/tests/test_chat.py
+git commit -m "fix: improve chat routing specificity and input handling"
+
+git add backend/app/api/chat.py backend/app/api/skills.py backend/app/services/outputs.py backend/app/services/router.py backend/app/skills/executor.py backend/tests/test_chat.py backend/tests/test_skill_executor.py backend/tests/test_skills_api.py skills/postmortem/manifest.yaml
+git commit -m "fix: harden chat rendering, routing and adhoc outputs"
+
+git add backend/app/api/chat.py backend/app/api/skills.py backend/app/services/outputs.py backend/tests/test_chat.py backend/tests/test_skills_api.py
+git commit -m "test: cover chat output dir override and harden input checks"
+```
+
+**落地说明：**
+- 提交序列：`2c58e2c`（路由 + chat 编排 + 2 个测试）→ `b5c4efd`（规则具体度/输入裁剪、公开 `profile_block_for`、`inputs` 续填与澄清）→ `7428e80`（`_summarize` 防御式渲染、`outputs.py` 租户目录、`declared_inputs`、manifest 描述、路由细化 + 测试）→ `7d7698c`（caller `output_dir` 覆盖回归测试、共享 `prepare_inputs`、输入硬化）。
+- 错误优先级（确定性）：源内容/技能不存在 404 → 技能停用 409 → 画像不存在 404 → 缺失必填 200（`missing`，不加载网关、不建 `SkillRun`）→ 输入 schema 422 `skill_inputs_invalid` → `llm_not_configured` 400 → 执行期 `skill_script_failed` 500 / `skill_output_invalid` 502。
+- 澄清契约：缺参时 HTTP 200，`missing` 列出字段名，`reply` 用 manifest `description` 拼出中文提示；前端把用户补充内容放进 `inputs` 再次 POST 即可继续，`intent.inputs` 与 `inputs` 合并（后者优先）。该路径完全不触碰 LLM 网关，也不会产生 `SkillRun`。
+- 安全不变量：画像与记忆查询都带 `tenant_id` 过滤；只有 manifest 声明的输入会进入审计与 LLM；`output_dir` 由服务端按 `outputs/adhoc/<tenant>/<hex>` 生成，chat 与 `/api/skills/{run,stream}` 均无法用调用方值覆盖；返回路径仅在位于 `outputs` 下时转为相对路径。
+- 评审历史：首次质量评审否决 `2c58e2c`，原因是路由碰撞（平台/体裁词抢先）、`postmortem` 死胡同（只给 `platform` 后无法继续）、泛化输入、`_summarize` 有损、封面共享目录、画像被忽略、私有 `_profile_block` 跨模块导入；上述问题在后续三个提交中全部修复，并复审通过。
+- 已知遗留（不阻塞）：`route_intent` 仍是纯子串匹配（如“把封面改写一下”会命中 `content-repurposing`）；`ChatIn.inputs` 没有逐字段大小上限（仅 `message` 限 4000）；`skills/cover-card/scripts/render_cover.py` 从仓库根解析 `outputs/`，而 `outputs_dir` 可配置——非默认 `OUTPUTS_DIR` 会让封面技能失败；本环境无 LLM 提供商凭据，手工真实网关冒烟仍待补。
+- 本任务无迁移。
 
 ---
 
