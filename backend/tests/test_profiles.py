@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.models.profile import Profile, ProfileMemory
 
 OTHER_TENANT_ID = "11111111-1111-1111-1111-111111111111"
+PROFILE_ARRAY_FIELDS = ["taboos", "goals", "platform_focus"]
 
 
 def _payload(**overrides) -> dict:
@@ -94,6 +95,35 @@ async def test_profile_name_required(client):
 )
 async def test_profile_field_max_length(client, field, value):
     resp = await client.post("/api/profiles", json=_payload(**{field: value}))
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+async def test_profile_name_is_stripped(client):
+    created = await client.post("/api/profiles", json=_payload(name="  主账号  "))
+    assert created.status_code == 201
+    profile_id = created.json()["id"]
+    assert created.json()["name"] == "主账号"
+
+    fetched = await client.get(f"/api/profiles/{profile_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "主账号"
+
+
+@pytest.mark.parametrize("field", PROFILE_ARRAY_FIELDS)
+async def test_profile_array_max_items(client, field):
+    resp = await client.post(
+        "/api/profiles", json=_payload(**{field: ["条目"] * 21})
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize("field", PROFILE_ARRAY_FIELDS)
+async def test_profile_array_item_max_length(client, field):
+    resp = await client.post(
+        "/api/profiles", json=_payload(**{field: ["项" * 101]})
+    )
     assert resp.status_code == 422
     assert resp.json()["code"] == "validation_error"
 
@@ -281,6 +311,59 @@ async def test_memory_crud_and_ordering(client):
         f"/api/profiles/{profile_id}/memories/{uuid.uuid4()}"
     )
     assert unknown.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "   ", "字" * 5001],
+    ids=["empty", "whitespace", "5001-chars"],
+)
+async def test_memory_content_boundaries(client, content):
+    profile_id = await _create_profile(client)
+
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories", json={"content": content}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+async def test_memory_content_at_max_length_is_accepted(client):
+    profile_id = await _create_profile(client)
+    content = "记" * 5000
+
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories", json={"content": content}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["content"] == content
+
+
+async def test_memory_kind_max_length(client):
+    profile_id = await _create_profile(client)
+
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        json={"content": "有效内容", "kind": "k" * 33},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [["tag"] * 21, ["t" * 51]],
+    ids=["21-items", "item-51-chars"],
+)
+async def test_memory_tags_boundaries(client, tags):
+    profile_id = await _create_profile(client)
+
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        json={"content": "有效内容", "tags": tags},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
 
 
 async def test_delete_profile_cascades_memories(client, db_session):
