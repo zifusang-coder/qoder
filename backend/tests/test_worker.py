@@ -9,12 +9,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.main  # noqa: F401  # 先注册全部模型，create_all 才能建全表
 from app.config import DEFAULT_TENANT_ID
+from app.errors import AppError
 from app.models.base import Base
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.publish.base import PublishError, PublishResult
 from app.publish.state import InvalidTransition
-from app.services.publish import MAX_PUBLISH_ATTEMPTS
+from app.services.publish import MAX_PUBLISH_ATTEMPTS, execute_job
 from app.worker import (
     MAX_BATCH_SIZE,
     STALE_PUBLISH_MESSAGE,
@@ -489,6 +490,36 @@ async def test_publish_due_jobs_rechecks_schedule_after_selection(
     state = await _job_state(worker_factory, job_id)
     assert state["status"] == "approved"
     assert state["attempts"] == 0
+
+
+async def test_execute_job_treats_cleared_schedule_as_not_due(worker_factory):
+    now = datetime.now(UTC)
+    async with worker_factory() as session:
+        content = await _seed_content(session)
+        account = await _seed_account(session)
+        job = _job(
+            content,
+            key="cleared",
+            status="approved",
+            scheduled_at=None,
+            account_id=account.id,
+        )
+        session.add(job)
+        await session.commit()
+        job_id = job.id
+
+    async with worker_factory() as session:
+        with pytest.raises(AppError) as excinfo:
+            await execute_job(
+                session,
+                job_id,
+                FakeAdapter(),
+                tenant_id=DEFAULT_TENANT_ID,
+                actor="scheduler",
+                require_due=now,
+            )
+
+    assert excinfo.value.code == "not_due"
 
 
 async def test_missing_account_fails_job_and_continues_batch(worker_factory):
