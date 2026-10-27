@@ -97,11 +97,14 @@ def test_happy_path_transitions():
 
 def test_manual_export_path():
     assert next_status("draft", "export") == "exporting"
+    assert next_status("awaiting_review", "export") == "exporting"
+    assert next_status("approved", "export") == "exporting"
     assert next_status("exporting", "export_done") == "exported"
 
 
 def test_failure_and_retry_paths():
     assert next_status("publishing", "fail") == "failed"
+    assert next_status("exporting", "fail") == "failed"
     assert next_status("failed", "retry") == "approved"
     assert next_status("prechecking", "fail") == "precheck_failed"
     assert next_status("precheck_failed", "submit") == "prechecking"
@@ -122,6 +125,7 @@ def test_cancel_allowed(current):
         ("published", "publish"),
         ("draft", "succeed"),
         ("cancelled", "submit"),
+        ("unknown", "submit"),
     ],
 )
 def test_illegal_transitions(current, action):
@@ -370,6 +374,87 @@ async def test_happy_path_actions_record_events(client, db_session):
     assert by_action["pass"].actor == "system"
     assert by_action["approve"].actor == "tester@local"
     assert by_action["approve"].note == "人工确认"
+
+
+async def test_reject_and_cancel_record_events(client, db_session):
+    content = await _create_content(client)
+    job_id = (await _create_job(client, content["id"])).json()["id"]
+
+    async def _act(action):
+        response = await client.post(
+            f"/api/publish/jobs/{job_id}/actions", json={"action": action}
+        )
+        assert response.status_code == 200
+        return response.json()["status"]
+
+    async def _system_pass():
+        job = (
+            await db_session.execute(
+                select(PublishJob).where(PublishJob.id == uuid.UUID(job_id))
+            )
+        ).scalar_one()
+        await apply_action(db_session, job, "pass", actor="system")
+
+    assert await _act("submit") == "prechecking"
+    await _system_pass()
+    assert await _act("reject") == "draft"
+
+    assert await _act("submit") == "prechecking"
+    await _system_pass()
+    assert await _act("approve") == "approved"
+    assert await _act("cancel") == "cancelled"
+
+    events = (
+        await db_session.execute(
+            select(PublishEvent).where(PublishEvent.job_id == uuid.UUID(job_id))
+        )
+    ).scalars().all()
+    rows = sorted(
+        (event.action, event.from_status, event.to_status, event.actor)
+        for event in events
+    )
+    assert rows == sorted(
+        [
+            ("submit", "draft", "prechecking", "tester@local"),
+            ("pass", "prechecking", "awaiting_review", "system"),
+            ("reject", "awaiting_review", "draft", "tester@local"),
+            ("submit", "draft", "prechecking", "tester@local"),
+            ("pass", "prechecking", "awaiting_review", "system"),
+            ("approve", "awaiting_review", "approved", "tester@local"),
+            ("cancel", "approved", "cancelled", "tester@local"),
+        ]
+    )
+    assert all(event.tenant_id == DEFAULT_TENANT_ID for event in events)
+
+
+async def test_retry_from_failed_records_event(client, db_session):
+    content = await _create_content(client)
+    job_id = (await _create_job(client, content["id"])).json()["id"]
+
+    job = (
+        await db_session.execute(
+            select(PublishJob).where(PublishJob.id == uuid.UUID(job_id))
+        )
+    ).scalar_one()
+    job.status = "failed"
+    await db_session.commit()
+    assert job.tenant_id == DEFAULT_TENANT_ID
+
+    response = await client.post(
+        f"/api/publish/jobs/{job_id}/actions", json={"action": "retry"}
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+
+    event = (
+        await db_session.execute(
+            select(PublishEvent).where(PublishEvent.job_id == uuid.UUID(job_id))
+        )
+    ).scalar_one()
+    assert (event.from_status, event.to_status) == ("failed", "approved")
+    assert event.action == "retry"
+    assert event.actor == "tester@local"
+    assert event.tenant_id == DEFAULT_TENANT_ID
 
 
 async def test_list_jobs_filters_tenant_and_status(client, db_session):
