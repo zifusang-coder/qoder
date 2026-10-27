@@ -328,13 +328,21 @@ class PublisherAdapter(Protocol):
 #### 4.4.3 发布状态机
 
 ```
-draft → prechecking → precheck_failed(可修正重试)
-                    → awaiting_review(默认人工审核)
-                    → approved → publishing → published
-                                         → failed(可重试,幂等键防重发)
-manual_export 路径:awaiting_review → exported(记录导出版本,不等于已发布)
+draft: submit→prechecking, export→exporting, cancel→cancelled
+prechecking: pass→awaiting_review, fail→precheck_failed
+precheck_failed: submit→prechecking, cancel→cancelled
+awaiting_review: approve→approved, reject→draft, export→exporting, cancel→cancelled
+approved: publish→publishing, export→exporting, cancel→cancelled
+exporting: export_done→exported, fail→export_failed
+export_failed: retry→exporting, cancel→cancelled
+publishing: succeed→published, fail→publish_failed
+publish_failed: retry→approved, cancel→cancelled
+cancelled: reopen→draft
+exported / published: 终态
 ```
-- 幂等:每次发布生成 `idempotency_key = content_id + version + account_id + scheduled_at`。
+- 不变量:导出失败(`export_failed`)重试只回到 `exporting`,不能绕过人工审核到达 `approved`;`approved` 仅来自人工 `approve` 或发布失败(`publish_failed`)后的重试;`reopen` 仅用于幂等重放的内部路径。
+- 幂等:`idempotency_key = content_id + version + platform + account_id`,有意不包含 `scheduled_at`;改期走独立接口(`PATCH /publish/jobs/{id}/schedule`),且仅允许在执行前修改。
+- 手动导出:可从 `draft`、`awaiting_review`、`approved` 发起导出;`exported` 仅记录被导出的版本,不等于已发布;导出失败重试不能绕过审核。
 - 审核快照:审核通过时冻结内容版本,之后修改需重新审核。
 - 定时发布:arq 定时任务在 `scheduled_at` 触发 precheck → 按模式决定自动发布或等审核。
 
@@ -433,7 +441,7 @@ manual_export 路径:awaiting_review → exported(记录导出版本,不等于�
 | 内容 | `GET/POST /contents` `GET/PATCH /contents/{id}` `POST /contents/{id}/versions` `POST /contents/{id}/repurpose` | 多平台改写 |
 | 技能 | `GET /skills` `POST /skills/{id}/run` `POST /skills/{id}/run/stream`(SSE) `GET /skill-runs` | 执行与审计 |
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
-| 发布 | `POST /publish-jobs` `GET /publish-jobs/{id}` `POST /publish-jobs/{id}/precheck` `POST /publish-jobs/{id}/approve` `POST /publish-jobs/{id}/export` | 状态机驱动 |
+| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13) `POST /publish/jobs/{id}/export`(Task 1.15) | 状态机驱动;审核通过为 `approve` 动作 |
 | 账号 | `GET/POST /platform-accounts` `POST /platform-accounts/{id}/verify` | 公众号 AppID/Secret 绑定 |
 | 归因 | `POST /analytics/import` `GET /analytics/snapshots` `POST /content/{id}/postmortem` | 手动/CSV 导入 + 复盘 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |

@@ -8695,370 +8695,68 @@ git commit -m "test: cover chat output dir override and harden input checks"
 ### Task 1.12: 发布领域模型、状态机与 API
 
 **Files:**
-- Create: `backend/app/models/publish.py`
-- Create: `backend/app/publish/__init__.py`
 - Create: `backend/app/publish/state.py`
+- Create: `backend/app/models/publish.py`
 - Create: `backend/app/services/publish.py`
 - Create: `backend/app/api/publish.py`
-- Modify: `backend/app/main.py`
+- Create: `backend/migrations/versions/840acafce1b0_add_publish_jobs_and_accounts.py`
+- Create: `backend/migrations/versions/08b70f176855_harden_publish_constraints.py`
 - Create: `backend/tests/test_publish.py`
 
-- [ ] **Step 1: 写失败测试 `backend/tests/test_publish.py`**
+- [x] **Step 1: 状态机 `backend/app/publish/state.py`**
 
-```python
-import pytest
+最终状态图：
 
-from app.publish.state import InvalidTransition, next_status
-
-
-def test_state_machine_happy_path():
-    status = "draft"
-    for action, expected in [
-        ("submit", "prechecking"),
-        ("pass", "awaiting_review"),
-        ("approve", "approved"),
-        ("publish", "publishing"),
-        ("succeed", "published"),
-    ]:
-        status = next_status(status, action)
-        assert status == expected
-
-
-def test_state_machine_rejects_illegal_jump():
-    with pytest.raises(InvalidTransition):
-        next_status("draft", "approve")
-    with pytest.raises(InvalidTransition):
-        next_status("published", "publish")
-
-
-async def test_create_job_and_reject_illegal_action(client):
-    project = (await client.post("/api/projects", json={"title": "发布测试"})).json()
-    content = (
-        await client.post(
-            f"/api/projects/{project['id']}/contents",
-            json={"platform": "wechat", "title": "标题", "body": "正文"},
-        )
-    ).json()
-
-    job = await client.post(
-        "/api/publish/jobs",
-        json={"content_id": content["id"], "platform": "wechat"},
-    )
-    assert job.status_code == 201
-    assert job.json()["status"] == "draft"
-    job_id = job.json()["id"]
-
-    bad = await client.post(f"/api/publish/jobs/{job_id}/actions", json={"action": "approve"})
-    assert bad.status_code == 409
-    assert bad.json()["code"] == "invalid_transition"
+```
+draft: submit->prechecking, export->exporting, cancel->cancelled
+prechecking: pass->awaiting_review, fail->precheck_failed
+precheck_failed: submit->prechecking, cancel->cancelled
+awaiting_review: approve->approved, reject->draft, export->exporting, cancel->cancelled
+approved: publish->publishing, export->exporting, cancel->cancelled
+exporting: export_done->exported, fail->export_failed
+export_failed: retry->exporting, cancel->cancelled
+publishing: succeed->published, fail->publish_failed
+publish_failed: retry->approved, cancel->cancelled
+cancelled: reopen->draft
+exported / published: 终态
 ```
 
-- [ ] **Step 2: 运行确认失败**
+不变量：导出失败的重试永远不会到达 `approved`；`approved` 只来自人工 `approve` 或发布失败后的重试；`reopen` 仅用于幂等重放的内部路径。
 
-Run: `cd backend && uv run pytest tests/test_publish.py -q`
-Expected: FAIL（模块不存在）
+- [x] **Step 2: 模型 `backend/app/models/publish.py`**
 
-- [ ] **Step 3: 写 `backend/app/publish/state.py`**
+  - `platform_accounts`：`tenant_id + platform + name` 唯一，`credential_enc` 加密存储，`status` 默认 `active`。
+  - `publish_jobs`：UUID 外键（`content_id` → `contents.id` CASCADE，`account_id` → `platform_accounts.id` RESTRICT，可空），租户内唯一 `idempotency_key`（`uq_publish_jobs_tenant_key`），`status`、`scheduled_at` / `published_at`（`timezone=True`）、`attempts`、`error`、`checks`、`export_path`，复合索引 `ix_publish_jobs_tenant_status_created`。
+  - `publish_events`：`job_id` CASCADE、`from_status` / `to_status` / `action` / `note`，`actor` 为 `String(255)`。
 
-```python
-TRANSITIONS: dict[str, dict[str, str]] = {
-    "draft": {"submit": "prechecking", "export": "exporting"},
-    "prechecking": {"pass": "awaiting_review", "fail": "precheck_failed"},
-    "precheck_failed": {"submit": "prechecking", "cancel": "cancelled"},
-    "awaiting_review": {"approve": "approved", "reject": "draft", "export": "exporting"},
-    "approved": {"publish": "publishing", "export": "exporting"},
-    "exporting": {"export_done": "exported", "fail": "failed"},
-    "publishing": {"succeed": "published", "fail": "failed"},
-    "failed": {"retry": "approved"},
-}
+- [x] **Step 3: 服务 `backend/app/services/publish.py`**
 
+  - 异常与常量：`JobNotFound`、`ContentChanged`、`JobNotReschedulable`、`RESCHEDULABLE = {draft, prechecking, precheck_failed, awaiting_review, approved}`。
+  - `_locked_job`：按 `id` + `tenant_id` 过滤，`FOR UPDATE` 加锁并 `populate_existing`，确保读到最新状态。
+  - `apply_action(job_id, action, tenant_id, actor, note)`：重新加锁；`publish` 前锁定并校验内容 `current_version` 与任务快照一致，否则抛 `ContentChanged`；写 `publish_events` 后提交并刷新。
+  - `reopen` 与 `reschedule` 各自负责加锁与提交；`reschedule` 仅在 `RESCHEDULABLE` 状态内允许，否则抛 `JobNotReschedulable`。
 
-class InvalidTransition(ValueError):
-    pass
+- [x] **Step 4: API `backend/app/api/publish.py`**
 
+  - `POST /api/publish/jobs`：创建任务，201；幂等命中返回已有任务并置 200。
+  - `GET /api/publish/jobs`：`status` 过滤，返回 `items + total`，`limit` / `offset` 分页，`created_at` + `id` 倒序。
+  - `GET /api/publish/jobs/{id}`、`PATCH /api/publish/jobs/{id}/schedule`、`POST /api/publish/jobs/{id}/actions`。
+  - 动作白名单：用户动作 `submit` / `approve` / `reject` / `cancel` / `retry`；系统/内部动作（`pass`、`fail`、`succeed`、`export_done`、`publish`、`export`、`reopen`）返回 403（`action_forbidden`）；未知动作返回 422（`unknown_action`）。
+  - 错误码：`empty_content`、`platform_mismatch`、`account_platform_mismatch`、`account_inactive`、`invalid_transition`、`content_changed`、`job_not_reschedulable`、`not_found`。
+  - 幂等键：`content_id:content_version:platform:account_id-or-'-'`；重放时：`cancelled` 任务走 `reopen`，执行前可更新 `scheduled_at`，其余情况直接返回已有任务。
+  - `scheduled_at` 必须带时区并归一化为 UTC；所有响应时间均为 UTC-aware。
 
-def next_status(current: str, action: str) -> str:
-    allowed = TRANSITIONS.get(current, {})
-    target = allowed.get(action)
-    if target is None:
-        raise InvalidTransition(f"状态 {current} 不允许动作 {action}")
-    return target
-```
+- [x] **Step 5: 测试与校验**
 
-- [ ] **Step 4: 写 `backend/app/models/publish.py`**
+`backend/tests/test_publish.py` 覆盖 100 个用例；全量后端 `330 passed`；`ruff check .` 通过。
 
-```python
-from datetime import datetime
+- [x] **Step 6: 提交**
 
-from sqlalchemy import DateTime, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column
-
-from app.models.base import JSONType, TenantScoped
-
-
-class PlatformAccount(TenantScoped):
-    __tablename__ = "platform_accounts"
-
-    platform: Mapped[str] = mapped_column(String(32), index=True)
-    name: Mapped[str] = mapped_column(String(100))
-    credential_enc: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(32), default="active")
-    meta: Mapped[dict] = mapped_column(JSONType, default=dict)
-
-
-class PublishJob(TenantScoped):
-    __tablename__ = "publish_jobs"
-
-    content_id: Mapped[str] = mapped_column(String(36), index=True)
-    content_version: Mapped[int] = mapped_column(Integer)
-    platform: Mapped[str] = mapped_column(String(32))
-    account_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
-    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    external_id: Mapped[str] = mapped_column(String(200), default="")
-    external_url: Mapped[str] = mapped_column(String(1000), default="")
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    error: Mapped[str] = mapped_column(Text, default="")
-    checks: Mapped[dict] = mapped_column(JSONType, default=dict)
-    export_path: Mapped[str] = mapped_column(String(1000), default="")
-
-
-class PublishEvent(TenantScoped):
-    __tablename__ = "publish_events"
-
-    job_id: Mapped[str] = mapped_column(String(36), index=True)
-    from_status: Mapped[str] = mapped_column(String(32))
-    to_status: Mapped[str] = mapped_column(String(32))
-    action: Mapped[str] = mapped_column(String(32))
-    note: Mapped[str] = mapped_column(String(500), default="")
-    actor: Mapped[str] = mapped_column(String(100), default="user")
-```
-
-- [ ] **Step 5: 写 `backend/app/services/publish.py`**
-
-```python
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.publish import PublishEvent, PublishJob
-from app.publish.state import InvalidTransition, next_status
-
-
-async def apply_action(
-    session: AsyncSession,
-    job: PublishJob,
-    action: str,
-    *,
-    actor: str = "user",
-    note: str = "",
-) -> PublishJob:
-    current = job.status
-    target = next_status(current, action)
-    job.status = target
-    session.add(
-        PublishEvent(
-            tenant_id=job.tenant_id,
-            job_id=str(job.id),
-            from_status=current,
-            to_status=target,
-            action=action,
-            note=note,
-            actor=actor,
-        )
-    )
-    await session.commit()
-    await session.refresh(job)
-    return job
-```
-
-- [ ] **Step 6: 写 `backend/app/api/publish.py`**
-
-```python
-from datetime import datetime
-
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.db import get_session
-from app.deps import get_current_user
-from app.errors import AppError
-from app.models.project import Content, ContentVersion
-from app.models.publish import PublishJob
-from app.models.user import User
-from app.publish.state import InvalidTransition
-from app.services.publish import apply_action
-
-router = APIRouter(prefix="/publish", tags=["publish"])
-
-
-class JobIn(BaseModel):
-    content_id: str
-    platform: str
-    account_id: str | None = None
-    scheduled_at: datetime | None = None
-
-
-class JobOut(BaseModel):
-    id: str
-    content_id: str
-    content_version: int
-    platform: str
-    account_id: str | None
-    status: str
-    scheduled_at: datetime | None
-    published_at: datetime | None
-    external_id: str
-    external_url: str
-    export_path: str
-    error: str
-    checks: dict
-
-
-class JobList(BaseModel):
-    items: list[JobOut]
-
-
-class ActionIn(BaseModel):
-    action: str = Field(min_length=1)
-    note: str = ""
-
-
-def _out(job: PublishJob) -> JobOut:
-    return JobOut(
-        id=str(job.id), content_id=job.content_id, content_version=job.content_version,
-        platform=job.platform, account_id=job.account_id, status=job.status,
-        scheduled_at=job.scheduled_at, published_at=job.published_at,
-        external_id=job.external_id, external_url=job.external_url,
-        export_path=job.export_path, error=job.error, checks=job.checks or {},
-    )
-
-
-async def _owned_job(session: AsyncSession, job_id: str, user: User) -> PublishJob:
-    job = (
-        await session.execute(
-            select(PublishJob).where(
-                PublishJob.id == job_id, PublishJob.tenant_id == user.tenant_id
-            )
-        )
-    ).scalar_one_or_none()
-    if job is None:
-        raise AppError("not_found", "发布任务不存在", 404)
-    return job
-
-
-@router.get("/jobs", response_model=JobList)
-async def list_jobs(
-    status: str | None = None,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> JobList:
-    stmt = select(PublishJob).where(PublishJob.tenant_id == user.tenant_id)
-    if status:
-        stmt = stmt.where(PublishJob.status == status)
-    rows = (await session.execute(stmt.order_by(PublishJob.created_at.desc()))).scalars().all()
-    return JobList(items=[_out(j) for j in rows])
-
-
-@router.post("/jobs", response_model=JobOut, status_code=201)
-async def create_job(
-    payload: JobIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> JobOut:
-    content = (
-        await session.execute(
-            select(Content).where(
-                Content.id == payload.content_id, Content.tenant_id == user.tenant_id
-            )
-        )
-    ).scalar_one_or_none()
-    if content is None:
-        raise AppError("not_found", "内容不存在", 404)
-    if content.current_version < 1:
-        raise AppError("empty_content", "内容还没有可发布的版本", 409)
-    has_version = (
-        await session.execute(
-            select(func.count(ContentVersion.id)).where(
-                ContentVersion.content_id == content.id,
-                ContentVersion.version == content.current_version,
-            )
-        )
-    ).scalar_one()
-    if not has_version:
-        raise AppError("empty_content", "当前版本正文缺失", 409)
-
-    idempotency_key = (
-        f"{content.id}:{content.current_version}:{payload.platform}:{payload.account_id or '-'}"
-    )
-    existing = (
-        await session.execute(
-            select(PublishJob).where(PublishJob.idempotency_key == idempotency_key)
-        )
-    ).scalar_one_or_none()
-    if existing:
-        return _out(existing)
-
-    job = PublishJob(
-        tenant_id=user.tenant_id,
-        content_id=str(content.id),
-        content_version=content.current_version,
-        platform=payload.platform,
-        account_id=payload.account_id,
-        scheduled_at=payload.scheduled_at,
-        idempotency_key=idempotency_key,
-    )
-    session.add(job)
-    await session.commit()
-    await session.refresh(job)
-    return _out(job)
-
-
-@router.get("/jobs/{job_id}", response_model=JobOut)
-async def get_job(
-    job_id: str,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> JobOut:
-    return _out(await _owned_job(session, job_id, user))
-
-
-@router.post("/jobs/{job_id}/actions", response_model=JobOut)
-async def job_action(
-    job_id: str,
-    payload: ActionIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-) -> JobOut:
-    if payload.action not in {"submit", "approve", "reject", "cancel", "retry"}:
-        raise AppError("action_forbidden", "该动作由系统执行", 403)
-    job = await _owned_job(session, job_id, user)
-    try:
-        await apply_action(session, job, payload.action, actor=user.email, note=payload.note)
-    except InvalidTransition as exc:
-        raise AppError("invalid_transition", str(exc), 409) from exc
-    return _out(job)
-```
-
-- [ ] **Step 7: 挂载路由、迁移、测试**
-
-`app/main.py` 增加 `from app.api import auth, chat, profiles, projects, publish, skills, settings as settings_api` 与 `app.include_router(publish.router, prefix="/api")`。
-
-```bash
-cd backend
-alembic revision --autogenerate -m "add publish jobs and accounts"
-uv run pytest tests/test_publish.py -q
-```
-Expected: `3 passed`
-
-- [ ] **Step 8: 提交**
-
-```bash
-git add backend
-git commit -m "feat: add publish jobs with guarded state machine"
-```
+  - `09ad27f` feat: add publish jobs with guarded state machine
+  - `20f4ba1` test: cover remaining publish transitions and actions
+  - `2fb0d3f` fix: harden publish job lifecycle and scheduling（含迁移 `08b70f176855`）
+  - `e415392` test: assert terminal publish states reject actions
+  - `e1d3120` fix: refresh locked publish state and normalize scheduling
 
 ---
 
