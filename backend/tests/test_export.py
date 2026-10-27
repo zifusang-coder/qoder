@@ -266,6 +266,39 @@ async def test_export_failed_then_retry_resumes(client, db_session, storage):
     assert stored.error == ""
 
 
+async def test_export_failure_race_returns_exported_job(
+    client, db_session, storage, monkeypatch
+):
+    import app.services.publish as publish_service
+    from app.main import app
+    from app.publish.state import InvalidTransition
+
+    original = publish_service.apply_action
+
+    async def racy(session, job_id, action, **kwargs):
+        if action == "fail":
+            await session.execute(
+                update(PublishJob)
+                .where(PublishJob.id == job_id)
+                .values(status="exported", export_path="exports/raced.zip")
+            )
+            await session.commit()
+            raise InvalidTransition("另一路径已完成导出")
+        return await original(session, job_id, action, **kwargs)
+
+    monkeypatch.setattr(publish_service, "apply_action", racy)
+
+    _, _, job = await _create_job(client)
+    failing = FailingStorage(storage.root)
+    app.dependency_overrides[get_storage] = lambda: failing
+
+    response = await _export(client, job["id"])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "exported"
+    assert body["export_path"] == "exports/raced.zip"
+
+
 async def test_export_in_progress_returns_409(client, db_session, storage):
     _, _, job = await _create_job(client)
     await db_session.execute(

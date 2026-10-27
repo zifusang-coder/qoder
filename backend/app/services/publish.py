@@ -11,7 +11,7 @@ from app.models.project import Content, ContentVersion
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
-from app.publish.state import next_status
+from app.publish.state import InvalidTransition, next_status
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,35 @@ async def _reload_job(
     except Exception:
         logger.exception("导出任务状态回读失败 job=%s", job_id)
         return None
+
+
+async def _mark_export_failed(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    *,
+    tenant_id: str,
+    actor: str,
+) -> PublishJob | None:
+    try:
+        await apply_action(
+            session,
+            job_id,
+            "fail",
+            tenant_id=tenant_id,
+            actor=actor,
+            note=EXPORT_FAILED_MESSAGE,
+            fields={"error": EXPORT_FAILED_MESSAGE},
+        )
+    except InvalidTransition:
+        # 回读与 fail 之间另一路径已落库 exported，返回真实结果而不是 500
+        await session.rollback()
+        current = await _reload_job(session, job_id, tenant_id)
+        if current is not None and current.status == "exported":
+            return current
+    except Exception:  # 状态写入失败只记录日志，响应仍归一化
+        logger.exception("导出失败状态写入失败 job=%s", job_id)
+        await session.rollback()
+    return None
 
 
 def _validate_fields(fields: dict) -> None:
@@ -452,19 +481,11 @@ async def export_job(
         # 慢请求租约过期后，另一路径可能已成功落库，不能把 exported 改成失败
         if current is not None and current.status == "exported":
             return current
-        try:
-            await apply_action(
-                session,
-                job_id,
-                "fail",
-                tenant_id=tenant_id,
-                actor=actor,
-                note=EXPORT_FAILED_MESSAGE,
-                fields={"error": EXPORT_FAILED_MESSAGE},
-            )
-        except Exception:  # 状态写入失败只记录日志，响应仍归一化
-            logger.exception("导出失败状态写入失败 job=%s", job_id)
-            await session.rollback()
+        failed = await _mark_export_failed(
+            session, job_id, tenant_id=tenant_id, actor=actor
+        )
+        if failed is not None:
+            return failed
         raise AppError("export_failed", EXPORT_FAILED_MESSAGE, 500) from None
 
     try:
@@ -479,22 +500,14 @@ async def export_job(
     except Exception:
         logger.exception("导出完成状态写入失败 job=%s", job_id)
         await session.rollback()
-        # commit 已成功但后续 refresh/ack 失败时不能误删有效产物
+        # commit 已成功但后续 refresh/ack 失败时，任务其实已经导出
         current = await _reload_job(session, job_id, tenant_id)
         if current is not None and current.status == "exported":
             return current
         # 确定性导出的产物可被后续重试复用，失败时保留而不是删除
-        try:
-            await apply_action(
-                session,
-                job_id,
-                "fail",
-                tenant_id=tenant_id,
-                actor=actor,
-                note=EXPORT_FAILED_MESSAGE,
-                fields={"error": EXPORT_FAILED_MESSAGE},
-            )
-        except Exception:
-            logger.exception("导出失败状态写入失败 job=%s", job_id)
-            await session.rollback()
+        failed = await _mark_export_failed(
+            session, job_id, tenant_id=tenant_id, actor=actor
+        )
+        if failed is not None:
+            return failed
         raise AppError("export_failed", EXPORT_FAILED_MESSAGE, 500) from None
