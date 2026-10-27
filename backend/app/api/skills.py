@@ -7,6 +7,7 @@ import jsonschema
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -28,10 +29,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 
-async def get_llm_gateway(
-    user: User = Depends(get_current_user),  # noqa: B008
-    session: AsyncSession = Depends(get_session),  # noqa: B008
-) -> LLMGateway:
+async def get_llm_gateway(session: AsyncSession, user: User) -> LLMGateway:
     return await load_gateway_default(session, user.tenant_id)
 
 
@@ -200,7 +198,21 @@ async def toggle_skill(
         )
     else:
         setting.enabled = payload.enabled
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Concurrent first-time toggles can both INSERT; adopt the winner's row.
+        await session.rollback()
+        setting = (
+            await session.execute(
+                select(SkillSetting).where(
+                    SkillSetting.tenant_id == user.tenant_id,
+                    SkillSetting.skill_id == skill_id,
+                )
+            )
+        ).scalar_one()
+        setting.enabled = payload.enabled
+        await session.commit()
     return _skill_out(skill, payload.enabled)
 
 
@@ -211,16 +223,18 @@ async def run_skill(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
-    gateway: LLMGateway = Depends(get_llm_gateway),  # noqa: B008
 ) -> RunOut:
-    _registry_skill(registry, skill_id)
+    skill = _registry_skill(registry, skill_id)
     await _require_enabled(session, user.tenant_id, skill_id)
+    _validate_inputs(skill, payload.inputs)
+    profile_block = await _profile_block(session, payload.profile_id, user)
+    gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
         registry=registry,
         gateway=gateway,
         session=session,
         tenant_id=user.tenant_id,
-        profile_block=await _profile_block(session, payload.profile_id, user),
+        profile_block=profile_block,
         created_by=user.id,
     )
     try:
@@ -257,17 +271,18 @@ async def stream_skill(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
-    gateway: LLMGateway = Depends(get_llm_gateway),  # noqa: B008
 ) -> EventSourceResponse:
     skill = _registry_skill(registry, skill_id)
     await _require_enabled(session, user.tenant_id, skill_id)
     _validate_inputs(skill, payload.inputs)
+    profile_block = await _profile_block(session, payload.profile_id, user)
+    gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
         registry=registry,
         gateway=gateway,
         session=session,
         tenant_id=user.tenant_id,
-        profile_block=await _profile_block(session, payload.profile_id, user),
+        profile_block=profile_block,
         created_by=user.id,
     )
     messages = executor.build_messages(skill, payload.inputs)

@@ -1,10 +1,15 @@
+import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
 
-from app.api.skills import get_llm_gateway
+from app.api import skills as skills_module
+from app.api.skills import _enabled_map
 from app.llm.types import Usage
 from app.main import app
+from app.models.base import DEFAULT_TENANT_ID
+from app.models.skill import SkillRun, SkillSetting
 from app.skills.registry import SkillRegistry, get_registry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
@@ -30,15 +35,17 @@ def fake_gateway():
 
 
 @pytest.fixture
-def skills_api(fake_gateway):
+def skills_api(fake_gateway, monkeypatch):
+    async def _load_gateway(_session, _tenant_id):
+        return fake_gateway
+
+    monkeypatch.setattr(skills_module, "load_gateway_default", _load_gateway)
     app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
-    app.dependency_overrides[get_llm_gateway] = lambda: fake_gateway
     yield fake_gateway
     app.dependency_overrides.pop(get_registry, None)
-    app.dependency_overrides.pop(get_llm_gateway, None)
 
 
-async def test_list_toggle_and_run(client, skills_api):
+async def test_list_toggle_and_run(client, skills_api, db_session):
     listed = await client.get("/api/skills")
     assert listed.status_code == 200
     item = listed.json()["items"][0]
@@ -65,6 +72,11 @@ async def test_list_toggle_and_run(client, skills_api):
     assert body["text"] == "你好，这是结果"
     assert body["prompt_tokens"] == 2
     assert body["completion_tokens"] == 3
+
+    runs = (await db_session.execute(select(SkillRun))).scalars().all()
+    assert len(runs) == 1
+    assert runs[0].skill_id == "demo-skill"
+    assert runs[0].status == "succeeded"
 
 
 async def test_disabled_skill_blocks_run_and_stream(client, skills_api):
@@ -135,7 +147,7 @@ async def test_unknown_profile_returns_404(client, skills_api):
     assert resp.status_code == 404
 
 
-async def test_stream_returns_sse(client, skills_api):
+async def test_stream_returns_sse(client, skills_api, db_session):
     async with client.stream(
         "POST",
         "/api/skills/demo-skill/stream",
@@ -143,4 +155,24 @@ async def test_stream_returns_sse(client, skills_api):
     ) as resp:
         assert resp.status_code == 200
         body = "".join([chunk async for chunk in resp.aiter_text()])
-    assert "你" in body and "好" in body and "[DONE]" in body
+
+    data_lines = [
+        line[len("data: "):].strip()
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert data_lines[-1] == "[DONE]"
+    deltas = [json.loads(item)["delta"] for item in data_lines[:-1]]
+    assert "".join(deltas) == "你好"
+
+    count = (await db_session.execute(select(func.count(SkillRun.id)))).scalar_one()
+    assert count == 0  # streaming must not persist an audit row
+
+
+async def test_enabled_map_is_tenant_scoped(db_session):
+    other = "00000000-0000-0000-0000-000000000002"
+    db_session.add(SkillSetting(tenant_id=other, skill_id="demo-skill", enabled=False))
+    await db_session.commit()
+
+    assert await _enabled_map(db_session, DEFAULT_TENANT_ID) == {}
+    assert (await _enabled_map(db_session, other))["demo-skill"] is False
