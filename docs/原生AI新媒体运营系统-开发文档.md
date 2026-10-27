@@ -345,16 +345,20 @@ exported / published: 终态
 - 手动导出:可从 `draft`、`awaiting_review`、`approved` 发起导出;`exported` 仅记录被导出的版本,不等于已发布;导出失败重试不能绕过审核。
 - 审核快照:审核通过时冻结内容版本,之后修改需重新审核。
 - 定时发布:arq 定时任务在 `scheduled_at` 触发 precheck → 按模式决定自动发布或等审核。
+- 动作边界:`submit` 为 precheck 内部调用的系统动作,用户动作仅 `approve` / `reject` / `cancel` / `retry`。
 
-#### 4.4.4 发布前检查(precheck,确定性 + LLM 两段)
+#### 4.4.4 发布前检查(precheck,Task 1.13 已落地)
 
-1. 平台规则:标题/正文字数、图片数量与格式、视频时长与画幅。
-2. 敏感词与风险词:本地词库(正规开源词表)+ 正则规则。
-3. 版权提示:图片/音乐来源字段缺失时警告。
-4. 人设一致性:persona-check 评分 < 80 时警告(不阻断)。
-5. 结构完整性:标题、封面、正文、话题标签是否齐全。
+已实现确定性检查(不含 LLM 语义检查):
 
-输出 `PrecheckReport`(通过/警告/阻断三级),前端展示可逐项修正。
+1. 空正文报错;缺少标题给警告。
+2. 正文去除空白后的长度对比平台下限(公众号 300 / 小红书 80 / 知乎 200,其他平台 0),上限 20000 字。
+3. 广告法/平台高风险词库与人设禁区分别扫描标题和正文,报告命中的字段、位置及全部出现次数。
+4. 扫描前做 NFKC 与零宽字符归一化。
+
+接口 `POST /publish/jobs/{id}/precheck` 读取任务快照版本与项目人设禁区,执行后把报告(违禁词、长度、标题、人设禁区)写入任务的 `checks` 字段。提交(`submit`)是 precheck 内部动作,不作为用户动作暴露。
+
+后续扩展(尚未实现):图片/视频规则、版权提示、人设一致性评分、结构完整性检查。
 
 ### 4.5 归因与画像回写
 
@@ -404,7 +408,7 @@ exported / published: 终态
 | `content_versions` | id, content_id, body_md, assets(jsonb), change_note, created_at | 版本快照 |
 | `assets` | id, project_id, content_id?, kind, storage_key, meta(jsonb) | 图片/音频/视频 |
 | `platform_accounts` | id, tenant_id, platform, account_name, credentials_encrypted, status, last_verified_at | 登录态/密钥 |
-| `publish_jobs` | id, content_id, platform_account_id, mode, status, scheduled_at, idempotency_key, precheck_report(jsonb) | 发布任务 |
+| `publish_jobs` | id, content_id, platform_account_id, mode, status, scheduled_at, idempotency_key, checks(jsonb) | 发布任务,`checks` 存 precheck 报告 |
 | `publish_receipts` | id, publish_job_id, platform_post_id, url, published_at, raw(jsonb) | 发布回执 |
 | `analytics_snapshots` | id, publish_receipt_id, captured_at, metrics(jsonb) | 指标快照 |
 | `skills` | id, skill_id, name, layer, version, manifest(jsonb), enabled | 技能注册表 |
@@ -441,7 +445,7 @@ exported / published: 终态
 | 内容 | `GET/POST /contents` `GET/PATCH /contents/{id}` `POST /contents/{id}/versions` `POST /contents/{id}/repurpose` | 多平台改写 |
 | 技能 | `GET /skills` `POST /skills/{id}/run` `POST /skills/{id}/run/stream`(SSE) `GET /skill-runs` | 执行与审计 |
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
-| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13) `POST /publish/jobs/{id}/export`(Task 1.15) | 状态机驱动;审核通过为 `approve` 动作 |
+| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/export`(Task 1.15) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用 |
 | 账号 | `GET/POST /platform-accounts` `POST /platform-accounts/{id}/verify` | 公众号 AppID/Secret 绑定 |
 | 归因 | `POST /analytics/import` `GET /analytics/snapshots` `POST /content/{id}/postmortem` | 手动/CSV 导入 + 复盘 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
