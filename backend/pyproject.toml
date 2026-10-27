@@ -38,6 +38,8 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# 不依赖 editable install 的 .pth 注入，确保 `uv run pytest` 直接可跑
+pythonpath = ["."]
 
 [tool.ruff]
 # Alembic 生成的版本脚本按模板产出，不做 lint 约束
