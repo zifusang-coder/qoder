@@ -490,7 +490,7 @@ from sqlalchemy import DateTime, JSON, String, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+from app.config import DEFAULT_TENANT_ID
 
 JSONType = JSON().with_variant(JSONB, "postgresql")
 
