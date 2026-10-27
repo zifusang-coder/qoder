@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -39,6 +40,12 @@ class PublishJob(TenantScoped):
         UniqueConstraint(
             "tenant_id", "idempotency_key", name="uq_publish_jobs_tenant_key"
         ),
+        Index(
+            "ix_publish_jobs_tenant_status_created",
+            "tenant_id",
+            "status",
+            "created_at",
+        ),
     )
 
     content_id: Mapped[uuid.UUID] = mapped_column(
@@ -48,7 +55,7 @@ class PublishJob(TenantScoped):
     platform: Mapped[str] = mapped_column(String(32))
     account_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
-        ForeignKey("platform_accounts.id", ondelete="SET NULL"),
+        ForeignKey("platform_accounts.id", ondelete="RESTRICT"),
         nullable=True,
         index=True,
     )
@@ -78,4 +85,4 @@ class PublishEvent(TenantScoped):
     to_status: Mapped[str] = mapped_column(String(32))
     action: Mapped[str] = mapped_column(String(32))
     note: Mapped[str] = mapped_column(String(500), default="")
-    actor: Mapped[str] = mapped_column(String(100), default="user")
+    actor: Mapped[str] = mapped_column(String(255), default="user")

@@ -9,9 +9,14 @@ TRANSITIONS: dict[str, dict[str, str]] = {
         "cancel": "cancelled",
     },
     "approved": {"publish": "publishing", "export": "exporting", "cancel": "cancelled"},
-    "exporting": {"export_done": "exported", "fail": "failed"},
-    "publishing": {"succeed": "published", "fail": "failed"},
-    "failed": {"retry": "approved", "cancel": "cancelled"},
+    "exporting": {"export_done": "exported", "fail": "export_failed"},
+    "exported": {},
+    # 导出失败只能重试导出，绝不能绕过人工审核到达 approved
+    "export_failed": {"retry": "exporting", "cancel": "cancelled"},
+    "publishing": {"succeed": "published", "fail": "publish_failed"},
+    "published": {},
+    "publish_failed": {"retry": "approved", "cancel": "cancelled"},
+    "cancelled": {"reopen": "draft"},
 }
 
 

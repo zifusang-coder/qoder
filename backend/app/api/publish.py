@@ -1,10 +1,10 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, ConfigDict, StringConstraints
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query, Response
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,10 +12,17 @@ from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
 from app.models.project import Content, ContentVersion
-from app.models.publish import PlatformAccount, PublishJob
+from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
 from app.publish.state import InvalidTransition
-from app.services.publish import apply_action
+from app.services.publish import (
+    ContentChanged,
+    JobNotFound,
+    JobNotReschedulable,
+    apply_action,
+    reopen,
+    reschedule,
+)
 
 router = APIRouter(prefix="/publish", tags=["publish"])
 
@@ -24,6 +31,22 @@ Platform = Literal[
 ]
 
 USER_ACTIONS = {"submit", "approve", "reject", "cancel", "retry"}
+SYSTEM_ACTIONS = {"pass", "fail", "succeed", "export_done", "publish", "export"}
+INTERNAL_ACTIONS = {"reopen"}
+
+
+def _require_tz(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is None:
+        raise ValueError("scheduled_at 必须包含时区")
+    return value
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 class JobIn(BaseModel):
@@ -33,6 +56,16 @@ class JobIn(BaseModel):
     platform: Platform
     account_id: uuid.UUID | None = None
     scheduled_at: datetime | None = None
+
+    _validate_scheduled_at = field_validator("scheduled_at")(_require_tz)
+
+
+class ScheduleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scheduled_at: datetime | None
+
+    _validate_scheduled_at = field_validator("scheduled_at")(_require_tz)
 
 
 class ActionIn(BaseModel):
@@ -57,10 +90,12 @@ class JobOut(BaseModel):
     error: str
     checks: dict
     created_at: datetime
+    updated_at: datetime
 
 
 class JobList(BaseModel):
     items: list[JobOut]
+    total: int
 
 
 def _out(job: PublishJob) -> JobOut:
@@ -79,43 +114,79 @@ def _out(job: PublishJob) -> JobOut:
         error=job.error,
         checks=job.checks or {},
         created_at=job.created_at,
+        updated_at=job.updated_at,
     )
 
 
-async def _owned_job(
-    session: AsyncSession,
-    job_id: str,
-    user: User,
-    *,
-    for_update: bool = False,
-) -> PublishJob:
+def _job_id(job_id: str) -> uuid.UUID:
     try:
-        parsed = uuid.UUID(job_id)
+        return uuid.UUID(job_id)
     except (ValueError, TypeError):
         raise AppError("not_found", "发布任务不存在", 404) from None
-    stmt = select(PublishJob).where(
-        PublishJob.id == parsed, PublishJob.tenant_id == user.tenant_id
-    )
-    if for_update:
-        stmt = stmt.with_for_update()
-    job = (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _owned_job(session: AsyncSession, job_id: str, user: User) -> PublishJob:
+    job = (
+        await session.execute(
+            select(PublishJob).where(
+                PublishJob.id == _job_id(job_id),
+                PublishJob.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
     if job is None:
         raise AppError("not_found", "发布任务不存在", 404)
     return job
 
 
+async def _replay(
+    session: AsyncSession,
+    existing: PublishJob,
+    payload: JobIn,
+    user: User,
+) -> JobOut:
+    if existing.status == "cancelled":
+        job = await reopen(
+            session,
+            existing.id,
+            tenant_id=user.tenant_id,
+            actor=user.email,
+            scheduled_at=payload.scheduled_at,
+        )
+        return _out(job)
+    if payload.scheduled_at is not None and _as_utc(payload.scheduled_at) != _as_utc(
+        existing.scheduled_at
+    ):
+        try:
+            job = await reschedule(
+                session,
+                existing.id,
+                payload.scheduled_at,
+                tenant_id=user.tenant_id,
+            )
+        except JobNotReschedulable as exc:
+            raise AppError("job_not_reschedulable", str(exc), 409) from exc
+        return _out(job)
+    return _out(existing)
+
+
 @router.get("/jobs", response_model=JobList)
 async def list_jobs(
     status: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobList:
-    stmt = select(PublishJob).where(PublishJob.tenant_id == user.tenant_id)
+    base = select(PublishJob).where(PublishJob.tenant_id == user.tenant_id)
     if status is not None:
-        stmt = stmt.where(PublishJob.status == status)
-    stmt = stmt.order_by(PublishJob.created_at.desc())
+        base = base.where(PublishJob.status == status)
+    total = (
+        await session.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+    stmt = base.order_by(PublishJob.created_at.desc()).limit(limit).offset(offset)
     rows = (await session.execute(stmt)).scalars().all()
-    return JobList(items=[_out(job) for job in rows])
+    return JobList(items=[_out(job) for job in rows], total=total)
 
 
 @router.post("/jobs", response_model=JobOut, status_code=201)
@@ -151,6 +222,9 @@ async def create_job(
     if version is None or not version.body.strip():
         raise AppError("empty_content", "当前版本正文为空，无法发布", 409)
 
+    if content.platform != payload.platform:
+        raise AppError("platform_mismatch", "内容平台与发布平台不一致", 409)
+
     account = None
     if payload.account_id is not None:
         account = (
@@ -167,6 +241,8 @@ async def create_job(
             raise AppError(
                 "account_platform_mismatch", "账号平台与发布平台不一致", 409
             )
+        if account.status != "active":
+            raise AppError("account_inactive", "账号已停用", 409)
 
     idempotency_key = (
         f"{content.id}:{content.current_version}:"
@@ -182,7 +258,7 @@ async def create_job(
     ).scalar_one_or_none()
     if existing is not None:
         response.status_code = 200
-        return _out(existing)
+        return await _replay(session, existing, payload, user)
 
     job = PublishJob(
         tenant_id=user.tenant_id,
@@ -196,6 +272,17 @@ async def create_job(
     )
     session.add(job)
     try:
+        await session.flush()
+        session.add(
+            PublishEvent(
+                tenant_id=user.tenant_id,
+                job_id=job.id,
+                from_status="created",
+                to_status="draft",
+                action="create",
+                actor=user.email,
+            )
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()
@@ -210,7 +297,7 @@ async def create_job(
         if existing is None:
             raise
         response.status_code = 200
-        return _out(existing)
+        return await _replay(session, existing, payload, user)
     await session.refresh(job)
     return _out(job)
 
@@ -224,6 +311,25 @@ async def get_job(
     return _out(await _owned_job(session, job_id, user))
 
 
+@router.patch("/jobs/{job_id}/schedule", response_model=JobOut)
+async def schedule_job(
+    job_id: str,
+    payload: ScheduleIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> JobOut:
+    parsed = _job_id(job_id)
+    try:
+        job = await reschedule(
+            session, parsed, payload.scheduled_at, tenant_id=user.tenant_id
+        )
+    except JobNotFound as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except JobNotReschedulable as exc:
+        raise AppError("job_not_reschedulable", str(exc), 409) from exc
+    return _out(job)
+
+
 @router.post("/jobs/{job_id}/actions", response_model=JobOut)
 async def act_on_job(
     job_id: str,
@@ -231,14 +337,26 @@ async def act_on_job(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
-    if payload.action not in USER_ACTIONS:
-        raise AppError("action_forbidden", "该动作由系统执行", 403)
+    if payload.action not in USER_ACTIONS | SYSTEM_ACTIONS | INTERNAL_ACTIONS:
+        raise AppError("unknown_action", "未知动作", 422)
 
-    job = await _owned_job(session, job_id, user, for_update=True)
+    if payload.action in SYSTEM_ACTIONS | INTERNAL_ACTIONS:
+        raise AppError("action_forbidden", "该动作不能通过此接口执行", 403)
+
+    parsed = _job_id(job_id)
     try:
         job = await apply_action(
-            session, job, payload.action, actor=user.email, note=payload.note
+            session,
+            parsed,
+            payload.action,
+            tenant_id=user.tenant_id,
+            actor=user.email,
+            note=payload.note,
         )
+    except JobNotFound as exc:
+        raise AppError("not_found", str(exc), 404) from exc
     except InvalidTransition as exc:
         raise AppError("invalid_transition", str(exc), 409) from exc
+    except ContentChanged as exc:
+        raise AppError("content_changed", str(exc), 409) from exc
     return _out(job)
