@@ -5567,6 +5567,7 @@ git commit -m "feat: add first six creation skills"
 - Create: `skills/risk-scan/{manifest.yaml,prompt.md,references/words.txt,scripts/keyword_scan.py}`
 - Create: `skills/persona-check/{manifest.yaml,prompt.md}`
 - Create: `skills/postmortem/{manifest.yaml,prompt.md}`
+- Create: `backend/tests/test_skill_scripts.py`
 
 - [ ] **Step 1: 写 `skills/content-repurposing`**
 
@@ -5659,7 +5660,7 @@ cost_estimate_tokens: 400
 `prompt.md`：
 
 ```markdown
-你是封面文案编辑。为给定标题生成一句副标题，最多 18 字，具体、可读、不夸张。
+你是封面文案编辑。若用户已提供 subtitle，原样返回，不要改写；否则生成一句副标题，最多 18 字，具体、可读、不夸张。
 
 只输出 JSON：{"subtitle": "副标题"}。
 ```
@@ -5680,37 +5681,72 @@ THEMES = {
 }
 FONT_CANDIDATES = [
     "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 ]
 W, H = 1080, 1440
+ROOT = Path(__file__).resolve().parents[3]
+OUTPUTS_ROOT = (ROOT / "outputs").resolve()
 
 
-def load_font(size: int) -> ImageFont.FreeTypeFont:
+def load_font(size: int):
     for candidate in FONT_CANDIDATES:
         if Path(candidate).exists():
             try:
                 return ImageFont.truetype(candidate, size)
             except OSError:
                 continue
-    return ImageFont.load_default(size=size)
+    print("警告：未找到中文字体，使用默认字体", file=sys.stderr)
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def normalize(text: str) -> str:
+    return " ".join(text.split())
 
 
 def wrap(text: str, per_line: int) -> list[str]:
     return [text[i : i + per_line] for i in range(0, len(text), per_line)] or [""]
 
 
+def resolve_output_dir(raw: str) -> Path:
+    candidate = Path(raw)
+    target = (
+        candidate.resolve()
+        if candidate.is_absolute()
+        else (ROOT / candidate).resolve()
+    )
+    try:
+        target.relative_to(OUTPUTS_ROOT)
+    except ValueError:
+        raise SystemExit("output_dir 必须位于 outputs 目录下") from None
+    return target
+
+
 def main() -> None:
     payload = json.load(sys.stdin)
     inputs = payload.get("inputs", {})
     output = payload.get("output") or {}
-    title = str(inputs.get("title", "")).strip()
-    subtitle = str(output.get("subtitle") or inputs.get("subtitle") or "").strip()
-    theme = THEMES.get(inputs.get("theme", "dark"), THEMES["dark"])
+    title = normalize(str(inputs.get("title", "")))
+    subtitle = normalize(str(inputs.get("subtitle") or output.get("subtitle") or ""))
+    theme_name = str(inputs.get("theme", "dark"))
     if not title:
         raise SystemExit("title 不能为空")
+    if len(title) > 32:
+        title = title[:31] + "…"
+    if len(subtitle) > 18:
+        subtitle = subtitle[:17] + "…"
+    if theme_name not in THEMES:
+        raise SystemExit(f"非法 theme：{theme_name}")
+    raw_dir = str(inputs.get("output_dir") or "").strip()
+    if not raw_dir:
+        raise SystemExit("output_dir 不能为空")
 
-    bg, fg, accent = theme
+    bg, fg, accent = THEMES[theme_name]
     img = Image.new("RGB", (W, H), bg)
     draw = ImageDraw.Draw(img)
     draw.rectangle([80, 120, 96, H - 160], fill=accent)
@@ -5725,16 +5761,23 @@ def main() -> None:
         draw.text((150, y + 40), subtitle, font=load_font(48), fill=accent)
     draw.text((150, H - 140), "AI 辅助创作 · 请人工复核", font=load_font(32), fill=fg)
 
-    out_dir = Path(inputs["output_dir"]).resolve()
+    out_dir = resolve_output_dir(raw_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "cover.png"
     img.save(path)
-    print(json.dumps({"path": str(path), "width": W, "height": H, "theme": inputs.get("theme", "dark")}))
+    print(
+        json.dumps(
+            {"path": str(path), "width": W, "height": H, "theme": theme_name},
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":
     main()
 ```
+
+要点：`output_dir` 一律解析到仓库根，并用 `relative_to(outputs/)` 拒绝绝对路径越界、`..` 与符号链接逃逸；调用方传入的 `subtitle` 优先于模型输出，超长截断为 17 字 + “…”；标题超过 32 字同样显式省略；标题/副标题中的换行先折叠为空格。字体候选只保留中文字体，找不到时向 stderr 告警。
 
 - [ ] **Step 3: 写 `skills/quality-gate`**
 
@@ -5795,27 +5838,45 @@ def main() -> None:
     base = dict(payload.get("output") or {})
 
     issues = []
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if not lines:
+    lines = text.splitlines()
+    nonempty = [ln for ln in lines if ln.strip()]
+    if not nonempty:
         issues.append({"level": "error", "message": "文本为空"})
-    if lines and not lines[0].lstrip().startswith("#"):
+    if nonempty and not nonempty[0].lstrip().startswith("#"):
         issues.append({"level": "warn", "message": "缺少一级标题"})
 
-    for idx, para in enumerate(p for p in lines if not p.lstrip().startswith("#")):
+    for line_no, para in enumerate(lines, start=1):
+        if not para.strip() or para.lstrip().startswith("#"):
+            continue
         if len(para) > 180:
-            issues.append({"level": "warn", "message": f"第 {idx + 1} 个正文段落超过 180 字"})
+            issues.append(
+                {"level": "warn", "message": f"第 {line_no} 行正文段落超过 180 字"}
+            )
             break
 
     for word in BANNED:
         if word in text:
-            pos = text.index(word)
-            issues.append({"level": "error", "message": f"命中禁用词「{word}」", "index": pos})
+            issues.append(
+                {
+                    "level": "error",
+                    "message": f"命中禁用词「{word}」",
+                    "index": text.index(word),
+                }
+            )
     for word in VAGUE:
         if word in text:
-            pos = text.index(word)
-            issues.append({"level": "warn", "message": f"空泛表达「{word}」", "index": pos})
+            issues.append(
+                {
+                    "level": "warn",
+                    "message": f"空泛表达「{word}」",
+                    "index": text.index(word),
+                }
+            )
 
-    base["check"] = {"passed": not any(i["level"] == "error" for i in issues), "issues": issues}
+    base["check"] = {
+        "passed": not any(i["level"] == "error" for i in issues),
+        "issues": issues,
+    }
     print(json.dumps(base, ensure_ascii=False))
 
 
@@ -5861,9 +5922,10 @@ cost_estimate_tokens: 600
 你是内容合规检查员。通读文本，标出可能违反广告法或平台规则的位置。
 
 只输出 JSON：
-{"summary": "总体风险等级 low/medium/high", "reviewed_points": ["需人工确认的表述1", "表述2"]}
+{"reviewed_points": ["需人工确认的表述1", "表述2"]}
 
 不要改写文本，不要罗列与风险无关的写作建议。宁可提示也不漏报，但需说明理由。
+风险等级由后处理脚本根据词表命中确定，你不需要输出 summary 或风险等级。未提供 platform 时按 wechat。
 ```
 
 `references/words.txt`：
@@ -5895,19 +5957,18 @@ cost_estimate_tokens: 600
 
 ```python
 import json
+import re
 import sys
 from pathlib import Path
+
+MAX_HITS = 100
 
 
 def main() -> None:
     payload = json.load(sys.stdin)
     inputs = payload.get("inputs") or {}
     output = payload.get("output") or {}
-    parts = [str(inputs.get("text", ""))]
-    if isinstance(output, dict):
-        parts.extend(str(v) for v in output.values() if isinstance(v, str))
-        parts.extend(str(v) for v in output.get("reviewed_points", []) if isinstance(v, str))
-    text = " ".join(part for part in parts if part)
+    text = str(inputs.get("text", ""))
 
     words = [
         w.strip()
@@ -5917,20 +5978,38 @@ def main() -> None:
         if w.strip() and not w.startswith("#")
     ]
     hits = []
+    total = 0
     for word in words:
-        start = text.find(word)
-        if start >= 0:
-            hits.append({"word": word, "index": start, "context": text[max(0, start - 10) : start + len(word) + 10]})
+        for match in re.finditer(re.escape(word), text):
+            total += 1
+            if len(hits) < MAX_HITS:
+                start = match.start()
+                hits.append(
+                    {
+                        "word": word,
+                        "index": start,
+                        "context": text[max(0, start - 10) : start + len(word) + 10],
+                    }
+                )
+    hits.sort(key=lambda hit: (hit["index"], hit["word"]))
 
-    level = "high" if len(hits) >= 5 else "medium" if hits else "low"
-    merged = dict(output) if isinstance(output, dict) else {"text": text}
-    merged["scan"] = {"risk_level": level, "hits": hits, "total": len(hits)}
+    level = "high" if total >= 2 else "medium" if total else "low"
+    merged = dict(output) if isinstance(output, dict) else {}
+    merged["summary"] = level
+    merged["scan"] = {
+        "risk_level": level,
+        "hits": hits,
+        "total": total,
+        "truncated": total > len(hits),
+    }
     print(json.dumps(merged, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     main()
 ```
+
+要点：只扫描 `inputs.text`，字符位置才与用户原文一致；`re.finditer` 统计每次出现；命中按字符位置排序；最多保留 100 条并给出 `truncated`；`summary` 一律由脚本按确定性规则覆盖（≥2 次命中为 high），避免模型结论与词表结果冲突。
 
 - [ ] **Step 5: 写 `skills/persona-check`**
 
@@ -5966,7 +6045,9 @@ cost_estimate_tokens: 1500
 你是账号主编。依据账号画像评估文本的人设一致性。
 
 只输出 JSON：
-{"score": 0-100, "matched": ["做得好的点"], "drift": ["偏离点"], "fixes": ["具体修改建议"]}
+{"score": 82, "matched": ["做得好的点"], "drift": ["偏离点"], "fixes": ["具体修改建议"]}
+
+score 为 0-100 的整数。
 
 判定标准：
 - 语气是否符合画像，而不是通用好坏。
@@ -6024,8 +6105,10 @@ cost_estimate_tokens: 2500
   "what_worked": ["有效做法"],
   "what_failed": ["无效做法"],
   "next_actions": ["下次具体怎么做"],
-  "memories": [{"kind": "insight", "content": "可长期复用的经验，40 字以内", "weight": 0.0-1.0}]
+  "memories": [{"kind": "insight", "content": "可长期复用的经验，40 字以内", "weight": 0.6}]
 }
+
+weight 为 0.0-1.0 之间的数字。
 
 要求：
 - 结合平台基准判断，不只看绝对数字；无基准时明确说明假设。
@@ -6035,28 +6118,48 @@ cost_estimate_tokens: 2500
 
 - [ ] **Step 7: 校验全部技能**
 
-Run: `cd /Users/tongxi/Desktop/新媒体运营系统 && python scripts/validate_skills.py`
+Run: `cd /Users/tongxi/Desktop/新媒体运营系统/backend && uv run python ../scripts/validate_skills.py`
 Expected：`共加载 12 个技能，错误 0 个`
 
 - [ ] **Step 8: 脚本单测冒烟**
 
+先写 `backend/tests/test_skill_scripts.py`（9 个用例），通过 `run_script` 真实启动子进程，覆盖：
+
+- cover-card 在 `outputs/` 下写出 `cover.png`；
+- cover-card 拒绝 `../escape`、`/tmp/...` 与 `outputs/` 内指向外部的符号链接；
+- quality-gate 命中禁用词（`passed=false`）且报告真实行号（空行不吞行号）；
+- risk-scan 两个命中即 high、重复出现按次数统计、字符位置只基于用户输入（模型输出里的词不得混入 hits）。
+
+Run: `cd /Users/tongxi/Desktop/新媒体运营系统/backend && uv run pytest tests/test_skill_scripts.py -q`
+Expected：`9 passed`
+
+再手工冒烟三个脚本（注意必须用 `uv run`，系统 `python` 没有 Pillow/PyYAML）：
+
 ```bash
-cd /Users/tongxi/Desktop/新媒体运营系统
+cd /Users/tongxi/Desktop/新媒体运营系统/backend
 echo '{"inputs":{"title":"AI 周报自动化","output_dir":"outputs/demo"},"output":{"subtitle":"把 3 小时压到 20 分钟"}}' \
-  | python skills/cover-card/scripts/render_cover.py
+  | uv run python ../skills/cover-card/scripts/render_cover.py
 echo '{"inputs":{"text":"# 标题\n震惊！这才是唯一解"},"output":{"summary":"ok"}}' \
-  | python skills/quality-gate/scripts/format_check.py
+  | uv run python ../skills/quality-gate/scripts/format_check.py
 echo '{"inputs":{"text":"全网最低价，100%有效"},"output":{"summary":"high"}}' \
-  | python skills/risk-scan/scripts/keyword_scan.py
+  | uv run python ../skills/risk-scan/scripts/keyword_scan.py
+rm -rf ../outputs/demo
 ```
-Expected：第一条输出含 `outputs/demo/cover.png` 且文件存在；第二条 `passed=false` 并列出禁用词；第三条 `risk_level=high` 且命中 2 项以上。
+Expected：第一条输出含 `outputs/demo/cover.png` 且文件存在；第二条 `passed=false` 并列出禁用词；第三条 `risk_level=high`、命中 2 项以上，`summary` 被脚本改写为 `high`。
 
 - [ ] **Step 9: 提交**
 
 ```bash
-git add skills
+git add skills backend/tests/test_skill_scripts.py
 git commit -m "feat: add cover, quality, risk, persona and postmortem skills"
 ```
+
+**落地说明：**
+- 提交序列：`d3f392c`（6 个技能 + 脚本）→ `18f807e`（quality-gate 报告真实行号）→ `9dd99c0`（risk-scan 按出现次数统计、只扫描用户输入、summary 由脚本覆盖；cover 优先调用方副标题并截断、字体候选改为中文字体）→ `93e6ac3`（risk-scan 按位置排序、`total/truncated` 语义修正；cover 标题/副标题折叠换行并显式省略；补强脚本回归测试与符号链接逃逸测试）。
+- `outputs/` 沙箱：cover-card 的 `output_dir` 一律相对仓库根解析，并用 `relative_to(outputs/)` 拒绝绝对路径越界、`..` 和符号链接逃逸；绝对路径若确实落在 `outputs/` 内则允许。
+- risk-scan 的 `summary` 是确定性字段，模型只输出 `reviewed_points`；`scan.total` 统计全部出现次数，`scan.hits` 最多保留 100 条并置 `truncated=true`。
+- 中文契约：`persona-check` 的 `score` 与 `postmortem` 的 `weight` 在 prompt 中给出合法 JSON 示例与取值范围，避免模型回传字符串区间；执行器仍未做强 schema 校验。
+- 最终：validator 12/12、`pytest` 200 passed、ruff 干净；人工 LLM 冒烟（真实调用 `postmortem` 与 `cover-card`）因本环境无 LLM 凭证未执行，待配置后补。
 
 ---
 
