@@ -6837,8 +6837,11 @@ git commit -m "feat: add projects, contents, versions and safe file storage"
 **Files:**
 - Modify: `backend/pyproject.toml`
 - Modify: `backend/app/api/projects.py`
+- Modify: `backend/app/api/skills.py`
+- Create: `backend/app/services/skill_settings.py`
 - Create: `backend/app/services/repurpose.py`
 - Create: `backend/tests/test_repurpose.py`
+- Modify: `backend/tests/test_skills_api.py`
 
 - [ ] **Step 1: 加依赖**
 
@@ -6848,19 +6851,33 @@ git commit -m "feat: add projects, contents, versions and safe file storage"
   "python-multipart>=0.0.9",
 ```
 
-执行：`cd backend && python -m pip install -e ".[dev]"`
+执行：
+
+```bash
+cd backend
+uv sync
+```
+
+确认 `uv.lock` 仅新增 `python-multipart 0.0.32`（及其必要的传递依赖），不改动其他包版本。
 
 - [ ] **Step 2: 写失败测试 `backend/tests/test_repurpose.py`**
 
 ```python
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
-from app.llm.gateway import get_llm_gateway
+from app.errors import AppError
 from app.llm.types import Usage
+from app.models.base import DEFAULT_TENANT_ID
+from app.models.project import Content, Project
+from app.models.skill import SkillSetting
+from app.services import repurpose as repurpose_module
 from app.skills.registry import SkillRegistry, get_registry
 from app.storage import Storage, get_storage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
+SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
 class FakeGateway:
@@ -6870,37 +6887,459 @@ class FakeGateway:
         return "# 小红书版\n改写后的正文"
 
 
-async def test_upload_and_repurpose(client, tmp_path):
+async def test_upload_and_repurpose(client, tmp_path, monkeypatch):
     from app.main import app
 
     app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
-    app.dependency_overrides[get_llm_gateway] = lambda: FakeGateway()
     app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
 
-    project = (await client.post("/api/projects", json={"title": "一稿多改"})).json()
-    uploaded = await client.post(
-        f"/api/projects/{project['id']}/files",
-        files={"file": ("notes.md", b"# raw\nline", "text/markdown")},
-    )
-    assert uploaded.status_code == 201
-    assert uploaded.json()["path"].startswith("files/")
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
 
-    content = (
-        await client.post(
-            f"/api/projects/{project['id']}/contents",
-            json={"platform": "wechat", "title": "主稿", "body": "# 主稿\n正文"},
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (await client.post("/api/projects", json={"title": "一稿多改"})).json()
+        uploaded = await client.post(
+            f"/api/projects/{project['id']}/files",
+            files={"file": ("notes.md", b"# raw\nline", "text/markdown")},
         )
-    ).json()
+        assert uploaded.status_code == 201
+        assert uploaded.json()["path"].startswith("files/")
 
-    result = await client.post(
-        f"/api/projects/{project['id']}/repurpose",
-        json={"source_content_id": content["id"], "platform": "xiaohongshu", "skill_id": "demo-skill"},
-    )
-    assert result.status_code == 201
-    assert result.json()["platform"] == "xiaohongshu"
-    assert result.json()["version"] == 1
-    assert "小红书版" in result.json()["body"]
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "# 主稿\n正文"},
+            )
+        ).json()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert result.status_code == 201
+        assert result.json()["platform"] == "xiaohongshu"
+        assert result.json()["version"] == 1
+        assert "小红书版" in result.json()["body"]
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_upload_rejects_oversized_and_sanitizes_filename(
+    client, tmp_path, monkeypatch
+):
+    from app.api import projects as projects_api
+    from app.main import app
+
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+    monkeypatch.setattr(projects_api, "MAX_UPLOAD_BYTES", 4)
+    try:
+        project = (await client.post("/api/projects", json={"title": "上传"})).json()
+        too_large = await client.post(
+            f"/api/projects/{project['id']}/files",
+            files={"file": ("big.bin", b"12345", "application/octet-stream")},
+        )
+        assert too_large.status_code == 413
+        assert too_large.json()["code"] == "file_too_large"
+
+        monkeypatch.setattr(projects_api, "MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
+        uploaded = await client.post(
+            f"/api/projects/{project['id']}/files",
+            files={"file": ("../../evil.md", b"ok", "text/markdown")},
+        )
+        assert uploaded.status_code == 201
+        assert uploaded.json()["path"] == "files/evil.md"
+
+        listed = await client.get(f"/api/projects/{project['id']}/files")
+        assert listed.status_code == 200
+        assert listed.json()["items"] == ["files/evil.md"]
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_validates_source_before_gateway(
+    client, tmp_path, monkeypatch, db_session
+):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def missing_gateway(session, tenant_id):
+        raise AppError(
+            "llm_not_configured", "尚未配置默认 LLM 提供商，请先在设置页添加", 400
+        )
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", missing_gateway)
+    try:
+        project = (await client.post("/api/projects", json={"title": "优先级"})).json()
+        project_id = project["id"]
+
+        unknown = await client.post(
+            f"/api/projects/{project_id}/repurpose",
+            json={
+                "source_content_id": str(uuid.uuid4()),
+                "platform": "zhihu",
+            },
+        )
+        assert unknown.status_code == 404
+        assert unknown.json()["code"] == "not_found"
+
+        malformed = await client.post(
+            f"/api/projects/{project_id}/repurpose",
+            json={"source_content_id": "not-a-uuid", "platform": "zhihu"},
+        )
+        assert malformed.status_code == 404
+
+        empty = (
+            await client.post(
+                f"/api/projects/{project_id}/contents",
+                json={"platform": "wechat"},
+            )
+        ).json()
+        empty_resp = await client.post(
+            f"/api/projects/{project_id}/repurpose",
+            json={"source_content_id": empty["id"], "platform": "zhihu"},
+        )
+        assert empty_resp.status_code == 409
+        assert empty_resp.json()["code"] == "empty_content"
+
+        # 其他租户的内容即使 ID 已知也必须 404，而不是泄露存在性
+        foreign_project_id = uuid.uuid4()
+        foreign_content_id = uuid.uuid4()
+        db_session.add(
+            Project(
+                id=foreign_project_id,
+                tenant_id="other-tenant",
+                title="其他租户项目",
+            )
+        )
+        await db_session.flush()
+        db_session.add(
+            Content(
+                id=foreign_content_id,
+                tenant_id="other-tenant",
+                project_id=foreign_project_id,
+                platform="wechat",
+                title="外来稿件",
+            )
+        )
+        await db_session.flush()
+        foreign = await client.post(
+            f"/api/projects/{project_id}/repurpose",
+            json={
+                "source_content_id": str(foreign_content_id),
+                "platform": "zhihu",
+            },
+        )
+        assert foreign.status_code == 404
+
+        # 正例：源内容通过校验后才会解析网关，暴露缺失配置的 400
+        content = (
+            await client.post(
+                f"/api/projects/{project_id}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+        no_llm = await client.post(
+            f"/api/projects/{project_id}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "zhihu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert no_llm.status_code == 400
+        assert no_llm.json()["code"] == "llm_not_configured"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_reuses_target_content(client, tmp_path, monkeypatch):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (await client.post("/api/projects", json={"title": "复用目标"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        payload = {
+            "source_content_id": content["id"],
+            "platform": "xiaohongshu",
+            "skill_id": "demo-skill",
+        }
+        first = await client.post(
+            f"/api/projects/{project['id']}/repurpose", json=payload
+        )
+        assert first.status_code == 201
+        assert first.json()["version"] == 1
+
+        second = await client.post(
+            f"/api/projects/{project['id']}/repurpose", json=payload
+        )
+        assert second.status_code == 201
+        assert second.json()["version"] == 2
+
+        contents = (
+            await client.get(f"/api/projects/{project['id']}/contents")
+        ).json()
+        targets = [c for c in contents if c["platform"] == "xiaohongshu"]
+        assert len(targets) == 1
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_rejects_title_only_source(client, tmp_path, monkeypatch):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def must_not_load(session, tenant_id):
+        raise AssertionError("gateway must not load")
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", must_not_load)
+    try:
+        project = (await client.post("/api/projects", json={"title": "空稿"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "只有标题"},
+            )
+        ).json()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert result.status_code == 409
+        assert result.json()["code"] == "empty_content"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_rejects_disabled_and_unknown_skills(
+    client, tmp_path, monkeypatch, db_session
+):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def must_not_load(session, tenant_id):
+        raise AssertionError("gateway must not load")
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", must_not_load)
+    try:
+        project = (await client.post("/api/projects", json={"title": "技能校验"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        db_session.add(
+            SkillSetting(
+                tenant_id=DEFAULT_TENANT_ID, skill_id="demo-skill", enabled=False
+            )
+        )
+        await db_session.flush()
+
+        disabled = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert disabled.status_code == 409
+        assert disabled.json()["code"] == "skill_disabled"
+
+        unknown = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+                "skill_id": "nope",
+            },
+        )
+        assert unknown.status_code == 404
+        assert unknown.json()["code"] == "not_found"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_uses_production_default_skill(client, tmp_path, monkeypatch):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (await client.post("/api/projects", json={"title": "默认技能"})).json()
+        content = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": content["id"],
+                "platform": "xiaohongshu",
+            },
+        )
+        assert result.status_code == 201
+        assert result.json()["platform"] == "xiaohongshu"
+        assert "改写后的正文" in result.json()["body"]
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_repurpose_target_ordering_and_title_backfill(
+    client, tmp_path, monkeypatch, db_session
+):
+    from app.main import app
+
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+
+    async def fake_gateway(session, tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(repurpose_module, "load_gateway_default", fake_gateway)
+    try:
+        project = (
+            await client.post("/api/projects", json={"title": "目标顺序"})
+        ).json()
+        source = (
+            await client.post(
+                f"/api/projects/{project['id']}/contents",
+                json={"platform": "wechat", "title": "主稿", "body": "正文"},
+            )
+        ).json()
+
+        older_id = uuid.uuid4()
+        newer_id = uuid.uuid4()
+        db_session.add_all(
+            [
+                Content(
+                    id=older_id,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    project_id=uuid.UUID(project["id"]),
+                    platform="zhihu",
+                    title="",
+                    created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),  # noqa: UP017
+                ),
+                Content(
+                    id=newer_id,
+                    tenant_id=DEFAULT_TENANT_ID,
+                    project_id=uuid.UUID(project["id"]),
+                    platform="zhihu",
+                    title="较新目标",
+                    created_at=datetime(2024, 6, 1, tzinfo=timezone.utc),  # noqa: UP017
+                ),
+            ]
+        )
+        await db_session.flush()
+
+        result = await client.post(
+            f"/api/projects/{project['id']}/repurpose",
+            json={
+                "source_content_id": source["id"],
+                "platform": "zhihu",
+                "skill_id": "demo-skill",
+            },
+        )
+        assert result.status_code == 201
+        assert result.json()["content_id"] == str(older_id)
+
+        contents = (
+            await client.get(f"/api/projects/{project['id']}/contents")
+        ).json()
+        zhihu = [c for c in contents if c["platform"] == "zhihu"]
+        assert len(zhihu) == 2
+        older = next(c for c in zhihu if c["id"] == str(older_id))
+        assert older["title"] == "主稿"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+async def test_upload_rejects_control_char_filename(client, tmp_path):
+    from app.main import app
+
+    app.dependency_overrides[get_storage] = lambda: Storage(tmp_path)
+    try:
+        project = (
+            await client.post("/api/projects", json={"title": "非法文件名"})
+        ).json()
+
+        # httpx 会把 0x01 转义成 %01，这里手工构造 multipart 以发送真正的控制字符
+        boundary = "control-char-boundary"
+        control_body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="\x01bad.md"\r\n'
+            "Content-Type: text/markdown\r\n\r\n"
+            "ok\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        control = await client.post(
+            f"/api/projects/{project['id']}/files",
+            content=control_body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        assert control.status_code == 422
+        assert control.json()["code"] == "invalid_filename"
+
+        long_name = "文" * 70 + ".md"
+        too_long = await client.post(
+            f"/api/projects/{project['id']}/files",
+            files={"file": (long_name, b"ok", "text/markdown")},
+        )
+        assert too_long.status_code == 422
+        assert too_long.json()["code"] == "invalid_filename"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
 ```
+
+测试说明：
+- 所有网关替换都用 `monkeypatch.setattr(repurpose_module, "load_gateway_default", ...)`；不要用 `dependency_overrides[get_llm_gateway]`，该函数不是 FastAPI 依赖。
+- 必须保留“源内容 404/409 → 技能 404/409 → `llm_not_configured` 400”的优先级用例。
+- 生产默认技能用例直接注册仓库根目录 `skills/`，验证 `content-repurposing` 的真实 manifest 可执行。
 
 - [ ] **Step 3: 运行确认失败**
 
@@ -6909,73 +7348,151 @@ Expected: FAIL（404 / 上传路由不存在）
 
 - [ ] **Step 4: 追加上传接口到 `backend/app/api/projects.py`**
 
-```python
-from fastapi import UploadFile
-from pathlib import Path
-from app.storage import get_storage, Storage
+在文件顶部补充导入：
 
+```python
+from pathlib import PurePosixPath
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, File, UploadFile
+
+from app.storage import Storage, get_storage
+```
+
+在 `_next_version` 之后加入上传辅助与接口：
+
+```python
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _safe_upload_name(name: str | None) -> str:
+    raw = (name or "upload.bin").replace("\\", "/")
+    base = PurePosixPath(raw).name
+    if (
+        not base
+        or base in {".", ".."}
+        or "\x00" in base
+        or any(ord(ch) < 32 or 0x7F <= ord(ch) <= 0x9F for ch in base)
+        or len(base) > 200
+        or len(base.encode("utf-8")) > 200
+    ):
+        raise AppError("invalid_filename", "文件名不合法", 422)
+    return base
 
 
 @router.get("/projects/{project_id}/files")
 async def list_project_files(
     project_id: str,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    storage: Storage = Depends(get_storage),
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: Storage = Depends(get_storage),  # noqa: B008
 ) -> dict:
-    await _owned_project(session, project_id, user)
-    return {"items": storage.list_files(project_id)}
+    project = await _owned_project(session, project_id, user)
+    return {"items": storage.list_files(str(project.id))}
 
 
 @router.post("/projects/{project_id}/files", status_code=201)
 async def upload_project_file(
     project_id: str,
-    file: UploadFile,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    storage: Storage = Depends(get_storage),
+    file: Annotated[UploadFile, File()],
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: Storage = Depends(get_storage),  # noqa: B008
 ) -> dict:
-    await _owned_project(session, project_id, user)
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise AppError("file_too_large", "文件超过 10MB", 413)
-    safe_name = Path(file.filename or "upload.bin").name
-    relpath = storage.save_bytes(project_id, f"files/{safe_name}", data)
-    return {"path": relpath, "size": len(data)}
+    project = await _owned_project(session, project_id, user)
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > MAX_UPLOAD_BYTES:
+            raise AppError("file_too_large", "文件超过 10MB", 413)
+        chunks.append(chunk)
+    name = _safe_upload_name(file.filename)
+    relpath = storage.save_bytes(str(project.id), f"files/{name}", b"".join(chunks))
+    return {"path": relpath, "size": size}
 ```
 
-- [ ] **Step 5: 写 `backend/app/services/repurpose.py`**
+要点：
+- 上传按 1MB 分块读取，超限立即 413，不把无限请求体读进内存；单文件上限 10MB。
+- 文件名先做 `\` → `/` 归一，再取 basename，因此 `../../evil.md` 落盘为 `files/evil.md`；控制字符、NUL、超长（>200 字符或 >200 UTF-8 字节）一律 422。
+- 落盘目录使用已解析出的 `project.id`，不直接拼用户传入的字符串。
+
+- [ ] **Step 5: 抽取技能开关服务并写一稿多改服务**
+
+先创建 `backend/app/services/skill_settings.py`，把 `api/skills.py` 中的 `_enabled_map` / `_require_enabled` 迁出，供技能 API 与改写服务共用：
 
 ```python
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AppError
-from app.llm.gateway import LLMGateway
+from app.models.skill import SkillSetting
+
+
+async def enabled_map(session: AsyncSession, tenant_id: str) -> dict[str, bool]:
+    rows = (
+        await session.execute(
+            select(SkillSetting).where(SkillSetting.tenant_id == tenant_id)
+        )
+    ).scalars().all()
+    return {row.skill_id: row.enabled for row in rows}
+
+
+async def require_enabled(
+    session: AsyncSession, tenant_id: str, skill_id: str
+) -> None:
+    enabled = (await enabled_map(session, tenant_id)).get(skill_id, True)
+    if not enabled:
+        raise AppError("skill_disabled", "该技能已停用", 409)
+```
+
+同步修改 `backend/app/api/skills.py`：删除本地 `_enabled_map`、`_require_enabled`，改为 `from app.services.skill_settings import enabled_map, require_enabled as _require_enabled`；列表/详情接口改用 `enabled_map`，运行/流式接口继续调用 `_require_enabled`。`backend/tests/test_skills_api.py` 中原来导入的 `_enabled_map` 改为从 `app.services.skill_settings` 导入 `enabled_map as _enabled_map`，断言不变。
+
+再创建 `backend/app/services/repurpose.py`：
+
+```python
+import uuid
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.errors import AppError
+from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.profile import Profile, ProfileMemory
 from app.models.project import Content, ContentVersion, Project
-from app.skills.executor import SkillExecutor
-from app.skills.registry import SkillRegistry
 from app.services.profiles import build_profile_block
+from app.services.skill_settings import require_enabled
+from app.skills.executor import SkillExecutor
+from app.skills.manifest import ManifestError
+from app.skills.registry import SkillRegistry
+
+
+def _parse_uuid(value: str, message: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except (ValueError, TypeError):
+        raise AppError("not_found", message, 404) from None
 
 
 async def repurpose_content(
     *,
     session: AsyncSession,
     registry: SkillRegistry,
-    gateway: LLMGateway,
     tenant_id: str,
     project: Project,
     source_content_id: str,
     platform: str,
     skill_id: str = "content-repurposing",
+    gateway: LLMGateway | None = None,
+    created_by: uuid.UUID | None = None,
 ) -> ContentVersion:
+    source_uuid = _parse_uuid(source_content_id, "源内容不存在")
     source = (
         await session.execute(
             select(Content).where(
-                Content.id == source_content_id,
-                Content.project_id == str(project.id),
+                Content.id == source_uuid,
+                Content.project_id == project.id,
                 Content.tenant_id == tenant_id,
             )
         )
@@ -6983,33 +7500,58 @@ async def repurpose_content(
     if source is None:
         raise AppError("not_found", "源内容不存在", 404)
 
+    # 提前固化 ORM 属性：executor.run 内部会 commit，避免依赖实例过期行为的可移植性假设
+    project_id = project.id
+    profile_id = project.profile_id
+    source_kind = source.kind
+    source_title = source.title
+
     version = (
         await session.execute(
             select(ContentVersion)
-            .where(ContentVersion.content_id == source_content_id)
+            .where(
+                ContentVersion.content_id == source.id,
+                ContentVersion.tenant_id == tenant_id,
+            )
             .order_by(ContentVersion.version.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
-    if version is None:
+    if version is None or not version.body.strip():
         raise AppError("empty_content", "源内容没有正文，无法改写", 409)
+    version_title = version.title
+    version_body = version.body
+
+    try:
+        registry.get(skill_id)
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    await require_enabled(session, tenant_id, skill_id)
 
     profile_block = ""
-    if project.profile_id:
+    if profile_id:
         profile = (
             await session.execute(
                 select(Profile).where(
-                    Profile.id == project.profile_id, Profile.tenant_id == tenant_id
+                    Profile.id == profile_id,
+                    Profile.tenant_id == tenant_id,
                 )
             )
         ).scalar_one_or_none()
         if profile:
             memories = (
                 await session.execute(
-                    select(ProfileMemory).where(ProfileMemory.profile_id == project.profile_id)
+                    select(ProfileMemory).where(
+                        ProfileMemory.profile_id == profile_id,
+                        ProfileMemory.tenant_id == tenant_id,
+                    )
                 )
             ).scalars().all()
             profile_block = build_profile_block(profile, list(memories))
+
+    # 延迟到 404/409 校验之后再解析网关，避免缺少 LLM 配置掩盖真实错误
+    if gateway is None:
+        gateway = await load_gateway_default(session, tenant_id)
 
     executor = SkillExecutor(
         registry=registry,
@@ -7017,103 +7559,181 @@ async def repurpose_content(
         session=session,
         tenant_id=tenant_id,
         profile_block=profile_block,
+        created_by=created_by,
     )
     result = await executor.run(
         skill_id,
         {
-            "topic": version.title or source.title,
-            "source": version.body,
+            "topic": version_title or source_title,
+            "source": version_body,
             "platform": platform,
-            "text": version.body,
+            "text": version_body,
         },
+    )
+
+    # 串行化同一项目内的目标内容选择与版本号分配，避免并发下重复目标与重复版本；Postgres 默认 READ COMMITTED，SQLite 会忽略 FOR UPDATE
+    await session.execute(
+        select(Project.id)
+        .where(Project.id == project_id, Project.tenant_id == tenant_id)
+        .with_for_update()
     )
 
     target = (
         await session.execute(
-            select(Content).where(
-                Content.project_id == str(project.id),
+            select(Content)
+            .where(
+                Content.project_id == project_id,
                 Content.platform == platform,
                 Content.tenant_id == tenant_id,
             )
+            .order_by(Content.created_at, Content.id)
+            .limit(1)
         )
     ).scalar_one_or_none()
     if target is None:
         target = Content(
             tenant_id=tenant_id,
-            project_id=str(project.id),
+            project_id=project_id,
             platform=platform,
-            kind=source.kind,
-            title=source.title,
+            kind=source_kind,
+            title=source_title,
         )
         session.add(target)
         await session.flush()
+    elif not target.title:
+        target.title = source_title
 
     current = (
         await session.execute(
             select(func.max(ContentVersion.version)).where(
-                ContentVersion.content_id == str(target.id)
+                ContentVersion.content_id == target.id,
+                ContentVersion.tenant_id == tenant_id,
             )
         )
     ).scalar()
     next_no = int(current or 0) + 1
     new_version = ContentVersion(
         tenant_id=tenant_id,
-        content_id=str(target.id),
+        content_id=target.id,
         version=next_no,
-        title=target.title or source.title,
+        title=target.title or source_title,
         body=result.text,
         source="skill",
         skill_run_id=result.run_id,
     )
     session.add(new_version)
     target.current_version = next_no
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise AppError("version_conflict", "版本冲突，请重试", 409) from None
     await session.refresh(new_version)
     return new_version
 ```
 
+关键约束：
+- 网关必须**懒加载**：先完成源内容与技能校验（404/409），再 `load_gateway_default`；否则缺少 LLM 配置的 400 会掩盖真实业务错误。函数保留 `gateway` 注入参数，测试与后续内部调用可直接传入。
+- `source_content_id`、`project.id` 等必须解析/保持为 `uuid.UUID` 再与 UUID 列比较；不要把字符串直接传给 `Content.id == ...`。
+- 源内容只有标题、正文为空（含纯空白）时返回 `409 empty_content`，不能把空正文送去 LLM。
+- 技能存在性 404 `not_found`、租户停用 409 `skill_disabled` 都必须在解析网关前完成，与 `/api/skills/{id}/run` 行为一致。
+- `executor.run` 内部会提交审计记录，因此之后的 ORM 属性访问不可依赖 `expire_on_commit=False`；所需字段在调用前固化为局部变量。
+- 目标内容选择按 `(created_at, id)` 稳定排序；创建/复用后若标题为空则用源标题回填。`FOR UPDATE` 锁项目行放在 LLM 调用之后、目标读写之前，串行化同项目的“选目标 + 分配版本号”。SQLite 会忽略该锁，生产 Postgres 默认 READ COMMITTED 下有效。
+- 版本号仍是 `max + 1`；唯一约束冲突统一映射为 409 `version_conflict`。
+
 - [ ] **Step 6: 追加改写接口到 `backend/app/api/projects.py`**
 
+补充导入：
+
 ```python
-from app.llm.gateway import LLMGateway
-from app.api.skills import get_llm_gateway
+import jsonschema
+
 from app.services.repurpose import repurpose_content
+from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
+from app.skills.runner import ScriptError
+```
+
+在模型区加入平台枚举与改写出入参：
+
+```python
+Platform = Literal[
+    "wechat", "xiaohongshu", "douyin", "zhihu", "kuaishou", "channels", "bilibili"
+]
 
 
 class RepurposeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_content_id: str
-    platform: str
-    skill_id: str = "content-repurposing"
+    platform: Platform
+    skill_id: ShortText = "content-repurposing"
 
 
-@router.post("/projects/{project_id}/repurpose", response_model=VersionOut, status_code=201)
+class RepurposeOut(VersionOut):
+    platform: Platform
+```
+
+在文件末尾追加接口：
+
+```python
+@router.post(
+    "/projects/{project_id}/repurpose",
+    response_model=RepurposeOut,
+    status_code=201,
+)
 async def repurpose(
     project_id: str,
     payload: RepurposeIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
-    gateway: LLMGateway = Depends(get_llm_gateway),
-) -> VersionOut:
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+) -> RepurposeOut:
     project = await _owned_project(session, project_id, user)
-    version = await repurpose_content(
-        session=session,
-        registry=registry,
-        gateway=gateway,
-        tenant_id=user.tenant_id,
-        project=project,
-        source_content_id=payload.source_content_id,
-        platform=payload.platform,
-        skill_id=payload.skill_id,
+    try:
+        version = await repurpose_content(
+            session=session,
+            registry=registry,
+            tenant_id=user.tenant_id,
+            project=project,
+            source_content_id=payload.source_content_id,
+            platform=payload.platform,
+            skill_id=payload.skill_id,
+            created_by=user.id,
+        )
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except jsonschema.ValidationError as exc:
+        raise AppError("skill_inputs_invalid", "技能输入参数校验失败", 422) from exc
+    except ScriptError as exc:
+        raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc
+    except ValueError as exc:
+        raise AppError("skill_output_invalid", "模型输出格式异常", 502) from exc
+    return RepurposeOut(
+        **_version_out(version).model_dump(), platform=payload.platform
     )
-    return _version_out(version)
 ```
+
+要点：
+- 接口签名里**不要**再放 `gateway: LLMGateway = Depends(get_llm_gateway)`。`get_llm_gateway` 是普通异步函数而非 FastAPI 依赖，且提前解析会让 `llm_not_configured` 的 400 抢在 404/409 之前；改写服务内部按需懒加载。
+- `RepurposeOut` 继承 `VersionOut` 并补 `platform`，否则前端/测试拿不到目标平台。
+- `platform` 用 `Literal` 限定七个首发平台，未知平台由 Pydantic 直接 422。
+- `extra="forbid"` 防止误传字段。
 
 - [ ] **Step 7: 运行测试确认通过**
 
 Run: `cd backend && uv run pytest tests/test_repurpose.py -q`
-Expected: `1 passed`
+Expected: `9 passed`
+
+跑全量回归与静态检查：
+
+```bash
+cd backend
+uv run pytest -q
+uv run ruff check .
+```
+
+Expected: `217 passed`；`All checks passed!`
 
 - [ ] **Step 8: 提交**
 
@@ -7121,6 +7741,15 @@ Expected: `1 passed`
 git add backend
 git commit -m "feat: add project file upload and cross-platform repurposing"
 ```
+
+**落地说明：**
+- 提交序列：`03a9130`（上传/改写实现 + 3 个测试）→ `577ec54`（空正文 409、技能存在性与停用校验、目标选择加锁与稳定排序、文件名控制字符/字节长度限制 + 4 个测试）→ `e1eff22`（LLM 调用前固化 ORM 字段、版本查询补租户过滤、目标排序/标题回填与控制字符文件名测试 + 2 个测试）。
+- 本任务无迁移：`contents`、`content_versions` 表在 Task 1.9 已建好；`python-multipart` 仅新增锁文件条目（0.0.32）。
+- 错误优先级（确定性）：源内容 404/409 → 技能不存在 404 / 停用 409 → `llm_not_configured` 400 → 技能输入 422 / 后处理 500 / 输出 502。网关在业务校验之后懒加载。
+- 目标内容契约：同项目同平台复用最早创建的一条（`created_at, id` 排序）；标题为空时用源标题回填；无则新建。`FOR UPDATE` 锁项目行，保证 Postgres READ COMMITTED 下并发改写不会重复建目标或版本；SQLite 忽略锁，顺序请求行为一致。
+- 源内容正文为空（包括只有标题或纯空白）返回 `empty_content`，不会调用 LLM。
+- 上传：1MB 分块计数、10MB 上限、basename 归一（`../../evil.md` → `files/evil.md`），拒绝 NUL/控制字符（含 DEL、C1）与超过 200 字符或 200 UTF-8 字节的文件名。
+- 最终：`pytest` 217 passed、ruff 干净；未启动 Docker（无迁移需求）。
 
 ---
 
