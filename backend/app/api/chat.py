@@ -13,11 +13,11 @@ from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import load_gateway_default
 from app.models.user import User
-from app.services.outputs import adhoc_output_dir
+from app.services.outputs import adhoc_output_dir, prepare_inputs
 from app.services.profiles import profile_block_for
 from app.services.router import route_intent
 from app.services.skill_settings import require_enabled
-from app.skills.executor import SkillExecutor, declared_inputs
+from app.skills.executor import SkillExecutor
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
 from app.skills.runner import ScriptError
@@ -64,6 +64,27 @@ def _public_data(data: dict | None, outputs_root: Path) -> dict | None:
     return {**data, "path": str(rel)}
 
 
+def _score_value(data: dict) -> str | None:
+    value = data.get("score")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return None
+
+
+def _is_blank(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return not value
+    return False
+
+
 def _summarize(data: dict) -> str:
     scan = data.get("scan")
     if isinstance(scan, dict):
@@ -76,12 +97,15 @@ def _summarize(data: dict) -> str:
     verdict = data.get("verdict")
     if isinstance(verdict, str) and verdict:
         head = VERDICT_LABELS.get(verdict, verdict)
-        score = data.get("score")
-        if isinstance(score, int) and not isinstance(score, bool):
+        score = _score_value(data)
+        if score is not None:
             head += f"（{score} 分）"
         reasons = data.get("reasons")
         if isinstance(reasons, list) and reasons:
             head += f"；理由：{'；'.join(str(r) for r in reasons[:3])}"
+        actions = data.get("next_actions")
+        if isinstance(actions, list) and actions:
+            head += f"；建议：{'；'.join(str(a) for a in actions[:3])}"
         return head
     summary = data.get("summary")
     if isinstance(summary, str) and summary:
@@ -98,8 +122,8 @@ def _summarize(data: dict) -> str:
                 lines.append(str(text))
         if lines:
             return "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
-    score = data.get("score")
-    if isinstance(score, int) and not isinstance(score, bool):
+    score = _score_value(data)
+    if score is not None:
         fixes = data.get("fixes") or data.get("drift")
         suffix = ""
         if isinstance(fixes, (list, tuple)) and fixes:
@@ -148,12 +172,11 @@ async def chat(
 
     declared = skill.manifest.inputs.get("properties") or {}
     merged = {**intent.inputs, **(payload.inputs or {})}
-    inputs = declared_inputs(skill, merged)
-    if "output_dir" in declared:
-        inputs["output_dir"] = output_dir
+    inputs = prepare_inputs(skill, merged, user.tenant_id)
     missing = [
-        key for key in skill.manifest.inputs.get("required", [])
-        if key not in inputs or inputs[key] in (None, "", [], {})
+        key
+        for key in skill.manifest.inputs.get("required", [])
+        if key not in inputs or _is_blank(inputs[key])
     ]
     profile_block = await profile_block_for(
         session, payload.profile_id, user.tenant_id

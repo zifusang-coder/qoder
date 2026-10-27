@@ -7,11 +7,11 @@ import pytest
 from sqlalchemy import func, select
 
 from app.api import skills as skills_module
-from app.api.skills import _prepare_inputs
 from app.llm.types import Usage
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.skill import SkillRun, SkillSetting
+from app.services.outputs import prepare_inputs
 from app.services.skill_settings import enabled_map as _enabled_map
 from app.skills.registry import SkillRegistry, get_registry
 
@@ -335,12 +335,12 @@ def test_prepare_inputs_drops_undeclared_and_scopes_output_dir(tmp_path, monkeyp
     )
     skill = SkillRegistry(SKILLS_DIR).get("cover-card")
 
-    first = _prepare_inputs(
+    first = prepare_inputs(
         skill,
         {"title": "周报", "output_dir": "../evil", "junk": "x"},
         DEFAULT_TENANT_ID,
     )
-    second = _prepare_inputs(skill, {"title": "周报"}, DEFAULT_TENANT_ID)
+    second = prepare_inputs(skill, {"title": "周报"}, DEFAULT_TENANT_ID)
 
     assert first["title"] == "周报"
     assert "junk" not in first

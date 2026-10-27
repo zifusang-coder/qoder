@@ -68,6 +68,10 @@ def test_route_keywords():
     assert douyin.skill_id == "copywriting"
     assert douyin.inputs["platform"] == "douyin"
 
+    zhihu = route_intent("写个知乎回答", output_dir=OUT)
+    assert zhihu.skill_id == "copywriting"
+    assert zhihu.inputs["platform"] == "zhihu"
+
     fallback = route_intent("写个公众号口播", output_dir=OUT)
     assert fallback.skill_id == "copywriting"
     assert fallback.inputs["platform"] == "douyin"
@@ -234,9 +238,58 @@ async def test_chat_missing_inputs(client, monkeypatch, db_session):
         assert body["skill_id"] == "postmortem"
         assert "title" in body["missing"]
         assert "metrics" in body["missing"]
+        assert "内容标题" in body["reply"]
         assert body["run_id"] is None
         runs = (await db_session.execute(select(SkillRun))).scalars().all()
         assert runs == []
+
+        blank = await client.post(
+            "/api/chat",
+            json={
+                "message": "帮我复盘一下上周数据",
+                "inputs": {"title": "   ", "metrics": {"views": 1}},
+            },
+        )
+        assert blank.status_code == 200
+        assert blank.json()["missing"] == ["title"]
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_forces_server_output_dir(client, monkeypatch):
+    captured = {}
+
+    class StubExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, skill_id, inputs):
+            captured["skill_id"] = skill_id
+            captured["inputs"] = inputs
+            return SimpleNamespace(run_id="run-1", text="ok", data=None)
+
+    async def _load(_session, _tenant_id):
+        return FakeGateway()
+
+    monkeypatch.setattr(chat_module, "SkillExecutor", StubExecutor)
+    monkeypatch.setattr(chat_module, "load_gateway_default", _load)
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "帮我做个封面",
+                "inputs": {"output_dir": "/tmp/escape", "evil": "x"},
+            },
+        )
+        assert resp.status_code == 200
+        assert captured["skill_id"] == "cover-card"
+        out_dir = Path(captured["inputs"]["output_dir"])
+        assert out_dir.parent.name == DEFAULT_TENANT_ID
+        assert out_dir.parent.parent.name == "adhoc"
+        assert "/tmp/escape" not in captured["inputs"]["output_dir"]
+        assert "evil" not in captured["inputs"]
+        assert captured["inputs"]["title"]
     finally:
         app.dependency_overrides.pop(get_registry, None)
 
@@ -305,6 +358,11 @@ def test_public_data_and_summarize(tmp_path):
         == "建议推进（82 分）；理由：时效性强"
     )
     assert _summarize({"verdict": {"x": 1}}) == "已完成，请查看结构化结果。"
+    assert (
+        _summarize({"verdict": "超预期", "next_actions": ["多做对比图"]})
+        == "超预期；建议：多做对比图"
+    )
+    assert _summarize({"score": 82.0, "fixes": []}) == "评分 82"
     assert _summarize({"score": 82, "fixes": ["改标题"]}) == "评分 82；建议：改标题"
     assert _summarize({"score": 80, "fixes": 3}) == "评分 80"
     assert _summarize({}) == "已完成，请查看结构化结果。"
