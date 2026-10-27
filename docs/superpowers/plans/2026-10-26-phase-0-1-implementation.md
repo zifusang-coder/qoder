@@ -4420,11 +4420,15 @@ git commit -m "feat: add skill executor with JSON parsing and run audit"
 
 **Files:**
 - Create: `backend/tests/test_script_runner.py`
+- Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试 `backend/tests/test_script_runner.py`**
+- [ ] **Step 1: 写测试 `backend/tests/test_script_runner.py`**
+
+`runner.py` 的最小实现已在 Task 1.4 落地；本任务用测试固化沙箱边界（环境变量白名单、技能目录 cwd、超时、取消收割、退出码、JSON 输出约束）：
 
 ```python
-import sys
+import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -4448,24 +4452,109 @@ async def test_script_receives_payload(tmp_path):
     assert result == {"ok": "周报"}
 
 
-async def test_script_timeout(tmp_path):
-    script = _write(tmp_path, "slow.py", "import time\ntime.sleep(5)")
-    with pytest.raises(ScriptError):
-        await run_script(script, {}, tmp_path, timeout=0.2)
+async def test_script_runs_in_skill_dir(tmp_path):
+    script = _write(
+        tmp_path,
+        "cwd.py",
+        "import json,os\nprint(json.dumps({'cwd': os.getcwd()}))",
+    )
+    result = await run_script(script, {}, tmp_path)
+    assert Path(result["cwd"]).resolve() == tmp_path.resolve()
 
 
-async def test_script_nonzero_exit(tmp_path):
-    script = _write(tmp_path, "fail.py", "import sys\nsys.exit(2)")
-    with pytest.raises(ScriptError):
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 进程语义")
+async def test_script_timeout_kills_child(tmp_path):
+    pid_file = tmp_path / "timeout-pid.txt"
+    script = _write(
+        tmp_path,
+        "slow.py",
+        "import os,pathlib,time\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(5)\n",
+    )
+    with pytest.raises(ScriptError, match="脚本超时"):
+        await run_script(script, {}, tmp_path, timeout=1)
+    assert pid_file.exists(), "子进程未启动"
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+async def test_script_nonzero_exit_includes_stderr(tmp_path):
+    script = _write(
+        tmp_path,
+        "fail.py",
+        "import sys\nsys.stderr.write('boom')\nsys.exit(2)",
+    )
+    with pytest.raises(ScriptError, match="boom"):
         await run_script(script, {}, tmp_path)
+
+
+async def test_script_invalid_json_rejected(tmp_path):
+    script = _write(tmp_path, "bad.py", "print('not json')")
+    with pytest.raises(ScriptError, match="不是合法 JSON"):
+        await run_script(script, {}, tmp_path)
+
+
+async def test_script_non_object_json_rejected(tmp_path):
+    script = _write(tmp_path, "list.py", "print('[1, 2]')")
+    with pytest.raises(ScriptError, match="必须是 JSON 对象"):
+        await run_script(script, {}, tmp_path)
+
+
+async def test_script_empty_stdout_is_empty_object(tmp_path):
+    script = _write(tmp_path, "silent.py", "pass")
+    assert await run_script(script, {}, tmp_path) == {}
+
+
+async def test_script_env_is_whitelisted(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENMEMORY_API_KEY", "secret-value")
+    monkeypatch.setenv("JWT_SECRET", "should-not-leak")
+    script = _write(
+        tmp_path,
+        "env.py",
+        "import json,os\nprint(json.dumps({'env': dict(os.environ)}))",
+    )
+    result = await run_script(script, {}, tmp_path)
+    keys = set(result["env"])
+    assert "OPENMEMORY_API_KEY" not in keys
+    assert "JWT_SECRET" not in keys
+    assert {"PATH", "PYTHONIOENCODING", "LANG"} <= keys
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 进程语义")
+async def test_cancellation_reaps_child(tmp_path):
+    pid_file = tmp_path / "pid.txt"
+    script = _write(
+        tmp_path,
+        "cancel.py",
+        "import os,pathlib,time\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n",
+    )
+    task = asyncio.create_task(run_script(script, {}, tmp_path, timeout=10))
+    for _ in range(500):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_file.exists(), "子进程未启动"
+    pid = int(pid_file.read_text())
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [ ] **Step 2: 运行测试**
 
 Run: `cd backend && uv run pytest tests/test_script_runner.py -q`
-Expected: FAIL（`app.skills.runner` 不存在或超时用例未抛错）
+Expected: `9 passed`。若用例失败，先修正 `runner.py` 再继续（Task 1.4 已实现主体，本任务不再重写）。
 
-- [ ] **Step 3: 确认 `backend/app/skills/runner.py` 完整内容**
+- [ ] **Step 3: 确认 `backend/app/skills/runner.py` 为最终沙箱实现**
+
+当前实现（Task 1.4 落地并已加固）：
 
 ```python
 import asyncio
@@ -4495,43 +4584,54 @@ async def run_script(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(json.dumps(payload, ensure_ascii=False).encode()),
             timeout=timeout,
         )
-    except asyncio.TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
+    except TimeoutError as exc:
         raise ScriptError(f"脚本超时（>{timeout}s）") from exc
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
     if proc.returncode != 0:
         raise ScriptError(stderr.decode(errors="ignore")[-1000:] or "脚本执行失败")
     try:
-        return json.loads(stdout.decode() or "{}")
+        data = json.loads(stdout.decode() or "{}")
     except json.JSONDecodeError as exc:
         raise ScriptError("脚本输出不是合法 JSON") from exc
+    if not isinstance(data, dict):
+        raise ScriptError("脚本输出必须是 JSON 对象")
+    return data
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [ ] **Step 4: 再跑一次后端全量测试**
 
-Run: `cd backend && uv run pytest tests/test_script_runner.py -q`
-Expected: `3 passed`
+Run: `cd backend && uv run pytest -q`
+Expected: 全部通过（Task 1.4 后为 170 passed，本任务新增 9 个用例后为 179 passed）
 
-- [ ] **Step 5: 在技能说明中记录沙箱边界**
+- [ ] **Step 5: 在 README 中记录沙箱边界**
 
 在 `README.md` 的「约定」末尾追加：
 
 ```markdown
-- 后处理脚本以独立子进程运行，工作目录限定为技能目录，环境变量白名单、30 秒超时、无 shell；这不是 OS 级隔离，生产环境应迁移到容器执行（Phase 2）。
+- 后处理脚本以独立子进程运行，初始工作目录设为技能目录，环境变量白名单、30 秒超时、无 shell；这不是 OS 级隔离，生产环境应迁移到容器执行（Phase 2）。
 ```
 
 - [ ] **Step 6: 提交**
 
 ```bash
 git add backend/tests/test_script_runner.py README.md
-git commit -m "feat: run skill postprocess scripts with timeout and env whitelist"
+git commit -m "test: lock down skill postprocess sandbox boundaries"
 ```
+
+实际落地：提交 `0f5feae`（9 个真实子进程用例 + README 边界说明）与 `7a15765`（超时用例校验子进程 PID 已消失、取消用例非空轮询、环境测试加入 `JWT_SECRET`、POSIX skipif、README 措辞改为“初始工作目录”）。验证：目标用例 9 passed，后端全量 179 passed，`uv run ruff check .` 通过；未改动生产代码，未使用 Docker。
 
 ---
 
