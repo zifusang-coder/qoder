@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 ProviderKind = Literal["openai_compatible", "anthropic"]
@@ -9,7 +9,7 @@ class LLMConfig:
     provider_id: str
     kind: ProviderKind
     base_url: str
-    api_key: str
+    api_key: str = field(repr=False)
     tiers: dict[str, str]
 
     def __post_init__(self) -> None:
