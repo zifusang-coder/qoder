@@ -1621,6 +1621,11 @@ git commit -m "feat: add tiered LLM gateway with streaming support"
 - Create: `web/src/pages/Login.tsx`
 - Create: `web/src/pages/Settings.tsx`
 - Create: `web/src/pages/Chat.tsx`
+- Create: `web/vitest.config.ts`
+- Create: `web/src/__tests__/sse.test.ts`
+- Create: `web/src/__tests__/client.test.ts`
+- Modify: `.gitignore`（`web/*.tsbuildinfo`）
+- Commit: `web/package-lock.json`
 
 - [ ] **Step 1: 依赖与构建配置**
 
@@ -1635,7 +1640,8 @@ git commit -m "feat: add tiered LLM gateway with streaming support"
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.59.0",
@@ -1652,7 +1658,8 @@ git commit -m "feat: add tiered LLM gateway with streaming support"
     "@vitejs/plugin-react": "^5.0.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.9.0",
-    "vite": "^8.0.0"
+    "vite": "^8.0.0",
+    "vitest": "^4.1.12"
   }
 }
 ```
@@ -1694,6 +1701,18 @@ export default defineConfig({
 }
 ```
 
+`web/vitest.config.ts`（SSE/客户端工具只依赖 fetch 与 Web Streams，使用 node 环境即可）：
+
+```ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    environment: "node",
+  },
+});
+```
+
 `web/index.html`：
 
 ```html
@@ -1727,33 +1746,43 @@ export function setToken(token: string | null) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+export function handleUnauthorized(requestToken: string | null) {
+  // 请求在途期间可能已完成新登录，只有 token 未变时才清理并跳转
+  if (getToken() !== requestToken) return;
+  setToken(null);
+  if (!location.pathname.endsWith("/login")) location.href = "/login";
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,
     message: string,
+    public detail?: unknown,
   ) {
     super(message);
   }
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getToken();
-  const resp = await fetch(`/api${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init.headers ?? {}),
-    },
-  });
-  if (resp.status === 401) {
-    setToken(null);
-    if (!location.pathname.endsWith("/login")) location.href = "/login";
+  const requestToken = getToken();
+  const headers = new Headers(init.headers);
+  if (init.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
+  if (requestToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${requestToken}`);
+  }
+  const resp = await fetch(`/api${path}`, { ...init, headers });
+  if (resp.status === 401) handleUnauthorized(requestToken);
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new ApiError(resp.status, body.code ?? "error", body.message ?? "请求失败");
+    throw new ApiError(
+      resp.status,
+      body.code ?? "error",
+      body.message ?? "请求失败",
+      body.detail,
+    );
   }
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
@@ -1763,7 +1792,21 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 `web/src/sse.ts`：
 
 ```ts
-import { getToken } from "./client";
+import { getToken, handleUnauthorized } from "./client";
+
+type SseEvent = { delta?: string; error?: string };
+
+function eventData(block: string): string | null {
+  const dataLines: string[] = [];
+  for (const line of block.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    let data = line.slice(5);
+    if (data.startsWith(" ")) data = data.slice(1);
+    dataLines.push(data);
+  }
+  if (dataLines.length === 0) return null;
+  return dataLines.join("\n");
+}
 
 export async function streamSse(
   path: string,
@@ -1771,46 +1814,82 @@ export async function streamSse(
   onChunk: (text: string) => void,
   onDone?: () => void,
 ): Promise<void> {
+  const requestToken = getToken();
   const resp = await fetch(`/api${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${getToken() ?? ""}`,
+      Authorization: `Bearer ${requestToken ?? ""}`,
     },
     body: JSON.stringify(body),
   });
+  if (resp.status === 401) handleUnauthorized(requestToken);
   if (!resp.ok || !resp.body) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.message ?? "流式请求失败");
   }
+
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      for (const line of part.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (data === "[DONE]") {
-          onDone?.();
-          return;
-        }
-        try {
-          const event = JSON.parse(data) as { delta?: string; error?: string };
-          if (event.error) throw new Error(event.error);
-          if (event.delta) onChunk(event.delta);
-        } catch {
-          onChunk(data);
-        }
+  let doneCalled = false;
+
+  const finish = () => {
+    if (doneCalled) return;
+    doneCalled = true;
+    onDone?.();
+  };
+
+  const handleBlock = (block: string): boolean => {
+    const joined = eventData(block);
+    if (joined === null || joined === "") return false;
+    if (joined === "[DONE]") {
+      finish();
+      return true;
+    }
+    let event: SseEvent;
+    try {
+      event = JSON.parse(joined) as SseEvent;
+    } catch {
+      onChunk(joined);
+      return false;
+    }
+    if (event.error) throw new Error(event.error);
+    if (event.delta) onChunk(event.delta);
+    return false;
+  };
+
+  // sse-starlette 默认用 CRLF 分帧；必须同时支持 LF 与 CRLF
+  const drain = (final: boolean): boolean => {
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = final ? "" : (blocks.pop() ?? "");
+    for (const block of blocks) {
+      if (handleBlock(block)) return true;
+    }
+    return false;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (drain(false)) {
+        await reader.cancel().catch(() => {});
+        return;
       }
     }
+    // 冲刷最后一个分块中可能被截断的 UTF-8 序列
+    buffer += decoder.decode();
+    if (drain(true)) {
+      await reader.cancel().catch(() => {});
+      return;
+    }
+    finish();
+  } catch (err) {
+    await reader.cancel().catch(() => {});
+    throw err;
   }
-  onDone?.();
 }
 ```
 
@@ -1854,26 +1933,41 @@ body {
 `web/src/App.tsx`：
 
 ```tsx
-import { useEffect } from "react";
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
-import { api, getToken } from "./client";
+import { useQuery } from "@tanstack/react-query";
+import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { ApiError, api, getToken } from "./client";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
 import Settings from "./pages/Settings";
 
+function ProtectedLayout() {
+  const token = getToken();
+  const me = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () => api<unknown>("/auth/me"),
+    enabled: Boolean(token),
+    retry: false,
+  });
+
+  if (!token) return <Navigate to="/login" replace />;
+  if (me.isLoading) {
+    return <p className="p-8 text-sm text-slate-400">正在校验登录状态…</p>;
+  }
+  // 只有显式 401 才登出；网络/5xx 错误仍渲染受保护页面，避免后端抖动踢人
+  if (me.error instanceof ApiError && me.error.status === 401) {
+    return <Navigate to="/login" replace />;
+  }
+  return <Outlet />;
+}
+
 export default function App() {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (!getToken()) return;
-    api("/auth/me").catch(() => navigate("/login"));
-  }, [navigate]);
-
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/settings" element={<Settings />} />
-      <Route path="/chat" element={<Chat />} />
+      <Route element={<ProtectedLayout />}>
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/chat" element={<Chat />} />
+      </Route>
       <Route path="*" element={<Navigate to={getToken() ? "/chat" : "/login"} replace />} />
     </Routes>
   );
@@ -1921,12 +2015,16 @@ export default function Login() {
       <form className="mt-6 space-y-3" onSubmit={submit}>
         <input
           className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+          aria-label="邮箱"
+          required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="邮箱"
         />
         <input
           className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+          aria-label="密码"
+          required
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -1950,10 +2048,10 @@ export default function Login() {
 `web/src/pages/Settings.tsx`：
 
 ```tsx
-import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../client";
+import { ApiError, api } from "../client";
 
 type Provider = {
   id: string;
@@ -1964,6 +2062,21 @@ type Provider = {
   tiers: Record<string, string>;
   is_default: boolean;
 };
+
+function errorMessage(err: unknown): string {
+  if (err instanceof ApiError && Array.isArray(err.detail)) {
+    const messages = err.detail
+      .map((item) =>
+        item && typeof item === "object" && "msg" in item
+          ? (item as { msg?: unknown }).msg
+          : undefined,
+      )
+      .filter((msg): msg is string => typeof msg === "string" && msg.trim() !== "");
+    if (messages.length > 0) return messages.join("；");
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return "保存失败";
+}
 
 export default function Settings() {
   const qc = useQueryClient();
@@ -1979,32 +2092,57 @@ export default function Settings() {
     fast: "gpt-4o-mini",
     standard: "gpt-4o",
     premium: "gpt-4o",
+    is_default: true,
   });
   const [message, setMessage] = useState("");
+  const [messageKind, setMessageKind] = useState<"ok" | "error">("ok");
 
   const create = useMutation({
-    mutationFn: () =>
-      api<Provider>("/settings/providers", {
+    mutationFn: () => {
+      const tiers = Object.fromEntries(
+        Object.entries({
+          fast: form.fast.trim(),
+          standard: form.standard.trim(),
+          premium: form.premium.trim(),
+        }).filter(([, value]) => value !== ""),
+      );
+      return api<Provider>("/settings/providers", {
         method: "POST",
         body: JSON.stringify({
           name: form.name,
           kind: form.kind,
           base_url: form.base_url,
           api_key: form.api_key,
-          tiers: { fast: form.fast, standard: form.standard, premium: form.premium },
-          is_default: true,
+          tiers,
+          is_default: form.is_default,
         }),
-      }),
+      });
+    },
     onSuccess: () => {
+      setMessageKind("ok");
       setMessage("已保存");
       setForm((f) => ({ ...f, api_key: "" }));
       qc.invalidateQueries({ queryKey: ["providers"] });
     },
-    onError: (err) => setMessage(err instanceof Error ? err.message : "保存失败"),
+    onError: (err) => {
+      setMessageKind("error");
+      setMessage(errorMessage(err));
+    },
   });
 
   function submit(event: FormEvent) {
     event.preventDefault();
+    if (!form.standard.trim()) {
+      setMessageKind("error");
+      setMessage("请至少填写 standard 模型");
+      return;
+    }
+    if (!/^[\x20-\x7E]+$/.test(form.api_key)) {
+      setMessageKind("error");
+      setMessage("API Key 只能包含 ASCII 字符");
+      return;
+    }
+    setMessage("");
     create.mutate();
   }
 
@@ -2018,32 +2156,132 @@ export default function Settings() {
       </div>
       <form className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-6" onSubmit={submit}>
         <h2 className="font-medium">添加 LLM 提供商</h2>
-        <input className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
-          value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="名称" />
-        <select className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
-          value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
-          <option value="openai_compatible">OpenAI 兼容</option>
-          <option value="anthropic">Anthropic</option>
-        </select>
-        <input className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
-          value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} placeholder="Base URL" />
-        <input className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2" type="password"
-          value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="API Key" />
-        <div className="grid grid-cols-3 gap-2">
-          <input className="rounded border border-slate-700 bg-slate-950 px-3 py-2" value={form.fast}
-            onChange={(e) => setForm({ ...form, fast: e.target.value })} placeholder="fast 模型" />
-          <input className="rounded border border-slate-700 bg-slate-950 px-3 py-2" value={form.standard}
-            onChange={(e) => setForm({ ...form, standard: e.target.value })} placeholder="standard 模型" />
-          <input className="rounded border border-slate-700 bg-slate-950 px-3 py-2" value={form.premium}
-            onChange={(e) => setForm({ ...form, premium: e.target.value })} placeholder="premium 模型" />
+        <div className="space-y-1">
+          <label className="block text-sm text-slate-400" htmlFor="name">
+            名称
+          </label>
+          <input
+            id="name"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            maxLength={100}
+            required
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="名称"
+          />
         </div>
-        {message && <p className="text-sm text-slate-400">{message}</p>}
-        <button className="rounded bg-indigo-600 px-4 py-2 font-medium" disabled={create.isPending}>
+        <div className="space-y-1">
+          <label className="block text-sm text-slate-400" htmlFor="kind">
+            类型
+          </label>
+          <select
+            id="kind"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            value={form.kind}
+            onChange={(e) => setForm({ ...form, kind: e.target.value })}
+          >
+            <option value="openai_compatible">OpenAI 兼容</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </div>
+        <div className="space-y-1">
+          <label className="block text-sm text-slate-400" htmlFor="base_url">
+            Base URL
+          </label>
+          <input
+            id="base_url"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            maxLength={500}
+            required
+            value={form.base_url}
+            onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+            placeholder="Base URL"
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="block text-sm text-slate-400" htmlFor="api_key">
+            API Key
+          </label>
+          <input
+            id="api_key"
+            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            type="password"
+            minLength={8}
+            maxLength={512}
+            required
+            value={form.api_key}
+            onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+            placeholder="API Key"
+          />
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div className="space-y-1">
+            <label className="block text-sm text-slate-400" htmlFor="fast">
+              fast 模型
+            </label>
+            <input
+              id="fast"
+              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+              value={form.fast}
+              onChange={(e) => setForm({ ...form, fast: e.target.value })}
+              placeholder="fast 模型"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-sm text-slate-400" htmlFor="standard">
+              standard 模型
+            </label>
+            <input
+              id="standard"
+              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+              required
+              value={form.standard}
+              onChange={(e) => setForm({ ...form, standard: e.target.value })}
+              placeholder="standard 模型"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-sm text-slate-400" htmlFor="premium">
+              premium 模型
+            </label>
+            <input
+              id="premium"
+              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+              value={form.premium}
+              onChange={(e) => setForm({ ...form, premium: e.target.value })}
+              placeholder="premium 模型"
+            />
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-sm text-slate-300" htmlFor="is_default">
+          <input
+            id="is_default"
+            type="checkbox"
+            checked={form.is_default}
+            onChange={(e) => setForm({ ...form, is_default: e.target.checked })}
+          />
+          设为默认提供商
+        </label>
+        {message && (
+          <p className={messageKind === "ok" ? "text-sm text-emerald-400" : "text-sm text-red-400"}>
+            {message}
+          </p>
+        )}
+        <button
+          className="rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+          disabled={create.isPending}
+        >
           {create.isPending ? "保存中…" : "保存"}
         </button>
       </form>
       <section className="space-y-2">
         <h2 className="font-medium">已配置</h2>
+        {providers.isLoading && <p className="text-sm text-slate-400">加载中…</p>}
+        {providers.isError && (
+          <p className="text-sm text-red-400">
+            {providers.error instanceof Error ? providers.error.message : "加载失败"}
+          </p>
+        )}
         {providers.data?.length === 0 && <p className="text-sm text-slate-400">暂无</p>}
         {providers.data?.map((p) => (
           <div key={p.id} className="rounded border border-slate-800 bg-slate-900 p-3 text-sm">
@@ -2059,40 +2297,16 @@ export default function Settings() {
 }
 ```
 
+> 实现要点（与后端约束对齐）：所有输入都有可见 `<label>`；`name`/`base_url`/`api_key` 带 `maxLength` 与 `minLength`；`standard` 必填；`api_key` 仅允许 ASCII；tiers 提交前 trim 并丢弃空值；`is_default` 由复选框控制；422 的 `detail[].msg` 用「；」拼接展示；列表区区分 loading / error / 空态。
+
 - [ ] **Step 6: 写对话骨架（Phase 1 接技能路由）**
 
 `web/src/pages/Chat.tsx`：
 
 ```tsx
-import { useState } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../client";
 
 export default function Chat() {
-  const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
-  const [busy, setBusy] = useState(false);
-
-  async function send() {
-    const text = input.trim();
-    if (!text || busy) return;
-    setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-    setBusy(true);
-    try {
-      const data = await api<{ reply: string }>("/chat", {
-        method: "POST",
-        body: JSON.stringify({ message: text }),
-      });
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
-    } catch (err) {
-      const content = err instanceof Error ? err.message : "请求失败";
-      setMessages((prev) => [...prev, { role: "assistant", content }]);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <main className="mx-auto flex h-screen max-w-3xl flex-col p-6">
       <div className="flex items-center justify-between">
@@ -2101,27 +2315,18 @@ export default function Chat() {
           设置
         </Link>
       </div>
-      <div className="mt-4 flex-1 space-y-3 overflow-y-auto">
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`rounded-lg px-4 py-3 text-sm whitespace-pre-wrap ${
-              m.role === "user" ? "bg-indigo-600/30" : "bg-slate-900"
-            }`}
-          >
-            {m.content}
-          </div>
-        ))}
+      <p className="mt-2 text-sm text-amber-400">对话编排将在 Phase 1 接入，当前为界面骨架。</p>
+      <div className="mt-4 flex-1 space-y-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-900 p-4 text-sm text-slate-500">
+        对话能力将在 Phase 1 接入
       </div>
       <div className="mt-4 flex gap-2">
         <input
-          className="flex-1 rounded border border-slate-700 bg-slate-900 px-3 py-2"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="说说你想做什么内容…"
+          className="flex-1 rounded border border-slate-700 bg-slate-900 px-3 py-2 disabled:opacity-50"
+          aria-label="对话输入"
+          disabled
+          placeholder="对话能力将在 Phase 1 接入"
         />
-        <button className="rounded bg-indigo-600 px-4 py-2" onClick={send} disabled={busy}>
+        <button className="rounded bg-indigo-600 px-4 py-2 disabled:opacity-50" disabled>
           发送
         </button>
       </div>
@@ -2130,24 +2335,302 @@ export default function Chat() {
 }
 ```
 
-- [ ] **Step 7: 启动并人工验证**
+> 本阶段没有 `/api/chat` 接口，因此对话页只做界面骨架，不发起请求；Task 1.11 接入 `streamSse` 后再启用输入。
+
+- [ ] **Step 7: 写前端单测（SSE 与客户端）**
+
+`web/src/__tests__/client.test.ts`：
+
+```ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError, api, getToken, setToken } from "../client";
+
+function stubBrowser(initialToken: string | null = null, pathname = "/chat") {
+  const store = new Map<string, string>();
+  if (initialToken) store.set("nm_token", initialToken);
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+    clear: () => store.clear(),
+  });
+  const locationStub = { pathname, href: "" };
+  vi.stubGlobal("location", locationStub);
+  return { store, location: locationStub };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("api", () => {
+  it("returns undefined for a 204 response", async () => {
+    stubBrowser("tok");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+
+    await expect(api("/settings/providers/1")).resolves.toBeUndefined();
+  });
+
+  it("maps an error envelope to ApiError with code, message and detail", async () => {
+    stubBrowser("tok");
+    const envelope = {
+      code: "validation_error",
+      message: "参数错误",
+      detail: [{ msg: "字段 A 无效" }, { msg: "" }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(envelope), {
+            status: 422,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+
+    const err = await api("/settings/providers").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const apiErr = err as ApiError;
+    expect(apiErr.status).toBe(422);
+    expect(apiErr.code).toBe("validation_error");
+    expect(apiErr.message).toBe("参数错误");
+    expect(apiErr.detail).toEqual(envelope.detail);
+  });
+
+  it("does not clear a newer token when a stale request gets a 401", async () => {
+    const { location } = stubBrowser("old-token");
+    let resolveFetch!: (resp: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn(() => pending));
+
+    const request = api("/chat").catch((e) => e);
+    // 旧请求在途时完成了新登录
+    setToken("new-token");
+    resolveFetch(new Response(null, { status: 401 }));
+    const err = await request;
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401);
+    expect(getToken()).toBe("new-token");
+    expect(location.href).toBe("");
+  });
+
+  it("clears the token and redirects on a matching 401", async () => {
+    const { location } = stubBrowser("tok");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 401 })),
+    );
+
+    const err = await api("/chat").catch((e) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect(getToken()).toBeNull();
+    expect(location.href).toBe("/login");
+  });
+});
+```
+
+`web/src/__tests__/sse.test.ts`：
+
+```ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { streamSse } from "../sse";
+
+const encoder = new TextEncoder();
+
+function bytes(text: string): Uint8Array {
+  return encoder.encode(text);
+}
+
+function sseResponse(chunks: Uint8Array[]): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+function stubBrowser(initialToken: string | null = null, pathname = "/chat") {
+  const store = new Map<string, string>();
+  if (initialToken) store.set("nm_token", initialToken);
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      store.set(key, String(value));
+    },
+    removeItem: (key: string) => {
+      store.delete(key);
+    },
+    clear: () => store.clear(),
+  });
+  const locationStub = { pathname, href: "" };
+  vi.stubGlobal("location", locationStub);
+  return { store, location: locationStub };
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("streamSse", () => {
+  it("parses events framed with CRLF blank lines", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([bytes('data: {"delta":"你"}\r\n\r\ndata: {"delta":"好"}\r\n\r\n')]),
+      ),
+    );
+
+    const chunks: string[] = [];
+    const onDone = vi.fn();
+    await streamSse("/chat", {}, (text) => chunks.push(text), onDone);
+
+    expect(chunks).toEqual(["你", "好"]);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("decodes a UTF-8 character split across byte chunks", async () => {
+    stubBrowser();
+    const all = bytes('data: {"delta":"你"}\n\n');
+    // 末尾 `"}\n\n` 共 4 字节，从末尾切 6 字节会落在「你」的 3 字节 UTF-8 序列中间
+    const split = all.length - 6;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => sseResponse([all.slice(0, split), all.slice(split)])),
+    );
+
+    const chunks: string[] = [];
+    await streamSse("/chat", {}, (text) => chunks.push(text));
+
+    expect(chunks).toEqual(["你"]);
+  });
+
+  it("flushes a final event that has no trailing blank line", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => sseResponse([bytes('data: {"delta":"末"}')])),
+    );
+
+    const chunks: string[] = [];
+    const onDone = vi.fn();
+    await streamSse("/chat", {}, (text) => chunks.push(text), onDone);
+
+    expect(chunks).toEqual(["末"]);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("joins multiple data lines with a newline", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([bytes('data: {\ndata:   "delta": "多行"\ndata: }\n\n')]),
+      ),
+    );
+
+    const chunks: string[] = [];
+    await streamSse("/chat", {}, (text) => chunks.push(text));
+
+    expect(chunks).toEqual(["多行"]);
+  });
+
+  it("stops at [DONE] and calls onDone exactly once", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          bytes('data: {"delta":"a"}\n\ndata: [DONE]\n\ndata: {"delta":"never"}\n\n'),
+        ]),
+      ),
+    );
+
+    const chunks: string[] = [];
+    const onDone = vi.fn();
+    await streamSse("/chat", {}, (text) => chunks.push(text), onDone);
+
+    expect(chunks).toEqual(["a"]);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws on an in-band error event", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => sseResponse([bytes('data: {"error":"boom"}\n\n')])),
+    );
+
+    await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("boom");
+  });
+
+  it("calls the unauthorized helper on a 401 response", async () => {
+    const { store, location } = stubBrowser("stale-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 401 })),
+    );
+
+    await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("流式请求失败");
+
+    expect(store.has("nm_token")).toBe(false);
+    expect(location.href).toBe("/login");
+  });
+});
+```
+
+Run: `cd web && npm install && npm run test`
+Expected: 11 tests passed（`client.test.ts` 4 + `sse.test.ts` 7）
+
+- [ ] **Step 8: 启动并人工验证**
 
 ```bash
-cd web && npm install && npm run dev
+make up && make migrate
+cd backend && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd web && npm run dev
 ```
-Expected: 浏览器打开 `http://localhost:5173` → 用 `.env` 中管理员账号登录 → 进入对话页 → 设置页可保存并回显掩码密钥。
 
-- [ ] **Step 8: 构建校验**
+Expected: 浏览器打开 `http://localhost:5173` → 用 `.env` 中管理员账号（`admin@local` / `admin12345`）登录 → 跳转 `/chat` 看到「对话编排将在 Phase 1 接入」提示且输入框禁用 → 进入设置页，空列表显示「暂无」→ 保存一个提供商后列表回显掩码密钥与「默认」标记 → 浏览器控制台无报错。
+
+验证完成后清理：
+
+```bash
+# 停掉 uvicorn 与 vite（Ctrl+C 或 kill 对应 PID）
+make down
+```
+
+- [ ] **Step 9: 构建校验**
 
 Run: `cd web && npm run build`
-Expected: `tsc` 无错误，产物输出到 `dist/`
+Expected: `tsc` 无错误，产物输出到 `dist/`（约 72 modules，JS ~303 KB / gzip ~95 KB）
 
-- [ ] **Step 9: 提交**
+- [ ] **Step 10: 提交**
 
 ```bash
-git add web
+git add web .gitignore
 git commit -m "feat: add React scaffold with login, settings and chat shell"
 ```
+
+若两阶段评审发现缺陷，修复后单独提交（本次实际为 `fix: harden sse parsing and auth handling in web scaffold`），不要 amend 已提交的 feature commit。
 
 ---
 
