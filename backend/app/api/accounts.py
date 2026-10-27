@@ -31,7 +31,57 @@ ALLOWED_META = {
     "need_open_comment",
     "only_fans_can_comment",
 }
-SCALAR_TYPES = (str, int, float, bool)
+MAX_AUTHOR = 64
+MAX_THUMB_MEDIA_ID = 200
+
+
+def _clean_meta(meta: dict) -> dict:
+    cleaned: dict = {}
+    for key, value in meta.items():
+        if key not in ALLOWED_META:
+            raise ValueError(f"不支持的 meta 字段：{key}")
+        if key == "author":
+            if not isinstance(value, str):
+                raise ValueError("meta 字段 author 必须是字符串")
+            author = value.strip()
+            if len(author) > MAX_AUTHOR:
+                raise ValueError(f"meta 字段 author 长度不能超过 {MAX_AUTHOR}")
+            cleaned[key] = author
+        elif key == "thumb_media_id":
+            if not isinstance(value, str):
+                raise ValueError("meta 字段 thumb_media_id 必须是字符串")
+            thumb = value.strip()
+            if not thumb:
+                raise ValueError("公众号封面图 thumb_media_id 不能为空")
+            if len(thumb) > MAX_THUMB_MEDIA_ID:
+                raise ValueError(
+                    f"meta 字段 thumb_media_id 长度不能超过 {MAX_THUMB_MEDIA_ID}"
+                )
+            cleaned[key] = thumb
+        else:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value not in (0, 1)
+            ):
+                raise ValueError(f"meta 字段 {key} 只能为 0 或 1")
+            cleaned[key] = value
+    return cleaned
+
+
+def _clean_credential(platform: str, credential: dict) -> dict:
+    if platform != "wechat":
+        return credential
+    app_id = credential.get("app_id")
+    app_secret = credential.get("app_secret")
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(app_secret, str)
+        or not app_secret.strip()
+    ):
+        raise ValueError("公众号凭据不完整，请重新授权")
+    return {"app_id": app_id.strip(), "app_secret": app_secret.strip()}
 
 
 class AccountIn(BaseModel):
@@ -47,24 +97,30 @@ class AccountIn(BaseModel):
 
     @model_validator(mode="after")
     def _validate_credentials_and_meta(self) -> "AccountIn":
-        if self.platform == "wechat":
-            app_id = self.credential.get("app_id")
-            app_secret = self.credential.get("app_secret")
-            if (
-                not isinstance(app_id, str)
-                or not app_id.strip()
-                or not isinstance(app_secret, str)
-                or not app_secret.strip()
-            ):
-                raise ValueError("公众号凭据不完整，请重新授权")
-            self.credential["app_id"] = app_id.strip()
-            self.credential["app_secret"] = app_secret.strip()
-        for key, value in self.meta.items():
-            if key not in ALLOWED_META:
-                raise ValueError(f"不支持的 meta 字段：{key}")
-            if not isinstance(value, SCALAR_TYPES):
-                # pydantic 需要 ValueError 才能转换为 422
-                raise ValueError(f"meta 字段 {key} 只支持标量值")  # noqa: TRY004
+        self.credential = _clean_credential(self.platform, self.credential)
+        self.meta = _clean_meta(self.meta)
+        return self
+
+
+class AccountUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: (
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=100),
+        ]
+        | None
+    ) = None
+    credential: dict | None = None
+    meta: dict | None = None
+
+    @model_validator(mode="after")
+    def _validate_update(self) -> "AccountUpdate":
+        if self.name is None and self.credential is None and self.meta is None:
+            raise ValueError("至少需要提供一个要更新的字段")
+        if self.meta is not None:
+            self.meta = _clean_meta(self.meta)
         return self
 
 
@@ -76,12 +132,6 @@ class AccountOut(BaseModel):
     credential_masked: str
 
 
-def _mask_value(value: object) -> str:
-    if isinstance(value, SCALAR_TYPES):
-        return str(value)[:3] + "****"
-    return "****"
-
-
 def _masked_credential(account: PlatformAccount) -> str:
     try:
         creds = json.loads(decrypt_secret(account.credential_enc))
@@ -89,7 +139,7 @@ def _masked_credential(account: PlatformAccount) -> str:
         return "{}"
     if not isinstance(creds, dict):
         return "{}"
-    masked = {str(key): _mask_value(value) for key, value in creds.items()}
+    masked = {str(key): "****" for key in creds}
     return json.dumps(masked, ensure_ascii=False)
 
 
@@ -169,6 +219,37 @@ async def create_account(
     return _out(account)
 
 
+@router.patch("/{account_id}", response_model=AccountOut)
+async def update_account(
+    account_id: str,
+    payload: AccountUpdate,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> AccountOut:
+    account = await _owned_account(session, account_id, user)
+    if account.status != "active":
+        raise AppError("account_revoked", "账号已停用，无法修改，请重新创建", 409)
+    if payload.name is not None:
+        account.name = payload.name
+    if payload.credential is not None:
+        try:
+            credential = _clean_credential(account.platform, payload.credential)
+        except ValueError as exc:
+            raise AppError("validation_error", str(exc), 422) from None
+        account.credential_enc = encrypt_secret(
+            json.dumps(credential, ensure_ascii=False)
+        )
+    if payload.meta is not None:
+        account.meta = payload.meta
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise AppError("account_exists", "该平台下已存在同名账号", 409) from None
+    await session.refresh(account)
+    return _out(account)
+
+
 @router.delete("/{account_id}", status_code=204)
 async def revoke_account(
     account_id: str,
@@ -178,5 +259,8 @@ async def revoke_account(
     account = await _owned_account(session, account_id, user)
     if account.status != "revoked":
         account.status = "revoked"
+        # 停用即销毁密钥与 meta，撤销后的账号不再保留任何可用凭据
+        account.credential_enc = encrypt_secret("{}")
+        account.meta = {}
         await session.commit()
     return Response(status_code=204)

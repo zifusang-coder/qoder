@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -7,8 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import AppError
 from app.models.project import Content, ContentVersion
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
-from app.publish.base import PublisherAdapter
+from app.publish.base import PublisherAdapter, PublishError
 from app.publish.state import next_status
+
+logger = logging.getLogger(__name__)
 
 RESCHEDULABLE = {"draft", "prechecking", "precheck_failed", "awaiting_review", "approved"}
 MUTABLE_JOB_FIELDS = {
@@ -19,6 +22,13 @@ MUTABLE_JOB_FIELDS = {
     "published_at",
     "export_path",
 }
+FIELD_LIMITS = {
+    "error": 1000,
+    "external_id": 200,
+    "external_url": 1000,
+    "export_path": 1000,
+}
+MAX_PUBLISH_ATTEMPTS = 5
 
 
 class JobNotFound(LookupError):
@@ -49,6 +59,22 @@ async def _locked_job(
     return job
 
 
+def _validate_fields(fields: dict) -> None:
+    for key, value in fields.items():
+        if key == "attempts":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("attempts 必须是非负整数")
+        elif key == "published_at":
+            if value is not None and not isinstance(value, datetime):
+                raise ValueError("published_at 必须是时间或空值")
+        else:
+            limit = FIELD_LIMITS[key]
+            if not isinstance(value, str):
+                raise ValueError(f"{key} 必须是字符串")
+            if len(value) > limit:
+                raise ValueError(f"{key} 长度不能超过 {limit} 个字符")
+
+
 async def apply_action(
     session: AsyncSession,
     job_id: uuid.UUID,
@@ -63,6 +89,7 @@ async def apply_action(
     unknown = set(pending) - MUTABLE_JOB_FIELDS
     if unknown:
         raise ValueError(f"不允许修改的字段：{', '.join(sorted(unknown))}")
+    _validate_fields(pending)
     job = await _locked_job(session, job_id, tenant_id)
     if action == "publish":
         content = (
@@ -202,6 +229,10 @@ async def execute_job(
     job = await _locked_job(session, job_id, tenant_id)
     if job.status != "approved":
         raise AppError("invalid_state", "只有审核通过的任务可以执行发布", 409)
+    if job.attempts >= MAX_PUBLISH_ATTEMPTS:
+        raise AppError(
+            "too_many_attempts", "发布尝试次数已达上限，请人工确认平台状态", 409
+        )
 
     version = (
         await session.execute(
@@ -232,32 +263,45 @@ async def execute_job(
     if account.platform != job.platform:
         raise AppError("account_platform_mismatch", "账号平台与发布平台不一致", 409)
 
-    # 先提交 publishing 与尝试次数，确保外部调用前状态已落库
+    # 先落库次数与进行中标记：进程崩溃后仍能看出请求已提交平台
     job = await apply_action(
         session,
         job.id,
         "publish",
         tenant_id=tenant_id,
         actor=actor,
-        fields={"attempts": job.attempts + 1, "error": ""},
+        fields={
+            "attempts": job.attempts + 1,
+            "error": "发布请求已提交，等待平台确认",
+        },
     )
 
     try:
         result = await adapter.publish(
             account=account, title=version.title, body=version.body
         )
-    except Exception as exc:
-        message = str(exc)[:1000] or type(exc).__name__
-        await apply_action(
-            session,
-            job.id,
-            "fail",
-            tenant_id=tenant_id,
-            actor=actor,
-            note=message[:500],
-            fields={"error": message},
+    except Exception as exc:  # noqa: BLE001 - 任何适配器异常都必须归一化后才能返回
+        # 未预期异常只暴露类名，避免把内部细节或密钥带进响应
+        failure = (
+            exc
+            if isinstance(exc, PublishError)
+            else PublishError(f"发布执行失败（{type(exc).__name__}）")
         )
-        raise
+        message = str(failure)[:1000]
+        try:
+            await apply_action(
+                session,
+                job.id,
+                "fail",
+                tenant_id=tenant_id,
+                actor=actor,
+                note=message[:500],
+                fields={"error": message},
+            )
+        except Exception:
+            logger.exception("发布失败状态写入失败 job=%s", job.id)
+            await session.rollback()
+        raise failure from None
 
     return await apply_action(
         session,

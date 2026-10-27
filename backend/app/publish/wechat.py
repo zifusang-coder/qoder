@@ -1,3 +1,4 @@
+import html
 import json
 import re
 from typing import Any
@@ -94,28 +95,32 @@ class WeChatMPAdapter:
             return 0
 
     @staticmethod
-    def _digest(html: str) -> str:
-        return re.sub(r"<[^>]+>", "", html).strip()[:MAX_DIGEST]
+    def _digest(content: str) -> str:
+        text = re.sub(r"<[^>]+>", "", content)
+        return html.unescape(text).strip()[:MAX_DIGEST]
 
     def _article(
         self, account: PlatformAccount, title: str, body: str
     ) -> dict[str, Any]:
-        html = markdown.markdown(body, extensions=["extra", "sane_lists"])
+        html_body = markdown.markdown(body, extensions=["extra", "sane_lists"])
         meta = account.meta or {}
         author = meta.get("author", "")
+        thumb = meta.get("thumb_media_id")
+        if not isinstance(thumb, str) or not thumb.strip():
+            raise PublishError(
+                "公众号草稿需要封面图 thumb_media_id，请在账号设置中配置"
+            )
         article: dict[str, Any] = {
             "title": title.strip()[:MAX_TITLE] or "未命名",
             "author": author if isinstance(author, str) else "",
-            "digest": self._digest(html),
-            "content": html,
+            "digest": self._digest(html_body),
+            "content": html_body,
+            "thumb_media_id": thumb.strip(),
             "need_open_comment": self._meta_int(meta, "need_open_comment"),
             "only_fans_can_comment": self._meta_int(
                 meta, "only_fans_can_comment"
             ),
         }
-        thumb = meta.get("thumb_media_id")
-        if isinstance(thumb, str) and thumb:
-            article["thumb_media_id"] = thumb
         return article
 
     async def publish(

@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 import httpx
@@ -29,7 +30,9 @@ def _account_payload(
         "platform": platform,
         "name": name,
         "credential": dict(credential or CREDENTIAL),
-        "meta": meta if meta is not None else {"author": "作者甲"},
+        "meta": meta
+        if meta is not None
+        else {"author": "作者甲", "thumb_media_id": "thumb-0"},
     }
 
 
@@ -175,10 +178,11 @@ async def test_create_account_masks_and_encrypts_credentials(client, db_session)
     assert body["name"] == "主号"
     assert body["status"] == "active"
     assert set(body) == {"id", "platform", "name", "status", "credential_masked"}
-    assert json.loads(body["credential_masked"]) == {
-        "app_id": "wx1****",
-        "app_secret": "sec****",
-    }
+    masked = json.loads(body["credential_masked"])
+    assert masked == {"app_id": "****", "app_secret": "****"}
+    # 键名保留，但任何凭据值都不能带出前缀；用值级断言避免误伤 app_secret 键名
+    assert all(value == "****" for value in masked.values())
+    assert "wx1" not in json.dumps(body)
     assert "wx123" not in json.dumps(body)
     assert '"secret"' not in json.dumps(body)
 
@@ -206,9 +210,35 @@ async def test_list_accounts_is_tenant_scoped_and_masked(client, db_session):
     assert response.status_code == 200
     items = response.json()
     assert [item["name"] for item in items] == ["本租户"]
-    assert json.loads(items[0]["credential_masked"])["app_id"] == "wx1****"
+    masked = json.loads(items[0]["credential_masked"])
+    assert masked == {"app_id": "****", "app_secret": "****"}
+    assert all(value == "****" for value in masked.values())
+    assert "wx1" not in response.text
     assert "wx123" not in response.text
     assert '"secret"' not in response.text
+
+
+async def test_masks_short_and_non_string_credential_values(client, db_session):
+    account = PlatformAccount(
+        tenant_id=DEFAULT_TENANT_ID,
+        platform="wechat",
+        name="短凭据",
+        credential_enc=encrypt_secret(
+            json.dumps({"app_id": "a", "app_secret": "b", "token": 12345})
+        ),
+        status="active",
+        meta={},
+    )
+    db_session.add(account)
+    await db_session.commit()
+
+    response = await client.get("/api/accounts")
+    assert response.status_code == 200
+    items = response.json()
+    masked = json.loads(items[0]["credential_masked"])
+    assert masked == {"app_id": "****", "app_secret": "****", "token": "****"}
+    assert all(value == "****" for value in masked.values())
+    assert "12345" not in response.text
 
 
 async def test_duplicate_account_name_per_platform_conflicts(client):
@@ -310,16 +340,143 @@ async def test_revoked_account_cannot_create_job(client):
     assert response.json()["code"] == "account_inactive"
 
 
+async def test_revoke_clears_stored_credentials(client, db_session):
+    account = await _create_account(client)
+
+    assert (
+        await client.delete(f"/api/accounts/{account['id']}")
+    ).status_code == 204
+
+    stored = await _stored_account(db_session, account["id"])
+    assert stored.status == "revoked"
+    assert stored.name == "主号"
+    assert stored.meta == {}
+    assert decrypt_secret(stored.credential_enc) == "{}"
+    assert json.loads(decrypt_secret(stored.credential_enc)) == {}
+
+    listed = await client.get("/api/accounts")
+    assert listed.json()[0]["credential_masked"] == "{}"
+
+
+async def test_revoke_frees_name_for_recreation(client):
+    first = await _create_account(client, name="同名")
+    assert (await client.delete(f"/api/accounts/{first['id']}")).status_code == 204
+
+    second = await _create_account(client, name="同名")
+    assert second["name"] == "同名"
+    assert second["status"] == "active"
+
+    duplicate = await client.post(
+        "/api/accounts", json=_account_payload(name="同名")
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "account_exists"
+
+
+async def test_update_account_rotates_credential(client, db_session):
+    account = await _create_account(client)
+
+    response = await client.patch(
+        f"/api/accounts/{account['id']}",
+        json={"credential": {"app_id": "wx999", "app_secret": "new-secret"}},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert json.loads(body["credential_masked"]) == {
+        "app_id": "****",
+        "app_secret": "****",
+    }
+    assert "wx999" not in response.text
+    assert "new-secret" not in response.text
+    assert "wx123" not in response.text
+    assert '"secret"' not in response.text
+
+    stored = await _stored_account(db_session, account["id"])
+    assert json.loads(decrypt_secret(stored.credential_enc)) == {
+        "app_id": "wx999",
+        "app_secret": "new-secret",
+    }
+
+
+async def test_update_revoked_account_returns_409(client):
+    account = await _create_account(client)
+    assert (
+        await client.delete(f"/api/accounts/{account['id']}")
+    ).status_code == 204
+
+    response = await client.patch(
+        f"/api/accounts/{account['id']}", json={"name": "新名字"}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "account_revoked"
+    assert response.json()["message"] == "账号已停用，无法修改，请重新创建"
+
+
+async def test_update_empty_payload_returns_422(client):
+    account = await _create_account(client)
+
+    response = await client.patch(f"/api/accounts/{account['id']}", json={})
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
+async def test_update_duplicate_name_returns_409(client):
+    await _create_account(client, name="甲号")
+    second = await _create_account(client, name="乙号")
+
+    response = await client.patch(
+        f"/api/accounts/{second['id']}", json={"name": "甲号"}
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "account_exists"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"need_open_comment": 2},
+        {"author": 123},
+        {"thumb_media_id": "  "},
+        {"unknown": "x"},
+    ],
+)
+async def test_update_meta_validation(client, meta):
+    account = await _create_account(client)
+
+    response = await client.patch(
+        f"/api/accounts/{account['id']}", json={"meta": meta}
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        {"need_open_comment": True},
+        {"thumb_media_id": "  "},
+        {"author": 123},
+    ],
+)
+async def test_create_rejects_invalid_meta_types(client, meta):
+    response = await client.post(
+        "/api/accounts", json=_account_payload(meta=meta)
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
 # --- happy path -------------------------------------------------------------
 
 
 @respx.mock
-async def test_happy_path_creates_wechat_draft(client, db_session):
+async def test_happy_path_creates_wechat_draft(client, db_session, caplog):
     token_route, draft_route = _mock_success()
     account = await _create_account(
         client,
         meta={
             "author": "作者甲",
+            "thumb_media_id": "thumb-0",
             "need_open_comment": 1,
             "only_fans_can_comment": 0,
         },
@@ -328,7 +485,8 @@ async def test_happy_path_creates_wechat_draft(client, db_session):
     job = await _create_job(client, content["id"], account_id=account["id"])
     await _approve(client, job["id"])
 
-    response = await _execute(client, job["id"])
+    with caplog.at_level(logging.DEBUG):
+        response = await _execute(client, job["id"])
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "published"
@@ -352,7 +510,7 @@ async def test_happy_path_creates_wechat_draft(client, db_session):
     assert "<strong>正文</strong>" in article["content"]
     assert article["need_open_comment"] == 1
     assert article["only_fans_can_comment"] == 0
-    assert "thumb_media_id" not in article
+    assert article["thumb_media_id"] == "thumb-0"
 
     events = await _events(db_session, job["id"])
     assert [event.action for event in events] == [
@@ -377,6 +535,8 @@ async def test_happy_path_creates_wechat_draft(client, db_session):
     assert "wx123" not in combined
     assert '"secret"' not in combined
     assert "tok-abc" not in combined
+    # 即使根 logger 开到 DEBUG，httpx 的 URL 日志也不能带出 access_token
+    assert "tok-abc" not in caplog.text
 
 
 @respx.mock
@@ -424,12 +584,41 @@ async def test_adapter_uses_fallback_title():
         name="直连账号",
         credential_enc=encrypt_secret(json.dumps(CREDENTIAL)),
         status="active",
-        meta={},
+        meta={"thumb_media_id": "thumb-1"},
     )
 
     await WeChatMPAdapter().publish(account=account, title="   ", body="正文")
     article = json.loads(draft_route.calls[0].request.content)["articles"][0]
     assert article["title"] == "未命名"
+
+
+@respx.mock
+async def test_digest_unescapes_html_entities():
+    respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "tok-abc"})
+    )
+    draft_route = respx.post(DRAFT_URL).mock(
+        return_value=httpx.Response(200, json={"media_id": "media-1"})
+    )
+    account = PlatformAccount(
+        tenant_id=DEFAULT_TENANT_ID,
+        platform="wechat",
+        name="直连账号",
+        credential_enc=encrypt_secret(json.dumps(CREDENTIAL)),
+        status="active",
+        meta={"thumb_media_id": "thumb-1"},
+    )
+
+    await WeChatMPAdapter().publish(account=account, title="标题", body="A & B")
+    article = json.loads(draft_route.calls[0].request.content)["articles"][0]
+    assert article["digest"] == "A & B"
+
+
+def test_httpx_logging_is_suppressed():
+    import app.main  # noqa: F401  导入即生效，确保 URL 日志不泄露 token
+
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
 
 
 # --- adapter failures -------------------------------------------------------
@@ -546,6 +735,113 @@ async def test_execute_requires_approved_state(client):
     assert response.json()["message"] == "只有审核通过的任务可以执行发布"
 
 
+@respx.mock
+async def test_missing_thumb_media_id_fails_before_network(client, db_session):
+    token_route, draft_route = _mock_success()
+    account = await _create_account(client, meta={"author": "作者甲"})
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    response = await _execute(client, job["id"])
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "publish_failed"
+    assert "thumb_media_id" in body["message"]
+
+    assert token_route.call_count == 0
+    assert draft_route.call_count == 0
+    failed = await _stored_job(db_session, job["id"])
+    assert failed.status == "publish_failed"
+
+
+@respx.mock
+async def test_execute_twice_publishes_once(client, db_session):
+    _, draft_route = _mock_success()
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    first = await _execute(client, job["id"])
+    assert first.status_code == 200, first.text
+
+    second = await _execute(client, job["id"])
+    assert second.status_code == 409
+    assert second.json()["code"] == "invalid_state"
+    assert draft_route.call_count == 1
+
+
+@respx.mock
+async def test_attempt_limit_blocks_execution(client, db_session):
+    token_route, draft_route = _mock_success()
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    stored = await _stored_job(db_session, job["id"])
+    stored.attempts = 5
+    await db_session.commit()
+
+    response = await _execute(client, job["id"])
+    assert response.status_code == 409
+    assert response.json()["code"] == "too_many_attempts"
+    assert response.json()["message"] == "发布尝试次数已达上限，请人工确认平台状态"
+    assert token_route.call_count == 0
+    assert draft_route.call_count == 0
+    assert (await _stored_job(db_session, job["id"])).status == "approved"
+
+
+@respx.mock
+async def test_missing_access_token_is_sanitized(client, db_session):
+    respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(200, json={"errcode": 0})
+    )
+    draft_route = respx.post(DRAFT_URL).mock(
+        return_value=httpx.Response(200, json={"media_id": "media-123"})
+    )
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    response = await _execute(client, job["id"])
+    assert response.status_code == 502
+    body = response.json()
+    assert body["code"] == "publish_failed"
+    assert "access_token" in body["message"]
+    assert "wx123" not in response.text
+    assert '"secret"' not in response.text
+    assert draft_route.call_count == 0
+
+    failed = await _stored_job(db_session, job["id"])
+    assert failed.status == "publish_failed"
+    assert "access_token" in failed.error
+
+
+@respx.mock
+async def test_token_credentials_are_sent_in_body(client, db_session):
+    token_route, _ = _mock_success()
+    account = await _create_account(client)
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"], account_id=account["id"])
+    await _approve(client, job["id"])
+
+    response = await _execute(client, job["id"])
+    assert response.status_code == 200, response.text
+
+    request = token_route.calls[0].request
+    assert json.loads(request.content) == {
+        "grant_type": "client_credential",
+        "appid": "wx123",
+        "secret": "secret",
+        "force_refresh": False,
+    }
+    assert "secret" not in str(request.url)
+    assert "wx123" not in str(request.url)
+
+
 async def test_non_wechat_platform_requires_manual_export(client):
     content = await _create_content(client, platform="douyin")
     job = await _create_job(client, content["id"], platform="douyin")
@@ -645,6 +941,43 @@ async def test_apply_action_rejects_opaque_fields(client, db_session):
 
     stored = await _stored_job(db_session, job["id"])
     assert stored.status == "draft"
+    assert [event.action for event in await _events(db_session, job["id"])] == [
+        "create"
+    ]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"external_id": "x" * 201},
+        {"external_url": "x" * 1001},
+        {"error": "x" * 1001},
+        {"export_path": "x" * 1001},
+        {"attempts": -1},
+        {"attempts": True},
+        {"published_at": "2026-10-27"},
+    ],
+)
+async def test_apply_action_rejects_invalid_field_values(
+    client, db_session, fields
+):
+    content = await _create_content(client)
+    job = await _create_job(client, content["id"])
+
+    with pytest.raises(ValueError):
+        await apply_action(
+            db_session,
+            uuid.UUID(job["id"]),
+            "approve",
+            tenant_id=DEFAULT_TENANT_ID,
+            actor="tester@local",
+            fields=fields,
+        )
+
+    stored = await _stored_job(db_session, job["id"])
+    assert stored.status == "draft"
+    assert stored.attempts == 0
+    assert stored.external_id == ""
     assert [event.action for event in await _events(db_session, job["id"])] == [
         "create"
     ]

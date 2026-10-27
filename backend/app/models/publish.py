@@ -10,6 +10,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,11 +20,14 @@ from app.models.base import JSONType, TenantScoped
 class PlatformAccount(TenantScoped):
     __tablename__ = "platform_accounts"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_platform_accounts_active_name",
             "tenant_id",
             "platform",
             "name",
-            name="uq_platform_accounts_tenant_platform_name",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active'"),
         ),
     )
 
