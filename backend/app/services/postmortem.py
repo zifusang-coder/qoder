@@ -27,6 +27,11 @@ def _normalize_content(text: str) -> str:
     return " ".join(text.split())
 
 
+def _memory_key(text: str) -> str:
+    """比对人选与已有记忆时使用同一顺序：先去首尾空白、再截断、最后压缩空白。"""
+    return _normalize_content(text.strip()[:MAX_MEMORY_CONTENT])
+
+
 def _valid_weight(value: object) -> float | None:
     """只接受有限数值权重，布尔与字符串一律视为非法。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -110,6 +115,7 @@ async def generate_postmortem(
         raise AppError("no_metrics", "请先导入该内容的发布数据", 409)
 
     await require_enabled(session, tenant_id, skill_id)
+    registry.get(skill_id)
 
     version = (
         await session.execute(
@@ -159,9 +165,7 @@ async def generate_postmortem(
                     )
                 )
             ).scalars().all()
-            existing_contents = {
-                _normalize_content(item) for item in existing_rows
-            }
+            existing_contents = {_memory_key(item) for item in existing_rows}
 
     # 执行器内部会 commit，提前固化后续需要的值，避免依赖实例过期行为
     content_title = content.title
@@ -216,7 +220,7 @@ async def generate_postmortem(
         for kind, memory_content, weight in _memory_candidates(
             report.get("memories")
         ):
-            key = _normalize_content(memory_content)
+            key = _memory_key(memory_content)
             if key in seen:
                 continue
             seen.add(key)

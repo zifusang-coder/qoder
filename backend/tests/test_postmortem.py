@@ -264,6 +264,13 @@ async def test_postmortem_validates_before_loading_gateway(
     assert no_metrics.json()["code"] == "no_metrics"
 
     await _import_metrics(client, content_id)
+
+    unknown = await _postmortem(
+        client, content_id, {"skill_id": "does-not-exist"}
+    )
+    assert unknown.status_code == 404
+    assert unknown.json()["code"] == "not_found"
+
     db_session.add(
         SkillSetting(
             tenant_id=DEFAULT_TENANT_ID,
@@ -416,6 +423,8 @@ async def test_postmortem_sanitizes_memory_candidates(
                 {"content": "默认权重"},
                 {"content": "字符串权重", "weight": "0.7"},
                 {"content": {"text": "x"}, "weight": 0.9},
+                {"content": None, "weight": 0.9},
+                {"content": ["x"], "weight": 0.9},
                 {"content": 123, "weight": 0.9},
                 {"content": "负权重", "kind": 7, "weight": -1},
             ],
@@ -538,6 +547,54 @@ async def test_postmortem_deduplicates_memories(
     assert len(rows) == 2
     assert {row.content for row in rows} == {"重复经验", "另一条"}
     assert all(row.source == "postmortem" for row in rows)
+
+
+async def test_postmortem_dedupe_truncates_existing_memories(
+    client, db_session, postmortem_env
+):
+    profile_id, _project_id, content_id = await _setup(client)
+    # 超过 200 字符且含连续空白：验证两侧的截断/归一化顺序一致，
+    # 否则归一化后的长度超过 200 时比对键会错位，产生截断副本
+    long_text = ("长  " * 150).strip()
+    assert len(long_text) > 200
+
+    manual = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        json={"content": long_text},
+    )
+    assert manual.status_code == 201
+    await _import_metrics(client, content_id)
+
+    postmortem_env.gateway.reply = json.dumps(
+        {
+            "verdict": "ok",
+            "memories": [{"content": long_text, "weight": 0.8}],
+        },
+        ensure_ascii=False,
+    )
+    response = await _postmortem(client, content_id)
+    assert response.status_code == 200
+    assert response.json()["memory_ids"] == []
+
+    profile_uuid = uuid.UUID(profile_id)
+    assert (
+        await _count(
+            db_session,
+            ProfileMemory,
+            ProfileMemory.profile_id == profile_uuid,
+        )
+        == 1
+    )
+    rows = (
+        await db_session.execute(
+            select(ProfileMemory).where(
+                ProfileMemory.profile_id == profile_uuid
+            )
+        )
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].source == "manual"
+    assert rows[0].content == long_text
 
 
 async def test_postmortem_uses_pinned_version(
