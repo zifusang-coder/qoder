@@ -6,8 +6,10 @@
   "what_worked": ["有效做法"],
   "what_failed": ["无效做法"],
   "next_actions": ["下次具体怎么做"],
-  "memories": [{"kind": "insight", "content": "可长期复用的经验，40 字以内", "weight": 0.0-1.0}]
+  "memories": [{"kind": "insight", "content": "可长期复用的经验，40 字以内", "weight": 0.6}]
 }
+
+weight 为 0.0-1.0 之间的数字。
 
 要求：
 - 结合平台基准判断，不只看绝对数字；无基准时明确说明假设。

@@ -58,6 +58,24 @@ async def test_cover_card_rejects_absolute_path_escape():
         )
 
 
+async def test_cover_card_rejects_symlink_escape():
+    link = ROOT / "outputs" / f"link-{uuid.uuid4().hex}"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to("/tmp", target_is_directory=True)
+    try:
+        with pytest.raises(ScriptError, match="outputs"):
+            await run_script(
+                SKILLS / "cover-card" / "scripts" / "render_cover.py",
+                {
+                    "inputs": {"title": "越界", "output_dir": f"outputs/{link.name}"},
+                    "output": {"subtitle": "x"},
+                },
+                SKILLS / "cover-card",
+            )
+    finally:
+        link.unlink(missing_ok=True)
+
+
 async def test_format_check_flags_banned_words():
     result = await run_script(
         SKILLS / "quality-gate" / "scripts" / "format_check.py",
@@ -118,10 +136,11 @@ async def test_keyword_scan_indexes_input_text_only():
         SKILLS / "risk-scan" / "scripts" / "keyword_scan.py",
         {
             "inputs": {"text": "保证"},
-            "output": {"reviewed_points": ["绝对安全"]},
+            "output": {"reviewed_points": ["最佳"]},
         },
         SKILLS / "risk-scan",
     )
     hits = result["scan"]["hits"]
-    assert hits and hits[0]["index"] == 0
-    assert all(hit["word"] == "保证" for hit in hits)
+    assert [hit["word"] for hit in hits] == ["保证"]
+    assert hits[0]["index"] == 0
+    assert "最佳" not in result["summary"] or result["summary"] == "medium"

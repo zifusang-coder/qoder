@@ -20,8 +20,12 @@ def main() -> None:
         if w.strip() and not w.startswith("#")
     ]
     hits = []
+    total = 0
     for word in words:
         for match in re.finditer(re.escape(word), text):
+            total += 1
+            if len(hits) >= MAX_HITS:
+                continue
             start = match.start()
             hits.append(
                 {
@@ -30,19 +34,16 @@ def main() -> None:
                     "context": text[max(0, start - 10) : start + len(word) + 10],
                 }
             )
-            if len(hits) >= MAX_HITS:
-                break
-        if len(hits) >= MAX_HITS:
-            break
+    hits.sort(key=lambda hit: (hit["index"], hit["word"]))
 
-    level = "high" if len(hits) >= 2 else "medium" if hits else "low"
+    level = "high" if total >= 2 else "medium" if total else "low"
     merged = dict(output) if isinstance(output, dict) else {}
     merged["summary"] = level
     merged["scan"] = {
         "risk_level": level,
         "hits": hits,
-        "total": len(hits),
-        "truncated": len(hits) >= MAX_HITS,
+        "total": total,
+        "truncated": total > len(hits),
     }
     print(json.dumps(merged, ensure_ascii=False))
 

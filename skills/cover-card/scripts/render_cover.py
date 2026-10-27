@@ -39,6 +39,10 @@ def wrap(text: str, per_line: int) -> list[str]:
     return [text[i : i + per_line] for i in range(0, len(text), per_line)] or [""]
 
 
+def normalize(text: str) -> str:
+    return " ".join(text.split())
+
+
 def resolve_output_dir(raw: str) -> Path:
     candidate = Path(raw)
     target = (
@@ -57,11 +61,13 @@ def main() -> None:
     payload = json.load(sys.stdin)
     inputs = payload.get("inputs", {})
     output = payload.get("output") or {}
-    title = str(inputs.get("title", "")).strip()
-    subtitle = str(inputs.get("subtitle") or output.get("subtitle") or "").strip()
+    title = normalize(str(inputs.get("title", "")))
+    subtitle = normalize(str(inputs.get("subtitle") or output.get("subtitle") or ""))
     theme_name = str(inputs.get("theme", "dark"))
     if not title:
         raise SystemExit("title 不能为空")
+    if len(title) > 32:
+        title = title[:31] + "…"
     if len(subtitle) > 18:
         subtitle = subtitle[:17] + "…"
     if theme_name not in THEMES:
