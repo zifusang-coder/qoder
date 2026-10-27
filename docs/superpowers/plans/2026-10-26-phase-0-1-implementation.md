@@ -335,7 +335,7 @@ async def health() -> dict[str, str]:
 
 - [ ] **Step 7: 运行测试确认通过**
 
-Run: `cd backend && python -m pip install -e ".[dev]" && python -m pytest tests/test_health.py -q`
+Run: `cd backend && uv sync && uv run pytest tests/test_health.py -q`
 Expected: `1 passed`
 
 - [ ] **Step 8: 写 `.gitignore`**
@@ -1978,12 +1978,10 @@ git commit -m "feat: add React scaffold with login, settings and chat shell"
 ## 本地启动
 
 ```bash
-cp .env.example .env
-make up          # PostgreSQL + Redis
-cd backend && python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
+make setup       # 复制 .env（若不存在）并安装后端依赖
+make up          # PostgreSQL + Redis（等待健康检查通过）
+make migrate     # alembic upgrade head
+make dev         # uvicorn app.main:app --reload --port 8000
 ```
 
 另开终端：
@@ -1997,7 +1995,7 @@ cd web && npm install && npm run dev
 ## 测试
 
 ```bash
-cd backend && pytest -q
+make test
 cd web && npm run build
 ```
 
