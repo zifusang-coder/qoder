@@ -7,9 +7,10 @@
 ### 前置要求
 
 - Docker 与 Docker Compose v2（`docker compose` 需支持 `up --wait`），且 Docker daemon 已启动。
-- `uv`：Makefile 通过 `uv sync` / `uv run` 安装后端依赖，Python 3.11 由 uv 管理。
+- GNU Make（macOS 需 Xcode Command Line Tools，`xcode-select --install`）：下文所有命令均通过 `make` 调用。
+- `uv`：Makefile 通过 `uv sync` / `uv run` 安装后端依赖；uv 会自行获取兼容的 Python 3.11+ 解释器（本次验证使用 3.11.15）。`requires-python` 为 `>=3.11`，仓库不提供 `.python-version` 固定版本。
 - Node.js `^20.19.0 || >=22.12.0`（Vite 8 的引擎要求）与 npm。
-- PostgreSQL / Redis 由 Compose 提供，宿主机端口 15432 / 16379 需空闲。
+- PostgreSQL / Redis 由 Compose 提供（宿主机端口 15432 / 16379），后端与前端在宿主机运行（8000 / 5173）：这四个端口需空闲。
 
 ```bash
 make setup       # 复制 .env（若不存在）并安装后端依赖
@@ -24,11 +25,13 @@ make dev         # uvicorn app.main:app --reload --port 8000
 cd web && npm install && npm run dev
 ```
 
-打开 http://localhost:5173 ，使用本地开发默认账号登录：`.env.example` 提供 `admin@local` / `admin12345`（仅本地开发用；生产必须修改）。
+打开 http://localhost:5173 ，使用本地开发默认账号登录：凭据取自已存在的 `.env`，若不存在则由 `make setup` 从 `.env.example` 复制，模板默认 `admin@local` / `admin12345`。这些默认值仅限本地开发：`ENV` 非 `dev` 时应用会拒绝占位符 `JWT_SECRET` / `MASTER_KEY` 并启动失败，默认管理员密码也必须修改。
 
 Phase 0 的对话页为占位壳，尚无 `/api/chat` 接口。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
 
 ## 测试
+
+前置：先安装前端依赖（`npm --prefix web install`）并启动 Docker 服务（`make up`），再运行下列测试与构建命令。
 
 ```bash
 make test                   # 后端：uv run pytest -q

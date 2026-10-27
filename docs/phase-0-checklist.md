@@ -9,5 +9,5 @@
 - [x] 默认管理员可登录（HTTP 200，返回 `access_token`）；错误密码返回 401，body `code=invalid_credentials`
 - [x] 未带 token 请求 `/api/auth/me` 返回 401（`code=unauthorized`）
 - [x] 保存 LLM 提供商后列表仅显示掩码密钥（`sk-****5678`）；创建响应与列表响应均不含原始密钥；临时提供商已删除，列表恢复为空
-- [x] 前端可登录、可见设置页与对话页：Task 0.7 已做浏览器验证（commit `15c5077`）；本任务以 `npm --prefix web run test`（11 passed）与 `npm --prefix web run build`（成功）回归。对话页当前为占位壳，尚无 `/api/chat` 接口
+- [x] 前端可登录、可见设置页与对话页：Task 0.7 在 commit `15c5077` 的代码状态上做了浏览器验证。工具为 browser-use（Chromium），因当时 Playwright / Chrome MCP 不可用。实际观察到：登录成功并跳转 `/chat`；对话页显示 Phase 1 占位内容且输入框禁用；设置页显示空状态；创建提供商 `e2e-temp` 后列表显示掩码密钥 `sk-****-123`；通过 API 删除该提供商后列表恢复为空；全程无控制台报错。本任务回归：`npm --prefix web run test` 11 passed、`npm --prefix web run build` 成功。对话页当前仍为占位壳，尚无 `/api/chat` 接口
 - [x] `make test`：后端 69 passed；`npm --prefix web run test`：11 passed；`npm --prefix web run build`：成功
