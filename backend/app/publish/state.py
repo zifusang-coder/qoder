@@ -8,7 +8,12 @@ TRANSITIONS: dict[str, dict[str, str]] = {
         "export": "exporting",
         "cancel": "cancelled",
     },
-    "approved": {"publish": "publishing", "export": "exporting", "cancel": "cancelled"},
+    "approved": {
+        "publish": "publishing",
+        "export": "exporting",
+        "cancel": "cancelled",
+        "fail": "publish_failed",
+    },
     "exporting": {"export_done": "exported", "fail": "export_failed"},
     "exported": {},
     # 导出失败只能重试导出，绝不能绕过人工审核到达 approved

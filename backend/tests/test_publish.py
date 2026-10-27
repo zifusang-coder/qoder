@@ -170,6 +170,7 @@ def test_failure_and_retry_paths():
     assert next_status("exporting", "fail") == "export_failed"
     assert next_status("export_failed", "retry") == "exporting"
     assert next_status("publishing", "fail") == "publish_failed"
+    assert next_status("approved", "fail") == "publish_failed"
     assert next_status("publish_failed", "retry") == "approved"
 
 
