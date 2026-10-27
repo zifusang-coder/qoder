@@ -176,3 +176,91 @@ async def test_enabled_map_is_tenant_scoped(db_session):
 
     assert await _enabled_map(db_session, DEFAULT_TENANT_ID) == {}
     assert (await _enabled_map(db_session, other))["demo-skill"] is False
+
+
+@pytest.fixture
+def skills_registry():
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
+    yield
+    app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_error_precedence_beats_missing_llm_config(
+    client, skills_registry, db_session
+):
+    assert (
+        await client.post("/api/skills/nope/run", json={"inputs": {}})
+    ).status_code == 404
+
+    await client.patch("/api/skills/demo-skill/toggle", json={"enabled": False})
+    disabled = await client.post(
+        "/api/skills/demo-skill/run", json={"inputs": {"topic": "周报"}}
+    )
+    assert disabled.status_code == 409
+    assert disabled.json()["code"] == "skill_disabled"
+
+    disabled_stream = await client.post(
+        "/api/skills/demo-skill/stream", json={"inputs": {"topic": "周报"}}
+    )
+    assert disabled_stream.status_code == 409
+
+    await client.patch("/api/skills/demo-skill/toggle", json={"enabled": True})
+    invalid = await client.post("/api/skills/demo-skill/run", json={"inputs": {}})
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == "skill_inputs_invalid"
+
+    invalid_stream = await client.post(
+        "/api/skills/demo-skill/stream", json={"inputs": {}}
+    )
+    assert invalid_stream.status_code == 422
+    assert invalid_stream.json()["code"] == "skill_inputs_invalid"
+
+    count = (await db_session.execute(select(func.count(SkillRun.id)))).scalar_one()
+    assert count == 0
+
+
+async def test_toggle_recovers_from_concurrent_insert(
+    client, skills_registry, db_session, monkeypatch
+):
+    db_session.add(
+        SkillSetting(
+            tenant_id=DEFAULT_TENANT_ID, skill_id="demo-skill", enabled=True
+        )
+    )
+    await db_session.commit()
+
+    original_execute = db_session.execute
+    skipped = {"done": False}
+
+    async def flaky_execute(statement, *args, **kwargs):
+        descriptions = getattr(statement, "column_descriptions", [])
+        is_skill_setting = (
+            bool(descriptions) and descriptions[0].get("entity") is SkillSetting
+        )
+        if is_skill_setting and not skipped["done"]:
+            skipped["done"] = True
+
+            class _NoRow:
+                def scalar_one_or_none(self):
+                    return None
+
+            return _NoRow()
+        return await original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", flaky_execute)
+
+    response = await client.patch(
+        "/api/skills/demo-skill/toggle", json={"enabled": False}
+    )
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+
+    row = (
+        await original_execute(
+            select(SkillSetting).where(
+                SkillSetting.tenant_id == DEFAULT_TENANT_ID,
+                SkillSetting.skill_id == "demo-skill",
+            )
+        )
+    ).scalar_one()
+    assert row.enabled is False

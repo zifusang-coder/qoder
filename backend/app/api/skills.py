@@ -202,6 +202,7 @@ async def toggle_skill(
         await session.commit()
     except IntegrityError:
         # Concurrent first-time toggles can both INSERT; adopt the winner's row.
+        logger.info("技能启停并发写入，重试 skill_id=%s", skill_id)
         await session.rollback()
         setting = (
             await session.execute(
@@ -210,7 +211,9 @@ async def toggle_skill(
                     SkillSetting.skill_id == skill_id,
                 )
             )
-        ).scalar_one()
+        ).scalar_one_or_none()
+        if setting is None:
+            raise
         setting.enabled = payload.enabled
         await session.commit()
     return _skill_out(skill, payload.enabled)
