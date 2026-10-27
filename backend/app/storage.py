@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -53,8 +54,17 @@ class Storage:
     def save_bytes(self, project_id: str, relpath: str, data: bytes) -> str:
         path = self.resolve(project_id, relpath)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
         return str(path.relative_to(self.project_dir(project_id)))
+
+    def delete(self, project_id: str, relpath: str) -> None:
+        self.resolve(project_id, relpath).unlink(missing_ok=True)
 
     def read_text(self, project_id: str, relpath: str) -> str:
         return self.resolve(project_id, relpath).read_text(encoding="utf-8")

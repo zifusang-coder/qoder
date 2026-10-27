@@ -1,8 +1,8 @@
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
 
-from anyio import to_thread
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,7 +10,7 @@ from app.errors import AppError
 from app.models.project import Content, ContentVersion
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
-from app.publish.export import ExportAdapter
+from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.state import next_status
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,8 @@ FIELD_LIMITS = {
 MAX_PUBLISH_ATTEMPTS = 5
 EXPORTABLE_STATUSES = {"draft", "awaiting_review", "approved"}
 EXPORT_FAILED_MESSAGE = "导出失败，请稍后重试"
+EXPORT_IN_FLIGHT_MESSAGE = "导出请求已提交，等待完成"
+EXPORT_LEASE_SECONDS = 60
 
 
 class JobNotFound(LookupError):
@@ -353,6 +355,10 @@ async def execute_job(
     )
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 async def export_job(
     session: AsyncSession,
     job_id: uuid.UUID,
@@ -362,6 +368,10 @@ async def export_job(
     actor: str,
 ) -> PublishJob:
     job = await _locked_job(session, job_id, tenant_id)
+    if job.platform not in MANUAL_EXPORT_PLATFORMS:
+        raise AppError("export_unsupported", "该平台不支持手动导出，请使用自动发布", 409)
+    if job.status == "exported":
+        return job
     if job.status not in EXPORTABLE_STATUSES and job.status != "exporting":
         raise AppError("invalid_state", "当前状态不允许导出；导出失败请先重试", 409)
 
@@ -387,18 +397,24 @@ async def export_job(
     if version is None:
         raise AppError("empty_content", "发布版本不存在", 409)
 
-    if job.status != "exporting":
+    if job.status == "exporting":
+        age = (datetime.now(UTC) - _as_utc(job.updated_at)).total_seconds()
+        if job.error == EXPORT_IN_FLIGHT_MESSAGE and age < EXPORT_LEASE_SECONDS:
+            raise AppError("export_in_progress", "导出进行中，请稍后刷新", 409)
+        job.error = EXPORT_IN_FLIGHT_MESSAGE
+        await session.commit()
+    else:
         job = await apply_action(
             session,
             job.id,
             "export",
             tenant_id=tenant_id,
             actor=actor,
-            fields={"error": "导出请求已提交，等待完成", "export_path": ""},
+            fields={"error": EXPORT_IN_FLIGHT_MESSAGE, "export_path": ""},
         )
 
     try:
-        relpath = await to_thread.run_sync(
+        relpath = await asyncio.to_thread(
             lambda: exporter.export(
                 project_id=str(content.project_id),
                 platform=job.platform,
@@ -426,11 +442,29 @@ async def export_job(
             await session.rollback()
         raise AppError("export_failed", EXPORT_FAILED_MESSAGE, 500) from None
 
-    return await apply_action(
-        session,
-        job.id,
-        "export_done",
-        tenant_id=tenant_id,
-        actor=actor,
-        fields={"export_path": relpath, "error": ""},
-    )
+    try:
+        return await apply_action(
+            session,
+            job.id,
+            "export_done",
+            tenant_id=tenant_id,
+            actor=actor,
+            fields={"export_path": relpath, "error": ""},
+        )
+    except Exception:
+        logger.exception("导出完成状态写入失败 job=%s", job.id)
+        exporter.discard(str(content.project_id), relpath)
+        try:
+            await apply_action(
+                session,
+                job.id,
+                "fail",
+                tenant_id=tenant_id,
+                actor=actor,
+                note=EXPORT_FAILED_MESSAGE,
+                fields={"error": EXPORT_FAILED_MESSAGE},
+            )
+        except Exception:
+            logger.exception("导出失败状态写入失败 job=%s", job.id)
+            await session.rollback()
+        raise AppError("export_failed", EXPORT_FAILED_MESSAGE, 500) from None

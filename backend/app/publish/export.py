@@ -1,9 +1,12 @@
 import io
 import json
+import logging
 import zipfile
 from datetime import UTC, datetime
 
 from app.storage import Storage
+
+logger = logging.getLogger(__name__)
 
 MANUAL_EXPORT_PLATFORMS = frozenset({"xiaohongshu", "zhihu", "kuaishou", "channels"})
 
@@ -79,8 +82,14 @@ class ExportAdapter:
             archive.writestr("content.md", f"# {title}\n\n{body}\n")
             archive.writestr("publish_guide.md", _guide_markdown(checklist))
 
-        suffix = str(job_id).replace("-", "")[:8]
+        job_hex = str(job_id).replace("-", "")
         relpath = (
-            f"exports/{platform}-{exported_at:%Y%m%d%H%M%S}-{suffix}.zip"
+            f"exports/{platform}-{exported_at:%Y%m%d%H%M%S}-{job_hex}-v{content_version}.zip"
         )
         return self.storage.save_bytes(project_id, relpath, buffer.getvalue())
+
+    def discard(self, project_id: str, relpath: str) -> None:
+        try:
+            self.storage.delete(project_id, relpath)
+        except Exception:
+            logger.warning("导出文件清理失败 path=%s", relpath, exc_info=True)

@@ -2,13 +2,16 @@ import io
 import json
 import uuid
 import zipfile
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, select, update
 
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PublishEvent, PublishJob
-from app.publish.export import GUIDES, ExportAdapter
+from app.publish.base import PLATFORMS
+from app.publish.export import GUIDES, MANUAL_EXPORT_PLATFORMS, ExportAdapter
+from app.services.publish import EXPORT_IN_FLIGHT_MESSAGE
 from app.storage import Storage, StorageError, get_storage
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
@@ -132,6 +135,45 @@ async def test_export_creates_zip(client, db_session, storage):
     assert GUIDES["xiaohongshu"][0] in guide_md
 
 
+async def test_export_pins_content_version(client, db_session, storage):
+    project, content, job = await _create_job(client)
+    second = await client.post(
+        f"/api/contents/{content['id']}/versions",
+        json={"title": "第二版标题", "body": "第二版正文"},
+    )
+    assert second.status_code == 201
+    assert second.json()["version"] == 2
+
+    response = await _export(client, job["id"])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "exported"
+    assert body["content_version"] == 1
+
+    path = storage.root / project["id"] / body["export_path"]
+    assert path.is_file()
+    with _zip(path) as archive:
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        content_md = archive.read("content.md").decode("utf-8")
+    assert manifest["content_version"] == 1
+    assert BODY in content_md
+    assert "测试标题" in content_md
+    assert "第二版正文" not in content_md
+    assert "第二版标题" not in content_md
+
+
+async def test_export_exported_is_idempotent(client, db_session, storage):
+    _, _, job = await _create_job(client)
+    first = await _export(client, job["id"])
+    assert first.status_code == 200
+
+    second = await _export(client, job["id"])
+    assert second.status_code == 200
+    assert second.json()["status"] == "exported"
+    assert second.json()["export_path"] == first.json()["export_path"]
+    assert len(list(storage.root.rglob("*.zip"))) == 1
+
+
 async def test_export_from_awaiting_review(client, db_session, storage):
     _, _, job = await _create_job(client)
     prechecked = await _precheck(client, job["id"])
@@ -157,8 +199,9 @@ async def test_export_from_approved(client, db_session, storage):
 
 
 async def test_export_unsupported_platforms(client, db_session, storage):
-    expected = {"wechat", "douyin"}
-    for platform in expected:
+    expected = set(PLATFORMS) - set(MANUAL_EXPORT_PLATFORMS)
+    assert expected
+    for platform in sorted(expected):
         _, _, job = await _create_job(client, platform=platform)
         response = await _export(client, job["id"])
         assert response.status_code == 409
@@ -202,6 +245,78 @@ async def test_export_failed_then_retry_resumes(client, db_session, storage):
     exported = response.json()
     assert exported["status"] == "exported"
     assert (storage.root / project["id"] / exported["export_path"]).is_file()
+
+    actions = [event.action for event in await _events(db_session, job["id"])]
+    assert actions == ["create", "export", "fail", "retry", "export_done"]
+    stored = await _stored_job(db_session, job["id"])
+    assert stored.error == ""
+
+
+async def test_export_in_progress_returns_409(client, db_session, storage):
+    _, _, job = await _create_job(client)
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == uuid.UUID(job["id"]))
+        .values(
+            status="exporting",
+            error=EXPORT_IN_FLIGHT_MESSAGE,
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+
+    response = await _export(client, job["id"])
+    assert response.status_code == 409
+    assert response.json()["code"] == "export_in_progress"
+    assert list(storage.root.rglob("*.zip")) == []
+
+
+async def test_export_resumes_stale_export(client, db_session, storage):
+    project, _, job = await _create_job(client)
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == uuid.UUID(job["id"]))
+        .values(
+            status="exporting",
+            error=EXPORT_IN_FLIGHT_MESSAGE,
+            updated_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+    )
+    await db_session.commit()
+
+    response = await _export(client, job["id"])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "exported"
+    assert (storage.root / project["id"] / body["export_path"]).is_file()
+
+
+async def test_export_discards_bundle_when_finish_transition_fails(
+    client, db_session, storage, monkeypatch
+):
+    import app.services.publish as publish_service
+
+    original = publish_service.apply_action
+
+    async def flaky(session, job_id, action, **kwargs):
+        if action == "export_done":
+            raise RuntimeError("commit failed")
+        return await original(session, job_id, action, **kwargs)
+
+    monkeypatch.setattr(publish_service, "apply_action", flaky)
+
+    _, _, job = await _create_job(client)
+    response = await _export(client, job["id"])
+    assert response.status_code == 500
+    body = response.json()
+    assert body["code"] == "export_failed"
+    assert body["message"] == "导出失败，请稍后重试"
+    assert list(storage.root.rglob("*.zip")) == []
+    assert list(storage.root.rglob("*.tmp")) == []
+
+    stored = await _stored_job(db_session, job["id"])
+    assert stored.status == "export_failed"
+    assert stored.error == "导出失败，请稍后重试"
 
 
 async def test_export_missing_version_returns_409(client, db_session, storage):
