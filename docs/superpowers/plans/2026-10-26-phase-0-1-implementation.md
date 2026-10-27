@@ -4647,17 +4647,23 @@ git commit -m "test: lock down skill postprocess sandbox boundaries"
 ```python
 from pathlib import Path
 
-from app.llm.gateway import get_llm_gateway
+import pytest
+
+from app.api.skills import get_llm_gateway
 from app.llm.types import Usage
+from app.main import app
 from app.skills.registry import SkillRegistry, get_registry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
 
 
 class FakeGateway:
-    last_usage = Usage(2, 3)
+    def __init__(self):
+        self.last_usage = Usage(2, 3)
+        self.messages = []
 
     async def complete(self, messages, **kwargs):
+        self.messages = messages
         return "你好，这是结果"
 
     async def stream(self, messages, **kwargs):
@@ -4665,37 +4671,126 @@ class FakeGateway:
             yield char
 
 
-async def test_list_toggle_and_run(client):
-    from app.main import app
+@pytest.fixture
+def fake_gateway():
+    return FakeGateway()
 
+
+@pytest.fixture
+def skills_api(fake_gateway):
     app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
-    app.dependency_overrides[get_llm_gateway] = lambda: FakeGateway()
+    app.dependency_overrides[get_llm_gateway] = lambda: fake_gateway
+    yield fake_gateway
+    app.dependency_overrides.pop(get_registry, None)
+    app.dependency_overrides.pop(get_llm_gateway, None)
 
+
+async def test_list_toggle_and_run(client, skills_api):
     listed = await client.get("/api/skills")
     assert listed.status_code == 200
     item = listed.json()["items"][0]
     assert item["id"] == "demo-skill" and item["enabled"] is True
 
-    toggled = await client.patch("/api/skills/demo-skill/toggle", json={"enabled": False})
+    toggled = await client.patch(
+        "/api/skills/demo-skill/toggle", json={"enabled": False}
+    )
     assert toggled.status_code == 200
     assert toggled.json()["enabled"] is False
+    again = await client.get("/api/skills")
+    assert again.json()["items"][0]["enabled"] is False
 
-    ran = await client.post("/api/skills/demo-skill/run", json={"inputs": {"topic": "周报"}})
+    toggled = await client.patch(
+        "/api/skills/demo-skill/toggle", json={"enabled": True}
+    )
+    assert toggled.json()["enabled"] is True
+
+    ran = await client.post(
+        "/api/skills/demo-skill/run", json={"inputs": {"topic": "周报"}}
+    )
     assert ran.status_code == 200
-    assert ran.json()["text"] == "你好，这是结果"
+    body = ran.json()
+    assert body["text"] == "你好，这是结果"
+    assert body["prompt_tokens"] == 2
+    assert body["completion_tokens"] == 3
 
 
-async def test_stream_returns_sse(client):
-    from app.main import app
+async def test_disabled_skill_blocks_run_and_stream(client, skills_api):
+    await client.patch("/api/skills/demo-skill/toggle", json={"enabled": False})
 
-    app.dependency_overrides[get_registry] = lambda: SkillRegistry(FIXTURE)
-    app.dependency_overrides[get_llm_gateway] = lambda: FakeGateway()
+    ran = await client.post(
+        "/api/skills/demo-skill/run", json={"inputs": {"topic": "周报"}}
+    )
+    assert ran.status_code == 409
+    assert ran.json()["code"] == "skill_disabled"
 
+    streamed = await client.post(
+        "/api/skills/demo-skill/stream", json={"inputs": {"topic": "周报"}}
+    )
+    assert streamed.status_code == 409
+    assert streamed.json()["code"] == "skill_disabled"
+
+
+async def test_unknown_skill_returns_404(client, skills_api):
+    assert (await client.get("/api/skills/nope")).status_code == 404
+    assert (
+        await client.patch("/api/skills/nope/toggle", json={"enabled": True})
+    ).status_code == 404
+    assert (
+        await client.post("/api/skills/nope/run", json={"inputs": {}})
+    ).status_code == 404
+
+
+async def test_invalid_inputs_return_422(client, skills_api):
+    ran = await client.post("/api/skills/demo-skill/run", json={"inputs": {}})
+    assert ran.status_code == 422
+    assert ran.json()["code"] == "skill_inputs_invalid"
+
+    streamed = await client.post(
+        "/api/skills/demo-skill/stream", json={"inputs": {}}
+    )
+    assert streamed.status_code == 422
+    assert streamed.json()["code"] == "skill_inputs_invalid"
+
+
+async def test_profile_context_is_injected(client, skills_api):
+    created = await client.post("/api/profiles", json={"name": "效率笔记"})
+    assert created.status_code == 201
+    profile_id = created.json()["id"]
+    memory = await client.post(
+        f"/api/profiles/{profile_id}/memories", json={"content": "周报要短"}
+    )
+    assert memory.status_code == 201
+
+    resp = await client.post(
+        "/api/skills/demo-skill/run",
+        json={"inputs": {"topic": "周报"}, "profile_id": profile_id},
+    )
+    assert resp.status_code == 200
+    system = skills_api.messages[0]["content"]
+    assert "效率笔记" in system
+    assert "周报要短" in system
+
+
+async def test_unknown_profile_returns_404(client, skills_api):
+    resp = await client.post(
+        "/api/skills/demo-skill/run",
+        json={
+            "inputs": {"topic": "周报"},
+            "profile_id": "00000000-0000-0000-0000-000000000099",
+        },
+    )
+    assert resp.status_code == 404
+
+
+async def test_stream_returns_sse(client, skills_api):
     async with client.stream(
-        "POST", "/api/skills/demo-skill/stream", json={"inputs": {"topic": "周报"}}
+        "POST",
+        "/api/skills/demo-skill/stream",
+        json={"inputs": {"topic": "周报"}},
     ) as resp:
+        assert resp.status_code == 200
         body = "".join([chunk async for chunk in resp.aiter_text()])
-    assert "你" in body and "[DONE]" in body
+    assert "你" in body and "好" in body and "[DONE]" in body
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -4707,10 +4802,15 @@ Expected: FAIL（404）
 
 ```python
 import json
+import logging
+import uuid
+from collections.abc import AsyncIterator
 
+import jsonschema
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -4722,15 +4822,20 @@ from app.models.profile import Profile, ProfileMemory
 from app.models.skill import SkillSetting
 from app.models.user import User
 from app.skills.executor import SkillExecutor
-from app.skills.manifest import ManifestError
+from app.skills.manifest import LoadedSkill, ManifestError
 from app.skills.registry import SkillRegistry, get_registry
+from app.skills.runner import ScriptError
 from app.services.profiles import build_profile_block
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 
-async def get_llm_gateway(session: AsyncSession = Depends(get_session)) -> LLMGateway:
-    return await load_gateway_default(session)
+async def get_llm_gateway(session: AsyncSession, user: User) -> LLMGateway:
+    # 不用 Depends：必须在技能/启停/入参/画像校验之后才解析，
+    # 否则未配置 LLM 时会用 400 覆盖 404/409/422
+    return await load_gateway_default(session, user.tenant_id)
 
 
 class SkillOut(BaseModel):
@@ -4749,12 +4854,16 @@ class SkillList(BaseModel):
 
 
 class ToggleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool
 
 
 class RunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     inputs: dict = Field(default_factory=dict)
-    profile_id: str | None = None
+    profile_id: uuid.UUID | None = None
 
 
 class RunOut(BaseModel):
@@ -4767,74 +4876,7 @@ class RunOut(BaseModel):
     duration_ms: int
 
 
-async def _enabled_map(session: AsyncSession, tenant_id: str) -> dict[str, bool]:
-    rows = (
-        await session.execute(select(SkillSetting).where(SkillSetting.tenant_id == tenant_id))
-    ).scalars().all()
-    return {row.skill_id: row.enabled for row in rows}
-
-
-async def _require_enabled(session: AsyncSession, tenant_id: str, skill_id: str) -> None:
-    enabled = (await _enabled_map(session, tenant_id)).get(skill_id, True)
-    if not enabled:
-        raise AppError("skill_disabled", "该技能已停用", 409)
-
-
-async def _profile_block(
-    session: AsyncSession, profile_id: str | None, user: User
-) -> str:
-    if not profile_id:
-        return ""
-    profile = (
-        await session.execute(
-            select(Profile).where(Profile.id == profile_id, Profile.tenant_id == user.tenant_id)
-        )
-    ).scalar_one_or_none()
-    if profile is None:
-        raise AppError("not_found", "账号画像不存在", 404)
-    memories = (
-        await session.execute(
-            select(ProfileMemory).where(ProfileMemory.profile_id == profile_id)
-        )
-    ).scalars().all()
-    return build_profile_block(profile, list(memories))
-
-
-@router.get("", response_model=SkillList)
-async def list_skills(
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
-) -> SkillList:
-    enabled = await _enabled_map(session, user.tenant_id)
-    items = [
-        SkillOut(
-            id=s.manifest.id,
-            name=s.manifest.name,
-            version=s.manifest.version,
-            layer=s.manifest.layer,
-            description=s.manifest.description,
-            llm_tier=s.manifest.llm_tier,
-            output_format=s.manifest.output_format,
-            enabled=enabled.get(s.manifest.id, True),
-        )
-        for s in registry.skills.values()
-    ]
-    return SkillList(items=items)
-
-
-@router.get("/{skill_id}", response_model=SkillOut)
-async def get_skill(
-    skill_id: str,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
-) -> SkillOut:
-    try:
-        skill = registry.get(skill_id)
-    except ManifestError as exc:
-        raise AppError("not_found", str(exc), 404) from exc
-    enabled = (await _enabled_map(session, user.tenant_id)).get(skill_id, True)
+def _skill_out(skill: LoadedSkill, enabled: bool) -> SkillOut:
     return SkillOut(
         id=skill.manifest.id,
         name=skill.manifest.name,
@@ -4847,78 +4889,211 @@ async def get_skill(
     )
 
 
+def _registry_skill(registry: SkillRegistry, skill_id: str) -> LoadedSkill:
+    try:
+        return registry.get(skill_id)
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+
+
+async def _enabled_map(session: AsyncSession, tenant_id: str) -> dict[str, bool]:
+    rows = (
+        await session.execute(
+            select(SkillSetting).where(SkillSetting.tenant_id == tenant_id)
+        )
+    ).scalars().all()
+    return {row.skill_id: row.enabled for row in rows}
+
+
+async def _require_enabled(
+    session: AsyncSession, tenant_id: str, skill_id: str
+) -> None:
+    enabled = (await _enabled_map(session, tenant_id)).get(skill_id, True)
+    if not enabled:
+        raise AppError("skill_disabled", "该技能已停用", 409)
+
+
+async def _profile_block(
+    session: AsyncSession, profile_id: uuid.UUID | None, user: User
+) -> str:
+    if profile_id is None:
+        return ""
+    profile = (
+        await session.execute(
+            select(Profile).where(
+                Profile.id == profile_id,
+                Profile.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise AppError("not_found", "账号画像不存在", 404)
+    memories = (
+        await session.execute(
+            select(ProfileMemory).where(
+                ProfileMemory.tenant_id == user.tenant_id,
+                ProfileMemory.profile_id == profile.id,
+            )
+        )
+    ).scalars().all()
+    return build_profile_block(profile, list(memories))
+
+
+def _validate_inputs(skill: LoadedSkill, inputs: dict) -> None:
+    try:
+        jsonschema.validate(inputs, skill.manifest.inputs)
+    except jsonschema.ValidationError as exc:
+        raise AppError(
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
+        ) from exc
+
+
+@router.get("", response_model=SkillList)
+async def list_skills(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+) -> SkillList:
+    enabled = await _enabled_map(session, user.tenant_id)
+    items = [
+        _skill_out(skill, enabled.get(skill.manifest.id, True))
+        for skill in sorted(registry.skills.values(), key=lambda s: s.manifest.id)
+    ]
+    return SkillList(items=items)
+
+
+@router.get("/{skill_id}", response_model=SkillOut)
+async def get_skill(
+    skill_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+) -> SkillOut:
+    skill = _registry_skill(registry, skill_id)
+    enabled = (await _enabled_map(session, user.tenant_id)).get(skill_id, True)
+    return _skill_out(skill, enabled)
+
+
 @router.patch("/{skill_id}/toggle", response_model=SkillOut)
 async def toggle_skill(
     skill_id: str,
     payload: ToggleIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> SkillOut:
-    try:
-        registry.get(skill_id)
-    except ManifestError as exc:
-        raise AppError("not_found", str(exc), 404) from exc
+    skill = _registry_skill(registry, skill_id)
     setting = (
         await session.execute(
             select(SkillSetting).where(
-                SkillSetting.skill_id == skill_id, SkillSetting.tenant_id == user.tenant_id
+                SkillSetting.tenant_id == user.tenant_id,
+                SkillSetting.skill_id == skill_id,
             )
         )
     ).scalar_one_or_none()
     if setting is None:
-        setting = SkillSetting(tenant_id=user.tenant_id, skill_id=skill_id, enabled=payload.enabled)
-        session.add(setting)
+        session.add(
+            SkillSetting(
+                tenant_id=user.tenant_id,
+                skill_id=skill_id,
+                enabled=payload.enabled,
+            )
+        )
     else:
         setting.enabled = payload.enabled
-    await session.commit()
-    return await get_skill(skill_id, user, session, registry)
+    try:
+        await session.commit()
+    except IntegrityError:
+        # 并发首次启停可能都 INSERT，回滚后接管已写入的行
+        logger.info("技能启停并发写入，重试 skill_id=%s", skill_id)
+        await session.rollback()
+        setting = (
+            await session.execute(
+                select(SkillSetting).where(
+                    SkillSetting.tenant_id == user.tenant_id,
+                    SkillSetting.skill_id == skill_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if setting is None:
+            raise
+        setting.enabled = payload.enabled
+        await session.commit()
+    return _skill_out(skill, payload.enabled)
 
 
 @router.post("/{skill_id}/run", response_model=RunOut)
 async def run_skill(
     skill_id: str,
     payload: RunIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
-    gateway: LLMGateway = Depends(get_llm_gateway),
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> RunOut:
+    skill = _registry_skill(registry, skill_id)
     await _require_enabled(session, user.tenant_id, skill_id)
+    _validate_inputs(skill, payload.inputs)
+    profile_block = await _profile_block(session, payload.profile_id, user)
+    gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
         registry=registry,
         gateway=gateway,
         session=session,
         tenant_id=user.tenant_id,
-        profile_block=await _profile_block(session, payload.profile_id, user),
+        profile_block=profile_block,
         created_by=user.id,
     )
-    result = await executor.run(skill_id, payload.inputs)
-    return RunOut(**result.__dict__)
+    try:
+        result = await executor.run(skill_id, payload.inputs)
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except jsonschema.ValidationError as exc:
+        raise AppError(
+            "skill_inputs_invalid", "技能输入参数校验失败", 422
+        ) from exc
+    except ScriptError as exc:
+        raise AppError(
+            "skill_script_failed", "后处理脚本执行失败", 500
+        ) from exc
+    except ValueError as exc:
+        raise AppError(
+            "skill_output_invalid", "模型输出格式异常", 502
+        ) from exc
+    return RunOut(
+        run_id=result.run_id,
+        skill_id=result.skill_id,
+        text=result.text,
+        data=result.data,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        duration_ms=result.duration_ms,
+    )
 
 
 @router.post("/{skill_id}/stream")
 async def stream_skill(
     skill_id: str,
     payload: RunIn,
-    user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
-    registry: SkillRegistry = Depends(get_registry),
-    gateway: LLMGateway = Depends(get_llm_gateway),
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> EventSourceResponse:
+    skill = _registry_skill(registry, skill_id)
     await _require_enabled(session, user.tenant_id, skill_id)
-    skill = registry.get(skill_id)
+    _validate_inputs(skill, payload.inputs)
+    profile_block = await _profile_block(session, payload.profile_id, user)
+    gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
         registry=registry,
         gateway=gateway,
         session=session,
         tenant_id=user.tenant_id,
-        profile_block=await _profile_block(session, payload.profile_id, user),
+        profile_block=profile_block,
         created_by=user.id,
     )
     messages = executor.build_messages(skill, payload.inputs)
 
-    async def event_gen():
+    async def event_gen() -> AsyncIterator[dict[str, str]]:
         try:
             async for chunk in gateway.stream(
                 messages,
@@ -4926,8 +5101,26 @@ async def stream_skill(
                 temperature=skill.manifest.temperature,
             ):
                 yield {"data": json.dumps({"delta": chunk}, ensure_ascii=False)}
-        except Exception as exc:
-            yield {"data": json.dumps({"error": str(exc)}, ensure_ascii=False)}
+        except AppError as exc:
+            yield {
+                "data": json.dumps(
+                    {"error": {"code": exc.code, "message": exc.message}},
+                    ensure_ascii=False,
+                )
+            }
+        except Exception:
+            logger.exception("技能流式执行失败 skill_id=%s", skill_id)
+            yield {
+                "data": json.dumps(
+                    {
+                        "error": {
+                            "code": "skill_stream_failed",
+                            "message": "流式生成失败",
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+            }
         yield {"data": "[DONE]"}
 
     return EventSourceResponse(event_gen())
@@ -4946,7 +5139,7 @@ app.include_router(skills.router, prefix="/api")
 - [ ] **Step 5: 运行测试确认通过**
 
 Run: `cd backend && uv run pytest tests/test_skills_api.py -q`
-Expected: `2 passed`
+Expected: `11 passed`（在首批 7 个基础上补充：SSE 帧解析、运行审计、流式不落审计、跨租户启停、错误优先级、并发启停重试与无胜者行分支）
 
 - [ ] **Step 6: 提交**
 
@@ -4954,6 +5147,15 @@ Expected: `2 passed`
 git add backend/app/api/skills.py backend/app/main.py backend/tests/test_skills_api.py
 git commit -m "feat: add skill listing, toggle, sync run and SSE endpoints"
 ```
+
+**落地说明：**
+- `GET /api/skills` 只读磁盘注册表，启停状态存 `skill_settings`，默认视为启用（无记录 = enabled）。
+- 同步执行走 `SkillExecutor`，写 `skill_runs` 审计；流式执行不落审计，只做输入校验与错误脱敏。
+- **错误优先级**：未知技能 404 → 禁用 409 `skill_disabled` → 入参不合法 422 `skill_inputs_invalid` → 画像不存在 404 → 未配置 LLM 400 `llm_not_configured`。因此 `get_llm_gateway` 不是 `Depends`，而是在这些校验之后手动调用；测试通过 monkeypatch `app.api.skills.load_gateway_default` 注入假网关。
+- 运行接口在进入执行器前先 `_validate_inputs`，纯入参错误不会留下失败的审计行；执行器内部仍保留一次校验供其他调用方使用。
+- 启停写入遇到并发首次 INSERT 的 `IntegrityError` 时，回滚、按租户+技能重查胜者行并更新；若仍无行则原样抛出。
+- 其余错误契约：后处理脚本失败 500 `skill_script_failed`、模型输出不可解析 502 `skill_output_invalid`；SSE 内错误只回 `code`/`message`，不回异常堆栈。
+- 提交序列：`9e41ab9`（实现）→ `a2b84b6`（错误优先级与启停重试）→ `db998b9`（回归测试与重试硬化）→ `6cfde93`（分支覆盖补强）；最终 190 passed，ruff 干净。
 
 ---
 
