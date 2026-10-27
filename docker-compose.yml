@@ -1,4 +1,5 @@
 name: newmedia
+# 宿主机使用 15432/16379，避免与本机其他 Postgres/Redis 冲突
 
 services:
   db:
@@ -7,7 +8,6 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
       POSTGRES_DB: newmedia
-    # 宿主机使用 15432/16379，避免与本机其他 Postgres/Redis 冲突
     ports:
       - "15432:5432"
     volumes:

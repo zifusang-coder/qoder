@@ -23,3 +23,14 @@ def test_prod_accepts_overridden_secrets():
         _env_file=None,
     )
     assert settings.env == "prod"
+
+
+def test_prod_rejects_env_example_placeholder():
+    with pytest.raises(ValidationError):
+        Settings(
+            env="prod",
+            jwt_secret="change-me-to-32-plus-random-chars",
+            master_key="a-real-master-key",
+            admin_password="a-real-password",
+            _env_file=None,
+        )

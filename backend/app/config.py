@@ -7,9 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 _DEV_DEFAULTS = {
-    "jwt_secret": "dev-only-change-me",
-    "master_key": "dev-only-master-key-change-me",
-    "admin_password": "admin12345",
+    "jwt_secret": {"dev-only-change-me", "change-me-to-32-plus-random-chars"},
+    "master_key": {"dev-only-master-key-change-me", "change-me-to-a-long-random-passphrase"},
+    "admin_password": {"admin12345"},
 }
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
         if self.env == "dev":
             return self
         insecure = [
-            name for name, default in _DEV_DEFAULTS.items() if getattr(self, name) == default
+            name for name, defaults in _DEV_DEFAULTS.items() if getattr(self, name) in defaults
         ]
         if insecure:
             raise ValueError(f"非 dev 环境必须覆盖默认密钥: {', '.join(insecure)}")
