@@ -351,6 +351,7 @@ async def test_postmortem_sanitizes_memory_candidates(
                 {"content": "布尔权重", "weight": True},
                 {"content": long_text, "kind": "  ", "weight": 5},
                 {"content": "默认权重"},
+                {"content": "字符串权重", "weight": "0.7"},
                 {"content": "负权重", "weight": -1},
             ],
         },
@@ -365,6 +366,8 @@ async def test_postmortem_sanitizes_memory_candidates(
     ).json()
     assert len(memories) == 3
     by_content = {memory["content"]: memory for memory in memories}
+    # 只有三条候选合法，其余（空白、布尔权重、字符串权重）必须被丢弃
+    assert set(by_content) == {long_text[:200], "默认权重", "负权重"}
 
     truncated = by_content[long_text[:200]]
     assert len(truncated["content"]) == 200
@@ -374,6 +377,67 @@ async def test_postmortem_sanitizes_memory_candidates(
     assert by_content["默认权重"]["kind"] == "insight"
     assert by_content["负权重"]["weight"] == 0.0
     assert "布尔权重" not in by_content
+    assert "字符串权重" not in by_content
+
+
+async def test_postmortem_caps_memories_at_three(
+    client, db_session, postmortem_env
+):
+    profile_id, _project_id, content_id = await _setup(client)
+    await _import_metrics(client, content_id)
+
+    contents = [f"候选经验{i}" for i in range(1, 6)]
+    postmortem_env.gateway.reply = json.dumps(
+        {
+            "verdict": "ok",
+            "memories": [
+                {"content": "候选经验1", "weight": 0.9},
+                {"content": "候选经验2", "weight": 0.8},
+                {"content": "候选经验3", "weight": 0.7},
+                {"content": "候选经验4", "weight": 0.6},
+                {"content": "候选经验5", "weight": 0.5},
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    response = await _postmortem(client, content_id)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["memory_ids"]) == 3
+
+    profile_uuid = uuid.UUID(profile_id)
+    assert (
+        await _count(
+            db_session,
+            ProfileMemory,
+            ProfileMemory.profile_id == profile_uuid,
+        )
+        == 3
+    )
+
+    rows = (
+        await db_session.execute(
+            select(ProfileMemory).where(
+                ProfileMemory.id.in_(
+                    [uuid.UUID(memory_id) for memory_id in body["memory_ids"]]
+                )
+            )
+        )
+    ).scalars().all()
+    by_id = {str(row.id): row for row in rows}
+    persisted_contents = [by_id[memory_id].content for memory_id in body["memory_ids"]]
+    # 循环按候选顺序写入，命中上限即停止
+    assert persisted_contents == contents[:3]
+    assert [by_id[i].weight for i in body["memory_ids"]] == [0.9, 0.8, 0.7]
+    assert contents[3] not in persisted_contents
+    assert contents[4] not in persisted_contents
+
+    memories = (
+        await client.get(f"/api/profiles/{profile_id}/memories")
+    ).json()
+    assert len(memories) == 3
+    assert {memory["content"] for memory in memories} == set(contents[:3])
 
 
 async def test_postmortem_deduplicates_memories(
@@ -418,14 +482,23 @@ async def test_postmortem_uses_pinned_version(
         json={"title": "周报模板二稿", "body": "第二版正文内容"},
     )
     assert version.status_code == 201
+    assert version.json()["version"] == 2
     await _import_metrics(client, content_id)
+
+    # 版本创建会把 current_version 推到最新；这里手工固定回第一版，
+    # 使“固定版本”与“最高版本”不同，从而真正校验服务读取的是 current_version
+    content = await _content(db_session, content_id)
+    assert content.current_version == 2
+    content.current_version = 1
+    await db_session.commit()
 
     response = await _postmortem(client, content_id)
     assert response.status_code == 200
     inputs = json.loads(postmortem_env.gateway.messages[-1]["content"])
+    assert inputs["content_excerpt"] == "第一版正文"
+    assert "第二版" not in inputs["content_excerpt"]
+    # 版本行自带 title，但服务取的是 Content.title（版本创建时已更新为最新标题）
     assert inputs["title"] == "周报模板二稿"
-    assert inputs["content_excerpt"] == "第二版正文内容"
-    assert "第一版" not in inputs["content_excerpt"]
 
 
 async def test_postmortem_cross_tenant_snapshot_not_used(
