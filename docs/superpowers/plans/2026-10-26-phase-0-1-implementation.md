@@ -1407,6 +1407,7 @@ git commit -m "feat: add LLM provider settings with encrypted keys"
 - Create: `backend/app/llm/types.py`
 - Create: `backend/app/llm/gateway.py`
 - Create: `backend/tests/test_llm_gateway.py`
+- No model / migration changes
 
 - [ ] **Step 1: 写失败测试 `backend/tests/test_llm_gateway.py`**
 
@@ -1442,22 +1443,29 @@ async def test_complete_uses_tier_model():
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cd backend && python -m pytest tests/test_llm_gateway.py -q`
-Expected: FAIL（模块不存在）
+Run: `cd backend && uv run pytest tests/test_llm_gateway.py -q`
+Expected: FAIL（`ModuleNotFoundError: No module named 'app.llm'`）
 
 - [ ] **Step 3: 写 `backend/app/llm/types.py`**
 
 ```python
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
+
+ProviderKind = Literal["openai_compatible", "anthropic"]
 
 
 @dataclass(frozen=True)
 class LLMConfig:
     provider_id: str
-    kind: str  # openai_compatible | anthropic
+    kind: ProviderKind
     base_url: str
-    api_key: str
+    api_key: str = field(repr=False)
     tiers: dict[str, str]
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("openai_compatible", "anthropic"):
+            raise ValueError(f"不支持的 LLM 提供商类型: {self.kind}")
 
 
 @dataclass
@@ -1470,151 +1478,124 @@ class Usage:
         return self.prompt_tokens + self.completion_tokens
 ```
 
+`api_key` 必须 `repr=False`：`repr(config)` 会出现在日志、异常链和 pytest 输出中，不能泄露明文密钥。
+
 - [ ] **Step 4: 写 `backend/app/llm/gateway.py`**
+
+最终实现（20 个网关测试保护）具备以下契约：
 
 ```python
 import json
+import logging
 from collections.abc import AsyncIterator
 
 import httpx
+from cryptography.fernet import InvalidToken
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.errors import AppError
 from app.llm.types import LLMConfig
+from app.models.settings import LLMProvider
+from app.security import decrypt_secret
 
 Message = dict[str, str]
-
-
-class LLMGateway:
-    def __init__(self, config: LLMConfig, timeout: float = 120.0):
-        self.config = config
-        self.timeout = timeout
-
-    def _model(self, tier: str) -> str:
-        model = self.config.tiers.get(tier) or self.config.tiers.get("standard")
-        if not model:
-            raise ValueError(f"provider {self.config.provider_id} has no model for tier {tier}")
-        return model
-
-    def _headers(self) -> dict[str, str]:
-        if self.config.kind == "anthropic":
-            return {
-                "x-api-key": self.config.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            }
-        return {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-        }
-
-    def _payload(self, messages: list[Message], tier: str, temperature: float, stream: bool) -> dict:
-        model = self._model(tier)
-        if self.config.kind == "anthropic":
-            system = "\n".join(m["content"] for m in messages if m["role"] == "system")
-            rest = [m for m in messages if m["role"] != "system"]
-            body = {
-                "model": model,
-                "max_tokens": 4096,
-                "temperature": temperature,
-                "messages": rest,
-                "stream": stream,
-            }
-            if system:
-                body["system"] = system
-            return body
-        return {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": stream,
-        }
-
-    async def complete(
-        self,
-        messages: list[Message],
-        *,
-        tier: str = "standard",
-        temperature: float = 0.7,
-    ) -> str:
-        url = (
-            f"{self.config.base_url}/messages"
-            if self.config.kind == "anthropic"
-            else f"{self.config.base_url}/chat/completions"
-        )
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(
-                url, headers=self._headers(), json=self._payload(messages, tier, temperature, False)
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        if self.config.kind == "anthropic":
-            return "".join(block.get("text", "") for block in data.get("content", []))
-        return data["choices"][0]["message"]["content"]
-
-    async def stream(
-        self,
-        messages: list[Message],
-        *,
-        tier: str = "standard",
-        temperature: float = 0.7,
-    ) -> AsyncIterator[str]:
-        url = (
-            f"{self.config.base_url}/messages"
-            if self.config.kind == "anthropic"
-            else f"{self.config.base_url}/chat/completions"
-        )
-        payload = self._payload(messages, tier, temperature, True)
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line.removeprefix("data:").strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    event = json.loads(data)
-                    if self.config.kind == "anthropic":
-                        if event.get("type") == "content_block_delta":
-                            yield event["delta"].get("text", "")
-                    else:
-                        delta = event["choices"][0].get("delta", {})
-                        if delta.get("content"):
-                            yield delta["content"]
+logger = logging.getLogger(__name__)
 ```
 
-- [ ] **Step 5: 写 `backend/app/llm/__init__.py`（留空）并补网关工厂**
-
-在 `backend/app/llm/gateway.py` 末尾追加：
+公开方法：
 
 ```python
-async def load_gateway_default(session) -> LLMGateway:
-    from sqlalchemy import select
+class LLMGateway:
+    def __init__(self, config: LLMConfig, timeout: float = 120.0): ...
 
-    from app.models.settings import LLMProvider
-    from app.security import decrypt_secret
+    @property
+    def endpoint(self) -> str: ...  # {base_url.rstrip("/")}/messages 或 /chat/completions
 
+    async def complete(
+        self, messages: list[Message], *, tier: str = "standard",
+        temperature: float = 0.7, max_tokens: int = 4096,
+    ) -> str: ...
+
+    async def stream(
+        self, messages: list[Message], *, tier: str = "standard",
+        temperature: float = 0.7, max_tokens: int = 4096,
+    ) -> AsyncIterator[str]: ...
+```
+
+行为要求：
+
+- 模型解析：`tiers[tier] or tiers["standard"]`；都没有 → `AppError("llm_provider_invalid", "LLM 提供商缺少可用模型，请检查设置", 400)`，且不发 HTTP。
+- 请求头/端点：Anthropic 用 `x-api-key` + `anthropic-version: 2023-06-01` + `/messages`；OpenAI 兼容用 `Authorization: Bearer` + `/chat/completions`。
+- 请求体：两种协议都带 `model/messages/temperature/max_tokens/stream`；Anthropic 把 system 消息用 `\n` 合并到顶层 `system` 并从 `messages` 移除；若没有非 system 消息 → `AppError("llm_invalid_messages", "至少需要一条非 system 消息", 400)`，且不发 HTTP。
+- 上游错误统一映射（`_raise_for_upstream_error`，仅 `response.is_success` 放行）：
+  - 401/403 → `llm_auth_failed` 502
+  - 429 → `llm_rate_limited` 502
+  - 其他（含 3xx）→ `llm_request_failed` 502
+  - `detail={"upstream": 清洗后的响应体}`：压缩空白、把 API key 替换为 `***`、截断 300 字符；绝不返回请求头。
+- 网络错误：`httpx.TimeoutException` → `llm_timeout` 504；其他 `httpx.RequestError` → `llm_unavailable` 502。
+- 响应解析：非 JSON 或结构不符 → `llm_invalid_response` 502；Anthropic 拼接 `content[].text`；OpenAI 取 `choices[0].message.content`（必须是 str）。
+- 截断可见：非流式检查 `finish_reason == "length"` / `stop_reason == "max_tokens"`；流式检查 OpenAI chunk 的 `finish_reason == "length"` 与 Anthropic `message_delta.delta.stop_reason == "max_tokens"`，命中时 `logger.warning`（只含 provider_id 与 tier）。
+- SSE：只处理 `data:` 行（有无空格均可），跳过空行、注释、`event:` 行与 `[DONE]`；不合法 JSON 跳过；事件含 `error` 键 → `llm_request_failed` 502（detail 同样清洗）；OpenAI 增量取 `choices[0].delta.content`，`delta` 缺失或为 null 时忽略（终止 chunk 常常没有 delta），非 dict 的 delta → `llm_invalid_response`；Anthropic 只取 `content_block_delta.delta.text`。
+- 流结束若一个文本块都没产出 → `AppError("llm_empty_stream", "LLM 返回了空响应", 502)`。
+
+- [ ] **Step 5: 写 `backend/app/llm/__init__.py` 并补租户级网关工厂**
+
+`backend/app/llm/__init__.py` 只做导出（`LLMGateway`、`LLMConfig`、`Usage`、`load_gateway_default`）。在 `backend/app/llm/gateway.py` 末尾追加：
+
+```python
+async def load_gateway_default(session: AsyncSession, tenant_id: str) -> LLMGateway:
+    """Load the tenant's default provider, or fail with a project envelope error."""
     provider = (
         await session.execute(
-            select(LLMProvider).where(LLMProvider.is_default.is_(True)).limit(1)
+            select(LLMProvider)
+            .where(
+                LLMProvider.tenant_id == tenant_id,
+                LLMProvider.is_default.is_(True),
+            )
+            .order_by(LLMProvider.created_at, LLMProvider.id)
+            .limit(1)
         )
     ).scalar_one_or_none()
     if provider is None:
-        raise ValueError("尚未配置默认 LLM 提供商，请先在设置页添加")
-    return LLMGateway(
-        LLMConfig(
+        raise AppError(
+            "llm_not_configured",
+            "尚未配置默认 LLM 提供商，请先在设置页添加",
+            400,
+        )
+    try:
+        api_key = decrypt_secret(provider.api_key_enc)
+    except (InvalidToken, UnicodeDecodeError) as exc:
+        raise AppError(
+            "llm_provider_unreadable",
+            "LLM 提供商密钥无法解密，请重新填写",
+            400,
+        ) from exc
+    try:
+        config = LLMConfig(
             provider_id=str(provider.id),
             kind=provider.kind,
             base_url=provider.base_url.rstrip("/"),
-            api_key=decrypt_secret(provider.api_key_enc),
-            tiers=provider.tiers or {},
+            api_key=api_key,
+            tiers=dict(provider.tiers or {}),
         )
-    )
+    except ValueError as exc:
+        raise AppError(
+            "llm_provider_invalid",
+            "LLM 提供商配置无效，请检查设置",
+            400,
+        ) from exc
+    return LLMGateway(config)
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+必须按 `tenant_id` 过滤：默认提供商是租户级配置，跨租户读取会造成密钥泄露。`order_by` 保证确定性；数据库的部分唯一索引已保证每租户至多一个默认。
 
-Run: `cd backend && python -m pytest tests/test_llm_gateway.py -q`
-Expected: `1 passed`
+- [ ] **Step 6: 运行测试与静态检查**
+
+Run: `cd backend && uv run pytest tests/test_llm_gateway.py -q && uv run pytest -q && uv run ruff check .`
+Expected: 网关 20 passed；全量 69 passed；`All checks passed!`
+
+测试覆盖：tier 选择与回落、空 tiers、OpenAI/Anthropic 非流式请求头与响应解析、system 消息提升与纯 system 拒绝、两种协议的 SSE（含紧凑 `data:`、CRLF、delta 缺失的终止 chunk）、流式截断告警、非流式截断告警、401/403/429/500/3xx 映射、超时/连接失败、上游错误体脱敏（API key → `***`）、空流、带内 error 事件、非法响应结构、`max_tokens` 默认与覆盖、租户隔离、跨租户默认不可见、非默认行不参与选择、缺失默认的 `llm_not_configured`、损坏密文 `llm_provider_unreadable`、非法 kind `llm_provider_invalid`、`repr` 不含密钥。
 
 - [ ] **Step 7: 提交**
 
