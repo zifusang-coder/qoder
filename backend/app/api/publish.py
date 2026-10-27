@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
@@ -15,7 +15,9 @@ from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
+from app.publish.base import Platform, PublishError
 from app.publish.state import InvalidTransition
+from app.publish.wechat import WeChatMPAdapter
 from app.services.precheck import run_precheck
 from app.services.publish import (
     ContentChanged,
@@ -23,15 +25,12 @@ from app.services.publish import (
     JobNotReschedulable,
     apply_action,
     apply_precheck,
+    execute_job,
     reopen,
     reschedule,
 )
 
 router = APIRouter(prefix="/publish", tags=["publish"])
-
-Platform = Literal[
-    "wechat", "xiaohongshu", "douyin", "zhihu", "kuaishou", "channels", "bilibili"
-]
 
 USER_ACTIONS = {"approve", "reject", "cancel", "retry"}
 SYSTEM_ACTIONS = {
@@ -100,6 +99,7 @@ class JobOut(BaseModel):
     external_id: str
     external_url: str
     export_path: str
+    attempts: int
     error: str
     checks: dict
     created_at: datetime
@@ -132,6 +132,7 @@ def _out(job: PublishJob) -> JobOut:
         external_id=job.external_id,
         external_url=job.external_url,
         export_path=job.export_path,
+        attempts=job.attempts,
         error=job.error,
         checks=job.checks or {},
         created_at=_utc(job.created_at),
@@ -438,6 +439,35 @@ async def precheck_job(
         raise AppError("not_found", "发布任务不存在", 404) from exc
 
     return PrecheckOut(job=_out(job), **report)
+
+
+@router.post("/jobs/{job_id}/execute", response_model=JobOut)
+async def execute_publish(
+    job_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> JobOut:
+    job = await _owned_job(session, job_id, user)
+    if job.platform != "wechat":
+        raise AppError("manual_export_required", "该平台请使用导出流程", 409)
+
+    try:
+        job = await execute_job(
+            session,
+            job.id,
+            WeChatMPAdapter(),
+            tenant_id=user.tenant_id,
+            actor=user.email,
+        )
+    except InvalidTransition as exc:
+        raise AppError(
+            "invalid_state", "发布任务状态已变化，请刷新后重试", 409
+        ) from exc
+    except ContentChanged as exc:
+        raise AppError("content_changed", str(exc), 409) from exc
+    except PublishError as exc:
+        raise AppError("publish_failed", str(exc), 502) from exc
+    return _out(job)
 
 
 @router.patch("/jobs/{job_id}/schedule", response_model=JobOut)

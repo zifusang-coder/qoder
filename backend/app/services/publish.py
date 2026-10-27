@@ -1,14 +1,24 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.project import Content
-from app.models.publish import PublishEvent, PublishJob
+from app.errors import AppError
+from app.models.project import Content, ContentVersion
+from app.models.publish import PlatformAccount, PublishEvent, PublishJob
+from app.publish.base import PublisherAdapter
 from app.publish.state import next_status
 
 RESCHEDULABLE = {"draft", "prechecking", "precheck_failed", "awaiting_review", "approved"}
+MUTABLE_JOB_FIELDS = {
+    "attempts",
+    "error",
+    "external_id",
+    "external_url",
+    "published_at",
+    "export_path",
+}
 
 
 class JobNotFound(LookupError):
@@ -47,7 +57,12 @@ async def apply_action(
     tenant_id: str,
     actor: str = "user",
     note: str = "",
+    fields: dict | None = None,
 ) -> PublishJob:
+    pending = fields or {}
+    unknown = set(pending) - MUTABLE_JOB_FIELDS
+    if unknown:
+        raise ValueError(f"不允许修改的字段：{', '.join(sorted(unknown))}")
     job = await _locked_job(session, job_id, tenant_id)
     if action == "publish":
         content = (
@@ -63,6 +78,9 @@ async def apply_action(
     current = job.status
     target = next_status(current, action)
     job.status = target
+    # 白名单仅允许可变字段，避免调用方借 fields 改写 status/tenant 等敏感列
+    for key, value in pending.items():
+        setattr(job, key, value)
     session.add(
         PublishEvent(
             tenant_id=tenant_id,
@@ -171,3 +189,86 @@ async def reschedule(
     await session.commit()
     await session.refresh(job)
     return job
+
+
+async def execute_job(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    adapter: PublisherAdapter,
+    *,
+    tenant_id: str,
+    actor: str,
+) -> PublishJob:
+    job = await _locked_job(session, job_id, tenant_id)
+    if job.status != "approved":
+        raise AppError("invalid_state", "只有审核通过的任务可以执行发布", 409)
+
+    version = (
+        await session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == job.content_id,
+                ContentVersion.version == job.content_version,
+                ContentVersion.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        raise AppError("empty_content", "发布版本不存在", 409)
+
+    if job.account_id is None:
+        raise AppError("account_missing", "请先选择并授权发布账号", 409)
+    account = (
+        await session.execute(
+            select(PlatformAccount).where(
+                PlatformAccount.id == job.account_id,
+                PlatformAccount.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if account is None:
+        raise AppError("account_missing", "请先选择并授权发布账号", 409)
+    if account.status != "active":
+        raise AppError("account_inactive", "账号已停用", 409)
+    if account.platform != job.platform:
+        raise AppError("account_platform_mismatch", "账号平台与发布平台不一致", 409)
+
+    # 先提交 publishing 与尝试次数，确保外部调用前状态已落库
+    job = await apply_action(
+        session,
+        job.id,
+        "publish",
+        tenant_id=tenant_id,
+        actor=actor,
+        fields={"attempts": job.attempts + 1, "error": ""},
+    )
+
+    try:
+        result = await adapter.publish(
+            account=account, title=version.title, body=version.body
+        )
+    except Exception as exc:
+        message = str(exc)[:1000] or type(exc).__name__
+        await apply_action(
+            session,
+            job.id,
+            "fail",
+            tenant_id=tenant_id,
+            actor=actor,
+            note=message[:500],
+            fields={"error": message},
+        )
+        raise
+
+    return await apply_action(
+        session,
+        job.id,
+        "succeed",
+        tenant_id=tenant_id,
+        actor=actor,
+        fields={
+            "external_id": result.external_id,
+            "external_url": result.url,
+            "published_at": datetime.now(UTC),
+            "error": "",
+        },
+    )
