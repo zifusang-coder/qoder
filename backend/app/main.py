@@ -5,7 +5,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import auth, profiles, projects, skills
+from app.api import auth, chat, profiles, projects, skills
 from app.api import settings as settings_api
 from app.config import get_settings
 from app.db import SessionLocal
@@ -53,6 +53,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 
 
