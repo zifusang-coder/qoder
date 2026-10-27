@@ -1,12 +1,16 @@
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
+from app.models.base import DEFAULT_TENANT_ID
 from app.models.profile import Profile, ProfileMemory
 
 OTHER_TENANT_ID = "11111111-1111-1111-1111-111111111111"
 PROFILE_ARRAY_FIELDS = ["taboos", "goals", "platform_focus"]
+PROFILE_TEXT_FIELDS = ["positioning", "audience", "tone"]
 
 
 def _payload(**overrides) -> dict:
@@ -99,6 +103,81 @@ async def test_profile_field_max_length(client, field, value):
     assert resp.json()["code"] == "validation_error"
 
 
+@pytest.mark.parametrize("field", PROFILE_TEXT_FIELDS)
+async def test_profile_text_max_length(client, field):
+    resp = await client.post(
+        "/api/profiles", json=_payload(**{field: "文" * 5001})
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize("field", PROFILE_TEXT_FIELDS)
+async def test_profile_text_at_max_length_is_accepted(client, field):
+    value = "文" * 5000
+
+    resp = await client.post("/api/profiles", json=_payload(**{field: value}))
+    assert resp.status_code == 201
+    assert resp.json()[field] == value
+
+
+async def test_profile_text_keeps_whitespace_and_newlines(client):
+    value = "  第一行\n第二行  \n"
+
+    resp = await client.post(
+        "/api/profiles", json=_payload(positioning=value)
+    )
+    assert resp.status_code == 201
+    assert resp.json()["positioning"] == value
+
+
+@pytest.mark.parametrize("field", PROFILE_TEXT_FIELDS)
+async def test_profile_patch_text_max_length(client, field):
+    profile_id = await _create_profile(client)
+
+    resp = await client.patch(
+        f"/api/profiles/{profile_id}", json={field: "文" * 5001}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+    fetched = await client.get(f"/api/profiles/{profile_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()[field] == _payload()[field]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"tenant_id": OTHER_TENANT_ID},
+        {"id": str(uuid.uuid4())},
+        {"unexpected": "x"},
+    ],
+    ids=["tenant-id", "id", "unknown"],
+)
+async def test_profile_create_rejects_unknown_fields(client, extra):
+    resp = await client.post("/api/profiles", json={**_payload(), **extra})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"tenant_id": OTHER_TENANT_ID}, {"unexpected": "x"}],
+    ids=["tenant-id", "unknown"],
+)
+async def test_profile_patch_rejects_unknown_fields(client, extra):
+    profile_id = await _create_profile(client)
+
+    resp = await client.patch(f"/api/profiles/{profile_id}", json=extra)
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+    fetched = await client.get(f"/api/profiles/{profile_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["tone"] == _payload()["tone"]
+
+
 async def test_profile_name_is_stripped(client):
     created = await client.post("/api/profiles", json=_payload(name="  主账号  "))
     assert created.status_code == 201
@@ -143,6 +222,17 @@ async def test_profile_patch_rejects_explicit_null(client, field):
     fetched = await client.get(f"/api/profiles/{profile_id}")
     assert fetched.status_code == 200
     assert fetched.json()["name"] == "主账号"
+
+
+async def test_profile_patch_empty_payload_is_noop(client):
+    # PATCH 允许空对象，语义是不改动任何字段（当前字段均为可选）
+    profile_id = await _create_profile(client)
+    before = (await client.get(f"/api/profiles/{profile_id}")).json()
+
+    resp = await client.patch(f"/api/profiles/{profile_id}", json={})
+    assert resp.status_code == 200
+    assert resp.json() == before
+    assert (await client.get(f"/api/profiles/{profile_id}")).json() == before
 
 
 @pytest.mark.parametrize("method", ["GET", "PATCH", "DELETE"])
@@ -216,6 +306,41 @@ async def test_foreign_tenant_memories_are_invisible(client, db_session):
 
     db_session.expire_all()
     assert await db_session.get(ProfileMemory, memory_id) is not None
+
+
+async def test_memory_create_on_foreign_profile_returns_404(client, db_session):
+    foreign = _foreign_profile()
+    db_session.add(foreign)
+    await db_session.commit()
+    foreign_id = foreign.id
+
+    resp = await client.post(
+        f"/api/profiles/{foreign_id}/memories", json={"content": "越权写入"}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "not_found"
+
+    db_session.expire_all()
+    rows = (await db_session.execute(select(ProfileMemory))).scalars().all()
+    assert rows == []
+
+
+async def test_memory_tenant_must_match_profile_at_db_level(db_session):
+    foreign = _foreign_profile()
+    db_session.add(foreign)
+    await db_session.commit()
+
+    # 复合外键 (tenant_id, profile_id) 兜底阻止跨租户挂载记忆
+    db_session.add(
+        ProfileMemory(
+            tenant_id=DEFAULT_TENANT_ID,
+            profile_id=foreign.id,
+            content="跨租户挂载",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
 
 
 async def test_memory_from_another_tenant_not_deletable(client, db_session):
@@ -313,6 +438,29 @@ async def test_memory_crud_and_ordering(client):
     assert unknown.status_code == 404
 
 
+async def test_memory_order_breaks_ties_by_id(client, db_session):
+    profile_id = uuid.UUID(await _create_profile(client))
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+    memory_ids = sorted(uuid.uuid4() for _ in range(3))
+    for index, memory_id in enumerate(reversed(memory_ids)):
+        db_session.add(
+            ProfileMemory(
+                id=memory_id,
+                tenant_id=DEFAULT_TENANT_ID,
+                profile_id=profile_id,
+                content=f"并列记忆{index}",
+                weight=2.0,
+                created_at=fixed,
+                updated_at=fixed,
+            )
+        )
+    await db_session.commit()
+
+    listed = await client.get(f"/api/profiles/{profile_id}/memories")
+    assert listed.status_code == 200
+    assert [m["id"] for m in listed.json()] == [str(i) for i in memory_ids]
+
+
 @pytest.mark.parametrize(
     "content",
     ["", "   ", "字" * 5001],
@@ -337,6 +485,58 @@ async def test_memory_content_at_max_length_is_accepted(client):
     )
     assert resp.status_code == 201
     assert resp.json()["content"] == content
+
+
+@pytest.mark.parametrize(
+    "weight",
+    ["NaN", "Infinity", "-Infinity", "1e400", "-1", "101"],
+    ids=["nan", "inf", "-inf", "overflow", "-1", "101"],
+)
+async def test_memory_weight_must_be_finite_and_bounded(client, weight):
+    profile_id = await _create_profile(client)
+
+    # httpx 的 json= 会拒绝 NaN/Infinity（allow_nan=False），这里显式构造请求体，
+    # 确保 Starlette 解析出的非有限浮点真正进入 Pydantic 校验。
+    body = f'{{"content": "有效内容", "weight": {weight}}}'
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
+
+
+@pytest.mark.parametrize("weight", [0, 100])
+async def test_memory_weight_boundaries_are_accepted(client, weight):
+    profile_id = await _create_profile(client)
+
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        json={"content": "边界权重", "weight": weight},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["weight"] == weight
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"tenant_id": OTHER_TENANT_ID},
+        {"source": "api"},
+        {"unexpected": "x"},
+    ],
+    ids=["tenant-id", "source", "unknown"],
+)
+async def test_memory_create_rejects_unknown_fields(client, extra):
+    profile_id = await _create_profile(client)
+
+    resp = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        json={"content": "有效内容", **extra},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "validation_error"
 
 
 async def test_memory_kind_max_length(client):

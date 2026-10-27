@@ -2,7 +2,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ _NAME = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)
 ]
 _ACCOUNT_NAME = Annotated[str, StringConstraints(max_length=100)]
+_PROFILE_TEXT = Annotated[str, StringConstraints(max_length=5000)]
 _PROFILE_ITEM = Annotated[str, StringConstraints(max_length=100)]
 _TAG = Annotated[str, StringConstraints(max_length=50)]
 _MEMORY_CONTENT = Annotated[
@@ -29,22 +30,26 @@ _MEMORY_KIND = Annotated[
 
 
 class ProfileIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: _NAME
     account_name: _ACCOUNT_NAME = ""
-    positioning: str = ""
-    audience: str = ""
-    tone: str = ""
+    positioning: _PROFILE_TEXT = ""
+    audience: _PROFILE_TEXT = ""
+    tone: _PROFILE_TEXT = ""
     taboos: list[_PROFILE_ITEM] = Field(default_factory=list, max_length=20)
     goals: list[_PROFILE_ITEM] = Field(default_factory=list, max_length=20)
     platform_focus: list[_PROFILE_ITEM] = Field(default_factory=list, max_length=20)
 
 
 class ProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: _NAME | None = None
     account_name: _ACCOUNT_NAME | None = None
-    positioning: str | None = None
-    audience: str | None = None
-    tone: str | None = None
+    positioning: _PROFILE_TEXT | None = None
+    audience: _PROFILE_TEXT | None = None
+    tone: _PROFILE_TEXT | None = None
     taboos: list[_PROFILE_ITEM] | None = Field(default=None, max_length=20)
     goals: list[_PROFILE_ITEM] | None = Field(default=None, max_length=20)
     platform_focus: list[_PROFILE_ITEM] | None = Field(default=None, max_length=20)
@@ -61,9 +66,11 @@ class ProfileList(BaseModel):
 
 
 class MemoryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     content: _MEMORY_CONTENT
     kind: _MEMORY_KIND = "insight"
-    weight: float = 1.0
+    weight: Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)] = 1.0
     tags: list[_TAG] = Field(default_factory=list, max_length=20)
 
 
@@ -219,6 +226,7 @@ async def list_memories(
             .order_by(
                 ProfileMemory.weight.desc(),
                 ProfileMemory.created_at.desc(),
+                ProfileMemory.id,
             )
         )
     ).scalars()

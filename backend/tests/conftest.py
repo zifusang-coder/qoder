@@ -48,7 +48,7 @@ async def auth_client(db_session):
         ) as client:
             yield client
     finally:
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(get_session, None)
 
 
 @pytest_asyncio.fixture
@@ -78,7 +78,8 @@ async def client(db_session):
         ) as http:
             yield http
     finally:
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_session, None)
 
 
 @pytest.fixture
