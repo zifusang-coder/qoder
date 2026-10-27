@@ -31,6 +31,7 @@ async def _locked_job(
             select(PublishJob)
             .where(PublishJob.id == job_id, PublishJob.tenant_id == tenant_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if job is None:
@@ -51,9 +52,10 @@ async def apply_action(
     if action == "publish":
         content = (
             await session.execute(
-                select(Content).where(
-                    Content.id == job.content_id, Content.tenant_id == tenant_id
-                )
+                select(Content)
+                .where(Content.id == job.content_id, Content.tenant_id == tenant_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if content is None or content.current_version != job.content_version:

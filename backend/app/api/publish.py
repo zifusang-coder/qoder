@@ -36,12 +36,14 @@ INTERNAL_ACTIONS = {"reopen"}
 
 
 def _require_tz(value: datetime | None) -> datetime | None:
-    if value is not None and value.tzinfo is None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
         raise ValueError("scheduled_at 必须包含时区")
-    return value
+    return value.astimezone(UTC)
 
 
-def _as_utc(value: datetime | None) -> datetime | None:
+def _utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
@@ -106,15 +108,15 @@ def _out(job: PublishJob) -> JobOut:
         platform=job.platform,
         account_id=str(job.account_id) if job.account_id else None,
         status=job.status,
-        scheduled_at=job.scheduled_at,
-        published_at=job.published_at,
+        scheduled_at=_utc(job.scheduled_at),
+        published_at=_utc(job.published_at),
         external_id=job.external_id,
         external_url=job.external_url,
         export_path=job.export_path,
         error=job.error,
         checks=job.checks or {},
-        created_at=job.created_at,
-        updated_at=job.updated_at,
+        created_at=_utc(job.created_at),
+        updated_at=_utc(job.updated_at),
     )
 
 
@@ -139,35 +141,69 @@ async def _owned_job(session: AsyncSession, job_id: str, user: User) -> PublishJ
     return job
 
 
-async def _replay(
+async def _find_job_by_key(
+    session: AsyncSession, tenant_id: str, idempotency_key: str
+) -> PublishJob | None:
+    return (
+        await session.execute(
+            select(PublishJob)
+            .where(
+                PublishJob.tenant_id == tenant_id,
+                PublishJob.idempotency_key == idempotency_key,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+
+
+async def _replay_existing(
     session: AsyncSession,
     existing: PublishJob,
     payload: JobIn,
     user: User,
+    response: Response,
 ) -> JobOut:
-    if existing.status == "cancelled":
-        job = await reopen(
-            session,
-            existing.id,
-            tenant_id=user.tenant_id,
-            actor=user.email,
-            scheduled_at=payload.scheduled_at,
-        )
-        return _out(job)
-    if payload.scheduled_at is not None and _as_utc(payload.scheduled_at) != _as_utc(
-        existing.scheduled_at
-    ):
+    tenant_id = user.tenant_id
+    actor = user.email
+    for attempt in range(2):
+        key = existing.idempotency_key
         try:
-            job = await reschedule(
-                session,
-                existing.id,
-                payload.scheduled_at,
-                tenant_id=user.tenant_id,
-            )
+            if existing.status == "cancelled":
+                job = await reopen(
+                    session,
+                    existing.id,
+                    tenant_id=tenant_id,
+                    actor=actor,
+                    scheduled_at=payload.scheduled_at,
+                )
+            elif payload.scheduled_at is not None and _utc(
+                payload.scheduled_at
+            ) != _utc(existing.scheduled_at):
+                job = await reschedule(
+                    session,
+                    existing.id,
+                    payload.scheduled_at,
+                    tenant_id=tenant_id,
+                )
+            else:
+                job = existing
+        except InvalidTransition:
+            await session.rollback()
+            existing = await _find_job_by_key(session, tenant_id, key)
+            if existing is None:
+                raise AppError("not_found", "发布任务不存在", 404) from None
+            if attempt == 0:
+                continue
+            raise AppError(
+                "invalid_transition", "发布任务状态已变化，请重试", 409
+            ) from None
+        except JobNotFound:
+            raise AppError("not_found", "发布任务不存在", 404) from None
         except JobNotReschedulable as exc:
             raise AppError("job_not_reschedulable", str(exc), 409) from exc
+        response.status_code = 200
         return _out(job)
-    return _out(existing)
+    raise AppError("invalid_transition", "发布任务状态已变化，请重试", 409)
 
 
 @router.get("/jobs", response_model=JobList)
@@ -184,7 +220,11 @@ async def list_jobs(
     total = (
         await session.execute(select(func.count()).select_from(base.subquery()))
     ).scalar_one()
-    stmt = base.order_by(PublishJob.created_at.desc()).limit(limit).offset(offset)
+    stmt = (
+        base.order_by(PublishJob.created_at.desc(), PublishJob.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     rows = (await session.execute(stmt)).scalars().all()
     return JobList(items=[_out(job) for job in rows], total=total)
 
@@ -206,6 +246,14 @@ async def create_job(
     ).scalar_one_or_none()
     if content is None:
         raise AppError("not_found", "内容不存在", 404)
+
+    idempotency_key = (
+        f"{content.id}:{content.current_version}:"
+        f"{payload.platform}:{payload.account_id or '-'}"
+    )
+    existing = await _find_job_by_key(session, user.tenant_id, idempotency_key)
+    if existing is not None:
+        return await _replay_existing(session, existing, payload, user, response)
 
     if content.current_version < 1:
         raise AppError("empty_content", "内容还没有可发布的版本", 409)
@@ -244,22 +292,6 @@ async def create_job(
         if account.status != "active":
             raise AppError("account_inactive", "账号已停用", 409)
 
-    idempotency_key = (
-        f"{content.id}:{content.current_version}:"
-        f"{payload.platform}:{payload.account_id or '-'}"
-    )
-    existing = (
-        await session.execute(
-            select(PublishJob).where(
-                PublishJob.tenant_id == user.tenant_id,
-                PublishJob.idempotency_key == idempotency_key,
-            )
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        response.status_code = 200
-        return await _replay(session, existing, payload, user)
-
     job = PublishJob(
         tenant_id=user.tenant_id,
         content_id=content.id,
@@ -286,18 +318,10 @@ async def create_job(
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        existing = (
-            await session.execute(
-                select(PublishJob).where(
-                    PublishJob.tenant_id == user.tenant_id,
-                    PublishJob.idempotency_key == idempotency_key,
-                )
-            )
-        ).scalar_one_or_none()
+        existing = await _find_job_by_key(session, user.tenant_id, idempotency_key)
         if existing is None:
             raise
-        response.status_code = 200
-        return await _replay(session, existing, payload, user)
+        return await _replay_existing(session, existing, payload, user, response)
     await session.refresh(job)
     return _out(job)
 

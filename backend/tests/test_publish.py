@@ -2,13 +2,13 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import DEFAULT_TENANT_ID
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.publish.state import TRANSITIONS, InvalidTransition, next_status
-from app.services.publish import ContentChanged, apply_action
+from app.services.publish import ContentChanged, _locked_job, apply_action
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
 
@@ -301,7 +301,36 @@ async def test_scheduled_at_round_trips(client):
 
     assert response.status_code == 201
     scheduled = datetime.fromisoformat(response.json()["scheduled_at"])
-    assert scheduled.replace(tzinfo=None) == datetime(2026, 11, 1, 9, 30)
+    assert scheduled.tzinfo is not None
+    assert scheduled == datetime(2026, 11, 1, 9, 30, tzinfo=UTC)
+
+
+async def test_scheduled_at_offset_is_normalized(client):
+    content = await _create_content(client)
+    response = await _create_job(
+        client, content["id"], scheduled_at="2026-11-01T09:30:00+08:00"
+    )
+
+    assert response.status_code == 201
+    scheduled = datetime.fromisoformat(response.json()["scheduled_at"])
+    assert scheduled.tzinfo is not None
+    assert scheduled == datetime(2026, 11, 1, 1, 30, tzinfo=UTC)
+
+
+async def test_replay_with_equivalent_offset_returns_unchanged(client):
+    content = await _create_content(client)
+    first = await _create_job(
+        client, content["id"], scheduled_at="2026-11-01T09:30:00+08:00"
+    )
+    second = await _create_job(
+        client, content["id"], scheduled_at="2026-11-01T01:30:00+00:00"
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["scheduled_at"] == first.json()["scheduled_at"]
+    assert second.json()["updated_at"] == first.json()["updated_at"]
 
 
 async def test_naive_create_schedule_is_rejected(client):
@@ -512,6 +541,20 @@ async def test_replay_reopens_cancelled_job(client, db_session):
     assert event.actor == "tester@local"
 
 
+async def test_replay_before_validation_after_account_deactivation(client, db_session):
+    content = await _create_content(client)
+    account = await _seed_account(db_session)
+    first = await _create_job(client, content["id"], account_id=account.id)
+    assert first.status_code == 201
+
+    account.status = "revoked"
+    await db_session.commit()
+
+    replay = await _create_job(client, content["id"], account_id=account.id)
+    assert replay.status_code == 200
+    assert replay.json()["id"] == first.json()["id"]
+
+
 async def test_patch_schedule_updates_and_clears(client):
     content = await _create_content(client)
     job = (
@@ -695,6 +738,68 @@ async def test_publish_guard_rejects_stale_content_version(client, db_session):
     assert job.status == "approved"
 
 
+async def test_locked_job_refreshes_stale_identity_map(client, db_session):
+    content = await _create_content(client)
+    job_id = uuid.UUID((await _create_job(client, content["id"])).json()["id"])
+    cached = (
+        await db_session.execute(select(PublishJob).where(PublishJob.id == job_id))
+    ).scalar_one()
+    assert cached.status == "draft"
+
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == job_id)
+        .values(status="exporting")
+        .execution_options(synchronize_session=False)
+    )
+    await db_session.commit()
+    assert cached.status == "draft"
+
+    fresh = await _locked_job(db_session, job_id, DEFAULT_TENANT_ID)
+    assert fresh.status == "exporting"
+
+
+async def test_publish_guard_reads_fresh_content_version(client, db_session):
+    content = await _create_content(client)
+    job_id = (await _create_job(client, content["id"])).json()["id"]
+    stored_job = await _stored_job(db_session, job_id)
+    stored_job.status = "approved"
+    await db_session.commit()
+
+    content_id = uuid.UUID(content["id"])
+    cached = (
+        await db_session.execute(select(Content).where(Content.id == content_id))
+    ).scalar_one()
+    assert cached.current_version == 1
+
+    await db_session.execute(
+        update(Content)
+        .where(Content.id == content_id)
+        .values(current_version=2)
+        .execution_options(synchronize_session=False)
+    )
+    db_session.add(
+        ContentVersion(
+            tenant_id=DEFAULT_TENANT_ID,
+            content_id=content_id,
+            version=2,
+            title="更新标题",
+            body="更新正文",
+        )
+    )
+    await db_session.commit()
+    assert cached.current_version == 1
+
+    with pytest.raises(ContentChanged):
+        await apply_action(
+            db_session,
+            uuid.UUID(job_id),
+            "publish",
+            tenant_id=DEFAULT_TENANT_ID,
+            actor="system",
+        )
+
+
 async def test_happy_path_actions_record_events(client, db_session):
     content = await _create_content(client)
     job_body = (await _create_job(client, content["id"])).json()
@@ -716,6 +821,7 @@ async def test_happy_path_actions_record_events(client, db_session):
         )
     ).scalars().all()
     by_action = {event.action: event for event in events}
+    assert len(events) == 4
     assert set(by_action) == {"create", "submit", "pass", "approve"}
     assert (by_action["create"].from_status, by_action["create"].to_status) == (
         "created",
