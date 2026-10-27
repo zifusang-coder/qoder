@@ -9,14 +9,15 @@ from app.security import hash_password
 
 async def ensure_admin(session: AsyncSession) -> None:
     settings = get_settings()
+    email = settings.admin_email.strip().lower()
     existing = (
-        await session.execute(select(User).where(User.email == settings.admin_email))
+        await session.execute(select(User).where(User.email == email))
     ).scalar_one_or_none()
     if existing:
         return
     session.add(
         User(
-            email=settings.admin_email,
+            email=email,
             password_hash=hash_password(settings.admin_password),
             display_name="管理员",
             is_admin=True,

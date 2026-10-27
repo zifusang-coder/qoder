@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerificationError
+from argon2.exceptions import InvalidHashError, VerificationError
 from cryptography.fernet import Fernet
 
 from app.config import get_settings
@@ -19,7 +19,7 @@ def hash_password(raw: str) -> str:
 def verify_password(raw: str, hashed: str) -> bool:
     try:
         return _hasher.verify(hashed, raw)
-    except VerificationError:
+    except (VerificationError, InvalidHashError):
         return False
 
 

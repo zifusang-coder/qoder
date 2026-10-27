@@ -4,11 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.main import app
+from app.models.user import User
 from app.seed import ensure_admin
 
 
@@ -69,6 +71,28 @@ async def test_login_unknown_email_returns_401(db_session):
         resp = await client.post(
             "/api/auth/login",
             json={"email": "nobody@local", "password": "any-password"},
+        )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "invalid_credentials"
+
+
+async def test_login_with_corrupt_password_hash_returns_401(db_session):
+    settings = get_settings()
+    async with auth_client(db_session) as client:
+        admin = (
+            await db_session.execute(
+                select(User).where(User.email == settings.admin_email)
+            )
+        ).scalar_one()
+        admin.password_hash = "not-a-hash"
+        await db_session.commit()
+
+        resp = await client.post(
+            "/api/auth/login",
+            json={
+                "email": settings.admin_email,
+                "password": settings.admin_password,
+            },
         )
     assert resp.status_code == 401
     assert resp.json()["code"] == "invalid_credentials"
