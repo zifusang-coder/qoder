@@ -6171,14 +6171,19 @@ git commit -m "feat: add cover, quality, risk, persona and postmortem skills"
 - Create: `backend/app/api/projects.py`
 - Modify: `backend/app/main.py`
 - Create: `backend/tests/test_projects.py`
+- Create: `backend/migrations/versions/*_add_projects_contents_versions.py`
+- Create: `backend/migrations/versions/*_harden_project_relations_and_indexes.py`
 
 - [ ] **Step 1: 写失败测试 `backend/tests/test_projects.py`**
 
 ```python
+import uuid
 from pathlib import Path
 
 import pytest
 
+from app.api import projects as projects_api
+from app.models.project import Content, Project
 from app.storage import Storage, StorageError
 
 
@@ -6210,6 +6215,116 @@ def test_storage_rejects_traversal(tmp_path: Path):
     storage = Storage(tmp_path)
     with pytest.raises(StorageError):
         storage.resolve("p1", "../../etc/passwd")
+
+
+async def test_ids_are_tenant_scoped(client, db_session):
+    project_id = uuid.uuid4()
+    content_id = uuid.uuid4()
+    db_session.add(Project(id=project_id, tenant_id="other-tenant", title="其他租户项目"))
+    await db_session.flush()
+    db_session.add(
+        Content(
+            id=content_id,
+            tenant_id="other-tenant",
+            project_id=project_id,
+            platform="wechat",
+        )
+    )
+    await db_session.flush()
+
+    responses = [
+        await client.get(f"/api/projects/{project_id}"),
+        await client.get(f"/api/projects/{project_id}/contents"),
+        await client.post(
+            f"/api/projects/{project_id}/contents", json={"platform": "wechat"}
+        ),
+        await client.get(f"/api/contents/{content_id}/versions"),
+        await client.post(f"/api/contents/{content_id}/versions", json={"body": "x"}),
+    ]
+    assert [r.status_code for r in responses] == [404] * 5
+    assert all(r.json()["code"] == "not_found" for r in responses)
+
+
+async def test_invalid_ids_return_404(client):
+    project = await client.get("/api/projects/not-a-uuid")
+    content = await client.get("/api/contents/not-a-uuid/versions")
+
+    assert project.status_code == 404
+    assert project.json()["code"] == "not_found"
+    assert content.status_code == 404
+    assert content.json()["code"] == "not_found"
+
+
+async def test_input_lengths_are_validated(client):
+    project = await client.post("/api/projects", json={"title": "边界测试"})
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+
+    too_long_platform = await client.post(
+        f"/api/projects/{project_id}/contents", json={"platform": "a" * 33}
+    )
+    assert too_long_platform.status_code == 422
+
+    content = await client.post(
+        f"/api/projects/{project_id}/contents",
+        json={"platform": "wechat", "title": "初稿", "body": "正文"},
+    )
+    assert content.status_code == 201
+    too_long_title = await client.post(
+        f"/api/contents/{content.json()['id']}/versions",
+        json={"title": "a" * 301},
+    )
+    assert too_long_title.status_code == 422
+
+    extra_field = await client.post("/api/projects", json={"title": "x", "oops": 1})
+    assert extra_field.status_code == 422
+
+
+async def test_profile_id_blank_and_unknown(client):
+    blank = await client.post("/api/projects", json={"title": "无画像", "profile_id": ""})
+    assert blank.status_code == 201
+    assert blank.json()["profile_id"] is None
+
+    unknown = await client.post(
+        "/api/projects", json={"title": "未知画像", "profile_id": str(uuid.uuid4())}
+    )
+    assert unknown.status_code == 404
+    assert unknown.json()["code"] == "not_found"
+
+
+async def test_version_conflict_returns_409(client, monkeypatch):
+    project = await client.post("/api/projects", json={"title": "冲突测试"})
+    content = await client.post(
+        f"/api/projects/{project.json()['id']}/contents",
+        json={"platform": "wechat", "title": "初稿", "body": "正文"},
+    )
+    assert content.status_code == 201
+
+    async def fake_next_version(session, content_id):
+        return 1
+
+    monkeypatch.setattr(projects_api, "_next_version", fake_next_version)
+    conflict = await client.post(
+        f"/api/contents/{content.json()['id']}/versions",
+        json={"title": "重复版本", "body": "正文"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "version_conflict"
+
+
+def test_storage_roundtrip_and_edge_cases(tmp_path: Path):
+    storage = Storage(tmp_path)
+    stored = storage.save_text("p1", "drafts/a.md", "正文")
+    assert stored == "drafts/a.md"
+    assert storage.read_text("p1", "drafts/a.md") == "正文"
+    assert storage.list_files("p1") == ["drafts/a.md"]
+
+    with pytest.raises(StorageError):
+        storage.project_dir(".")
+    with pytest.raises(StorageError):
+        storage.project_dir("a/b")
+    with pytest.raises(StorageError):
+        storage.resolve("p1", "")
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -6220,7 +6335,9 @@ Expected: FAIL（模块不存在 / 404）
 - [ ] **Step 3: 写 `backend/app/models/project.py`**
 
 ```python
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+import uuid
+
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import JSONType, TenantScoped
@@ -6231,7 +6348,12 @@ class Project(TenantScoped):
 
     title: Mapped[str] = mapped_column(String(200))
     topic: Mapped[str] = mapped_column(Text, default="")
-    profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[str] = mapped_column(String(32), default="draft")
     platforms: Mapped[list] = mapped_column(JSONType, default=list)
     meta: Mapped[dict] = mapped_column(JSONType, default=dict)
@@ -6240,8 +6362,8 @@ class Project(TenantScoped):
 class Content(TenantScoped):
     __tablename__ = "contents"
 
-    project_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     platform: Mapped[str] = mapped_column(String(32))
     kind: Mapped[str] = mapped_column(String(32), default="article")
@@ -6255,8 +6377,8 @@ class ContentVersion(TenantScoped):
     __tablename__ = "content_versions"
     __table_args__ = (UniqueConstraint("content_id", "version", name="uq_content_version"),)
 
-    content_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("contents.id", ondelete="CASCADE"), index=True
+    content_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("contents.id", ondelete="CASCADE")
     )
     version: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(300), default="")
@@ -6265,6 +6387,8 @@ class ContentVersion(TenantScoped):
     skill_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     meta: Mapped[dict] = mapped_column(JSONType, default=dict)
 ```
+
+说明：FK 必须与 `Base.id` 的 UUID 类型一致，原计划的 `String(36)` 在 SQLite 会因 `Uuid` 比较报错、在 Postgres 会因 `varchar REFERENCES uuid` 类型不兼容而建表失败；因此 `Content.project_id`、`ContentVersion.content_id`、`Project.profile_id` 都使用 `Uuid(as_uuid=True)`。`ContentVersion.content_id` 不再单独建索引，`(content_id, version)` 唯一索引已覆盖前缀。`Project.profile_id` 删除画像时置空，避免悬挂引用。
 
 - [ ] **Step 4: 写 `backend/app/storage.py`**
 
@@ -6282,21 +6406,36 @@ class StorageError(ValueError):
 class Storage:
     def __init__(self, root: Path):
         self.root = root.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
 
     def project_dir(self, project_id: str) -> Path:
-        if not project_id or "/" in project_id or ".." in project_id:
+        if (
+            not project_id
+            or project_id in {".", ".."}
+            or "/" in project_id
+            or "\\" in project_id
+            or "\x00" in project_id
+        ):
             raise StorageError("非法项目 ID")
-        path = (self.root / project_id).resolve()
+        try:
+            path = (self.root / project_id).resolve()
+        except (ValueError, OSError):
+            raise StorageError("非法项目路径") from None
         if not path.is_relative_to(self.root):
             raise StorageError("非法项目路径")
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     def resolve(self, project_id: str, relpath: str) -> Path:
+        if not relpath or not relpath.strip():
+            raise StorageError("非法文件路径")
+        if Path(relpath).is_absolute():
+            raise StorageError("非法文件路径")
         base = self.project_dir(project_id)
-        path = (base / relpath).resolve()
-        if not path.is_relative_to(base):
+        try:
+            path = (base / relpath).resolve()
+        except (ValueError, OSError):
+            raise StorageError("非法文件路径") from None
+        if path == base or not path.is_relative_to(base):
             raise StorageError("非法文件路径")
         return path
 
@@ -6323,16 +6462,32 @@ class Storage:
 
 
 @lru_cache
+def _storage_for(root: Path) -> Storage:
+    return Storage(root)
+
+
 def get_storage() -> Storage:
-    return Storage(get_settings().outputs_dir)
+    return _storage_for(get_settings().outputs_dir)
 ```
+
+要点：所有路径先 `resolve()` 再判断包含关系，拒绝 `..`、绝对路径、符号链接逃逸与指向项目根自身；`project_id` 拒绝空值、`.`/`..`、路径分隔符与 NUL；缓存以 `outputs_dir` 为键，`get_settings.cache_clear()` 后再调用会得到新实例；根目录只在首次 `project_dir()` 时惰性创建。
 
 - [ ] **Step 5: 写 `backend/app/api/projects.py`**
 
 ```python
+import uuid
+from typing import Annotated
+
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -6344,12 +6499,29 @@ from app.models.user import User
 
 router = APIRouter(tags=["projects"])
 
+ShortText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32)
+]
+Title300 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
+ProjectTitle = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+
 
 class ProjectIn(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    model_config = ConfigDict(extra="forbid")
+
+    title: ProjectTitle
     topic: str = ""
     profile_id: str | None = None
-    platforms: list[str] = Field(default_factory=list)
+    platforms: list[
+        Annotated[str, StringConstraints(min_length=1, max_length=32)]
+    ] = Field(default_factory=list, max_length=20)
+
+    @field_validator("profile_id", mode="before")
+    @classmethod
+    def _blank_profile_to_none(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 class ProjectOut(BaseModel):
@@ -6366,9 +6538,11 @@ class ProjectList(BaseModel):
 
 
 class ContentIn(BaseModel):
-    platform: str
-    kind: str = "article"
-    title: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    platform: ShortText
+    kind: ShortText = "article"
+    title: Title300 = ""
     body: str = ""
 
 
@@ -6383,9 +6557,11 @@ class ContentOut(BaseModel):
 
 
 class VersionIn(BaseModel):
-    title: str = ""
+    model_config = ConfigDict(extra="forbid")
+
+    title: Title300 = ""
     body: str = ""
-    source: str = "manual"
+    source: ShortText = "manual"
 
 
 class VersionOut(BaseModel):
@@ -6401,31 +6577,41 @@ class VersionList(BaseModel):
     items: list[VersionOut]
 
 
+def _parse_uuid(value: str, message: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except (ValueError, TypeError):
+        raise AppError("not_found", message, 404) from None
+
+
 def _project_out(p: Project) -> ProjectOut:
     return ProjectOut(
         id=str(p.id), title=p.title, topic=p.topic, status=p.status,
-        profile_id=p.profile_id, platforms=p.platforms or [],
+        profile_id=str(p.profile_id) if p.profile_id else None,
+        platforms=p.platforms or [],
     )
 
 
 def _content_out(c: Content) -> ContentOut:
     return ContentOut(
-        id=str(c.id), project_id=c.project_id, platform=c.platform, kind=c.kind,
-        title=c.title, current_version=c.current_version, status=c.status,
+        id=str(c.id), project_id=str(c.project_id), platform=c.platform,
+        kind=c.kind, title=c.title, current_version=c.current_version,
+        status=c.status,
     )
 
 
 def _version_out(v: ContentVersion) -> VersionOut:
     return VersionOut(
-        id=str(v.id), content_id=v.content_id, version=v.version,
+        id=str(v.id), content_id=str(v.content_id), version=v.version,
         title=v.title, body=v.body, source=v.source,
     )
 
 
 async def _owned_project(session: AsyncSession, project_id: str, user: User) -> Project:
+    parsed = _parse_uuid(project_id, "项目不存在")
     project = (
         await session.execute(
-            select(Project).where(Project.id == project_id, Project.tenant_id == user.tenant_id)
+            select(Project).where(Project.id == parsed, Project.tenant_id == user.tenant_id)
         )
     ).scalar_one_or_none()
     if project is None:
@@ -6434,9 +6620,10 @@ async def _owned_project(session: AsyncSession, project_id: str, user: User) -> 
 
 
 async def _owned_content(session: AsyncSession, content_id: str, user: User) -> Content:
+    parsed = _parse_uuid(content_id, "内容不存在")
     content = (
         await session.execute(
-            select(Content).where(Content.id == content_id, Content.tenant_id == user.tenant_id)
+            select(Content).where(Content.id == parsed, Content.tenant_id == user.tenant_id)
         )
     ).scalar_one_or_none()
     if content is None:
@@ -6444,7 +6631,7 @@ async def _owned_content(session: AsyncSession, content_id: str, user: User) -> 
     return content
 
 
-async def _next_version(session: AsyncSession, content_id: str) -> int:
+async def _next_version(session: AsyncSession, content_id: uuid.UUID) -> int:
     current = (
         await session.execute(
             select(func.max(ContentVersion.version)).where(
@@ -6475,17 +6662,22 @@ async def create_project(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectOut:
-    if payload.profile_id:
+    data = payload.model_dump()
+    profile_id = data.pop("profile_id")
+    profile_uuid = None
+    if profile_id:
+        profile_uuid = _parse_uuid(profile_id, "账号画像不存在")
         profile = (
             await session.execute(
                 select(Profile).where(
-                    Profile.id == payload.profile_id, Profile.tenant_id == user.tenant_id
+                    Profile.id == profile_uuid,
+                    Profile.tenant_id == user.tenant_id,
                 )
             )
         ).scalar_one_or_none()
         if profile is None:
             raise AppError("not_found", "账号画像不存在", 404)
-    project = Project(tenant_id=user.tenant_id, **payload.model_dump())
+    project = Project(tenant_id=user.tenant_id, profile_id=profile_uuid, **data)
     session.add(project)
     await session.commit()
     await session.refresh(project)
@@ -6507,11 +6699,11 @@ async def list_contents(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[ContentOut]:
-    await _owned_project(session, project_id, user)
+    project = await _owned_project(session, project_id, user)
     rows = (
         await session.execute(
             select(Content)
-            .where(Content.project_id == project_id, Content.tenant_id == user.tenant_id)
+            .where(Content.project_id == project.id, Content.tenant_id == user.tenant_id)
             .order_by(Content.created_at)
         )
     ).scalars().all()
@@ -6525,10 +6717,10 @@ async def create_content(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ContentOut:
-    await _owned_project(session, project_id, user)
+    project = await _owned_project(session, project_id, user)
     content = Content(
         tenant_id=user.tenant_id,
-        project_id=project_id,
+        project_id=project.id,
         platform=payload.platform,
         kind=payload.kind,
         title=payload.title,
@@ -6539,7 +6731,7 @@ async def create_content(
     if payload.body or payload.title:
         version = ContentVersion(
             tenant_id=user.tenant_id,
-            content_id=str(content.id),
+            content_id=content.id,
             version=1,
             title=payload.title,
             body=payload.body,
@@ -6558,11 +6750,11 @@ async def list_versions(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> VersionList:
-    await _owned_content(session, content_id, user)
+    content = await _owned_content(session, content_id, user)
     rows = (
         await session.execute(
             select(ContentVersion)
-            .where(ContentVersion.content_id == content_id)
+            .where(ContentVersion.content_id == content.id)
             .order_by(ContentVersion.version.desc())
         )
     ).scalars().all()
@@ -6577,10 +6769,10 @@ async def create_version(
     session: AsyncSession = Depends(get_session),
 ) -> VersionOut:
     content = await _owned_content(session, content_id, user)
-    version_no = await _next_version(session, content_id)
+    version_no = await _next_version(session, content.id)
     version = ContentVersion(
         tenant_id=user.tenant_id,
-        content_id=content_id,
+        content_id=content.id,
         version=version_no,
         title=payload.title or content.title,
         body=payload.body,
@@ -6590,7 +6782,11 @@ async def create_version(
     content.current_version = version_no
     if payload.title:
         content.title = payload.title
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise AppError("version_conflict", "版本冲突，请重试", 409) from None
     await session.refresh(version)
     return _version_out(version)
 ```
@@ -6599,12 +6795,26 @@ async def create_version(
 
 `app/main.py` 增加 `from app.api import auth, profiles, projects, skills, settings as settings_api` 与 `app.include_router(projects.router, prefix="/api")`。
 
+生成两个迁移（第二个用于收口 FK/索引）：
+
+```bash
+cd /Users/tongxi/Desktop/新媒体运营系统
+docker compose up -d --wait
+cd backend
+uv run alembic revision --autogenerate -m "add projects contents versions"
+uv run alembic upgrade head
+uv run alembic revision --autogenerate -m "harden project relations and indexes"
+uv run alembic upgrade head
+cd /Users/tongxi/Desktop/新媒体运营系统 && docker compose down
+```
+
+第二个迁移需确认包含：`projects.profile_id` 由 `varchar(36)` 改为 `uuid`（`postgresql_using='profile_id::uuid'`，并在其前执行 `UPDATE projects SET profile_id = NULL WHERE profile_id = ''`）、到 `profiles.id` 的 `SET NULL` 外键、`ix_projects_profile_id`、以及删除冗余的 `ix_content_versions_content_id`。
+
 ```bash
 cd backend
-alembic revision --autogenerate -m "add projects contents versions"
 uv run pytest tests/test_projects.py -q
 ```
-Expected: `2 passed`
+Expected: `8 passed`
 
 - [ ] **Step 7: 提交**
 
@@ -6612,6 +6822,13 @@ Expected: `2 passed`
 git add backend
 git commit -m "feat: add projects, contents, versions and safe file storage"
 ```
+
+**落地说明：**
+- 提交序列：`99a672a`（模型/存储/路由/迁移/2 个测试）→ `3544265`（输入上限与 `extra=forbid`、版本冲突 409、`profile_id` 改为 UUID 外键并归一空串、存储边界收紧、租户隔离等 6 个测试）→ `efbf622`（迁移前清理空 `profile_id`）。
+- FK 类型：`Content.project_id`、`ContentVersion.content_id`、`Project.profile_id` 均为 `Uuid(as_uuid=True)`。原计划的 `String(36)` 在 SQLite 会因 UUID 比较报错、在 Postgres 会因 `varchar REFERENCES uuid` 不兼容而失败。
+- 版本并发：`_next_version` 仍是 max+1，单用户阶段够用；唯一约束冲突时返回 `409 version_conflict`，不会裸 500。
+- 画像解绑：删除画像时 `projects.profile_id` 置 NULL；入参空串在 API 层归一为 `None`。
+- 最终：`pytest` 208 passed、ruff 干净；两个迁移已在本地 Postgres 应用并 `docker compose down`（保留卷）。
 
 ---
 
