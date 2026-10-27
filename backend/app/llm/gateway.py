@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AppError
-from app.llm.types import LLMConfig
+from app.llm.types import LLMConfig, Usage
 from app.models.settings import LLMProvider
 from app.security import decrypt_secret
 
@@ -29,6 +29,7 @@ class LLMGateway:
     def __init__(self, config: LLMConfig, timeout: float = 120.0):
         self.config = config
         self.timeout = timeout
+        self.last_usage = Usage()
 
     @property
     def endpoint(self) -> str:
@@ -132,6 +133,7 @@ class LLMGateway:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> str:
+        self.last_usage = Usage()
         payload = self._payload(
             messages, tier, temperature, stream=False, max_tokens=max_tokens
         )
@@ -151,6 +153,20 @@ class LLMGateway:
             raise AppError(
                 "llm_invalid_response", "LLM 返回格式异常", 502
             ) from exc
+
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(usage, dict):
+            usage = {}
+        if self.config.kind == "anthropic":
+            self.last_usage = Usage(
+                int(usage.get("input_tokens") or 0),
+                int(usage.get("output_tokens") or 0),
+            )
+        else:
+            self.last_usage = Usage(
+                int(usage.get("prompt_tokens") or 0),
+                int(usage.get("completion_tokens") or 0),
+            )
 
         if self.config.kind == "anthropic":
             content = data.get("content") if isinstance(data, dict) else None
