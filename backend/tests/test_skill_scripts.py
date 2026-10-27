@@ -59,6 +59,19 @@ async def test_format_check_flags_banned_words():
     assert any("震惊" in item["message"] for item in result["check"]["issues"])
 
 
+async def test_format_check_reports_actual_line_number():
+    result = await run_script(
+        SKILLS / "quality-gate" / "scripts" / "format_check.py",
+        {
+            "inputs": {"text": "# 标题\n\n" + "字" * 181},
+            "output": {"summary": "ok"},
+        },
+        SKILLS / "quality-gate",
+    )
+    messages = [item["message"] for item in result["check"]["issues"]]
+    assert any("第 3 行" in message for message in messages)
+
+
 async def test_keyword_scan_marks_two_hits_high():
     result = await run_script(
         SKILLS / "risk-scan" / "scripts" / "keyword_scan.py",

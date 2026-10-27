@@ -11,14 +11,15 @@ def main() -> None:
     base = dict(payload.get("output") or {})
 
     issues = []
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if not lines:
+    lines = text.splitlines()
+    nonempty = [ln for ln in lines if ln.strip()]
+    if not nonempty:
         issues.append({"level": "error", "message": "文本为空"})
-    if lines and not lines[0].lstrip().startswith("#"):
+    if nonempty and not nonempty[0].lstrip().startswith("#"):
         issues.append({"level": "warn", "message": "缺少一级标题"})
 
     for line_no, para in enumerate(lines, start=1):
-        if para.lstrip().startswith("#"):
+        if not para.strip() or para.lstrip().startswith("#"):
             continue
         if len(para) > 180:
             issues.append(
