@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,9 @@ async def test_error_precedence_beats_missing_llm_config(
     assert (
         await client.post("/api/skills/nope/run", json={"inputs": {}})
     ).status_code == 404
+    assert (
+        await client.post("/api/skills/nope/stream", json={"inputs": {}})
+    ).status_code == 404
 
     await client.patch("/api/skills/demo-skill/toggle", json={"enabled": False})
     disabled = await client.post(
@@ -203,6 +207,7 @@ async def test_error_precedence_beats_missing_llm_config(
         "/api/skills/demo-skill/stream", json={"inputs": {"topic": "周报"}}
     )
     assert disabled_stream.status_code == 409
+    assert disabled_stream.json()["code"] == "skill_disabled"
 
     await client.patch("/api/skills/demo-skill/toggle", json={"enabled": True})
     invalid = await client.post("/api/skills/demo-skill/run", json={"inputs": {}})
@@ -215,12 +220,20 @@ async def test_error_precedence_beats_missing_llm_config(
     assert invalid_stream.status_code == 422
     assert invalid_stream.json()["code"] == "skill_inputs_invalid"
 
+    # Positive control: a valid request gets past precedence checks and only
+    # then fails on gateway resolution (proving precedence was not masked).
+    missing = await client.post(
+        "/api/skills/demo-skill/run", json={"inputs": {"topic": "周报"}}
+    )
+    assert missing.status_code == 400
+    assert missing.json()["code"] == "llm_not_configured"
+
     count = (await db_session.execute(select(func.count(SkillRun.id)))).scalar_one()
     assert count == 0
 
 
 async def test_toggle_recovers_from_concurrent_insert(
-    client, skills_registry, db_session, monkeypatch
+    client, skills_registry, db_session, monkeypatch, caplog
 ):
     db_session.add(
         SkillSetting(
@@ -249,11 +262,14 @@ async def test_toggle_recovers_from_concurrent_insert(
 
     monkeypatch.setattr(db_session, "execute", flaky_execute)
 
-    response = await client.patch(
-        "/api/skills/demo-skill/toggle", json={"enabled": False}
-    )
+    with caplog.at_level(logging.INFO, logger="app.api.skills"):
+        response = await client.patch(
+            "/api/skills/demo-skill/toggle", json={"enabled": False}
+        )
     assert response.status_code == 200
     assert response.json()["enabled"] is False
+    assert skipped["done"] is True
+    assert "技能启停并发写入" in caplog.text
 
     row = (
         await original_execute(
@@ -264,3 +280,43 @@ async def test_toggle_recovers_from_concurrent_insert(
         )
     ).scalar_one()
     assert row.enabled is False
+
+
+async def test_toggle_reraises_integrity_error_without_winner(db_session, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.api.skills import ToggleIn, toggle_skill
+    from app.models.user import User
+
+    user = User(
+        tenant_id=DEFAULT_TENANT_ID,
+        email="tester@local",
+        password_hash="x",
+        display_name="Tester",
+    )
+
+    class _NoRow:
+        def scalar_one_or_none(self):
+            return None
+
+    calls = {"execute": 0}
+
+    async def empty_execute(*_args, **_kwargs):
+        calls["execute"] += 1
+        return _NoRow()
+
+    async def failing_commit():
+        raise IntegrityError("insert", {}, Exception("unique"))
+
+    monkeypatch.setattr(db_session, "execute", empty_execute)
+    monkeypatch.setattr(db_session, "commit", failing_commit)
+
+    with pytest.raises(IntegrityError):
+        await toggle_skill(
+            "demo-skill",
+            ToggleIn(enabled=False),
+            user=user,
+            session=db_session,
+            registry=SkillRegistry(FIXTURE),
+        )
+    assert calls["execute"] == 2  # first read + retry read both returned no row
