@@ -83,6 +83,25 @@ describe("api", () => {
     expect(headers.get("Authorization")).toBe("Bearer tok");
   });
 
+  it("sets a JSON content type for string bodies", async () => {
+    stubBrowser("tok");
+    const fetchMock = vi.fn(
+      async (_input: string, _init: RequestInit) =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api("/x", { method: "POST", body: JSON.stringify({ a: 1 }) });
+
+    const [, init] = fetchMock.mock.calls[0];
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("Authorization")).toBe("Bearer tok");
+  });
+
   it("does not clear a newer token when a stale request gets a 401", async () => {
     const { location } = stubBrowser("old-token");
     let resolveFetch!: (resp: Response) => void;

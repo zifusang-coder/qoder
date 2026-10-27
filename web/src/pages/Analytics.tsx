@@ -87,9 +87,13 @@ export default function Analytics() {
   });
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
-    setImportNotice(null);
+    // Capture the selection, then clear the input so picking the same file
+    // again (e.g. after a failed import) still fires onChange.
+    const selected = event.target.files?.[0] ?? null;
+    event.target.value = "";
     importCsv.reset();
-    setFile(event.target.files?.[0] ?? null);
+    setImportNotice(null);
+    setFile(selected);
   }
 
   function submitImport() {
@@ -148,6 +152,7 @@ export default function Analytics() {
               className="min-w-0 flex-1 text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-slate-200"
               type="file"
               accept=".csv"
+              aria-label="导入 CSV 文件"
               onChange={chooseFile}
             />
             <button

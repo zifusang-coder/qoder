@@ -4,8 +4,12 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../client";
 import {
   PLATFORMS,
+  contentKindLabel,
+  contentStatusLabel,
   errorText,
+  jobStatusLabel,
   platformLabel,
+  projectStatusLabel,
   type Content,
   type Job,
   type Project,
@@ -59,10 +63,10 @@ export default function ProjectDetail() {
         method: "POST",
         body: JSON.stringify(payload),
       }),
-    onSuccess: () => {
+    onSuccess: (_content, payload) => {
       qc.invalidateQueries({ queryKey: ["contents", projectId] });
-      setTitle("");
-      setBody("");
+      setTitle((prev) => (prev === payload.title ? "" : prev));
+      setBody((prev) => (prev === payload.body ? "" : prev));
     },
   });
 
@@ -75,11 +79,13 @@ export default function ProjectDetail() {
           platform: content.platform,
         }),
       }),
-    onSuccess: (job) => {
+    onSuccess: (job, content) => {
       qc.invalidateQueries({ queryKey: ["jobs"] });
+      // The endpoint is idempotent: it may replay an existing job, so report
+      // the content it belongs to rather than claiming a new job was created.
       setJobNotice({
         kind: "ok",
-        text: `已创建发布任务（${job.status}）`,
+        text: `已为「${content.title || "未命名内容"}」创建发布任务（${jobStatusLabel(job.status)}）`,
       });
     },
     onError: (err) => setJobNotice({ kind: "error", text: errorText(err) }),
@@ -144,7 +150,7 @@ export default function ProjectDetail() {
           )}
         </div>
         <span className="text-xs text-slate-500">
-          {project.data ? `状态：${project.data.status}` : ""}
+          {project.data ? `状态：${projectStatusLabel(project.data.status)}` : ""}
         </span>
       </div>
 
@@ -300,88 +306,94 @@ export default function ProjectDetail() {
               )}
             </p>
           )}
-          {contents.data?.map((content) => (
-            <article
-              key={content.id}
-              className="rounded-xl border border-slate-800 bg-slate-900 p-4"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div>
-                  <h3 className="font-medium">
-                    {content.title || "未命名内容"}
-                  </h3>
-                  <p className="mt-1 text-xs text-slate-500">
-                    {platformLabel(content.platform)} · {content.kind} ·{" "}
-                    {content.status} · v{content.current_version}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
-                    onClick={() =>
-                      setOpenVersions(
-                        openVersions === content.id ? "" : content.id,
-                      )
-                    }
-                  >
-                    {openVersions === content.id ? "收起版本" : "查看版本"}
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium disabled:opacity-50"
-                    disabled={
-                      createJob.isPending || content.current_version < 1
-                    }
-                    title={
-                      content.current_version < 1
-                        ? "内容还没有版本，无法发布"
-                        : undefined
-                    }
-                    onClick={() => {
-                      setJobNotice(null);
-                      createJob.mutate(content);
-                    }}
-                  >
-                    {createJob.isPending ? "创建中…" : "创建发布任务"}
-                  </button>
-                </div>
-              </div>
-
-              {openVersions === content.id && (
-                <div className="mt-4 space-y-2 border-t border-slate-800 pt-3">
-                  {versions.isLoading && (
-                    <p className="text-sm text-slate-400">版本加载中…</p>
-                  )}
-                  {versions.isError && (
-                    <p className="text-sm text-red-400">
-                      {errorText(versions.error)}
+          {contents.data?.map((content) => {
+            const pending =
+              createJob.isPending && createJob.variables?.id === content.id;
+            return (
+              <article
+                key={content.id}
+                className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="font-medium">
+                      {content.title || "未命名内容"}
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {platformLabel(content.platform)} ·{" "}
+                      {contentKindLabel(content.kind)} ·{" "}
+                      {contentStatusLabel(content.status)} · v
+                      {content.current_version}
                     </p>
-                  )}
-                  {versions.data?.items.map((version) => (
-                    <div
-                      key={version.id}
-                      className="rounded border border-slate-800 bg-slate-950 p-3 text-sm"
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
+                      onClick={() =>
+                        setOpenVersions(
+                          openVersions === content.id ? "" : content.id,
+                        )
+                      }
                     >
-                      <p className="flex flex-wrap gap-x-3 text-xs text-slate-500">
-                        <span>v{version.version}</span>
-                        <span>来源：{version.source}</span>
-                      </p>
-                      <p className="mt-1 font-medium">
-                        {version.title || "无标题"}
-                      </p>
-                      <p className="mt-1 whitespace-pre-wrap text-slate-300">
-                        {version.body || "（空正文）"}
-                      </p>
-                    </div>
-                  ))}
-                  {versions.isSuccess && versions.data.items.length === 0 && (
-                    <p className="text-sm text-slate-400">暂无版本。</p>
-                  )}
+                      {openVersions === content.id ? "收起版本" : "查看版本"}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                      disabled={
+                        createJob.isPending || content.current_version < 1
+                      }
+                      title={
+                        content.current_version < 1
+                          ? "内容还没有版本，无法发布"
+                          : undefined
+                      }
+                      onClick={() => {
+                        setJobNotice(null);
+                        createJob.mutate(content);
+                      }}
+                    >
+                      {pending ? "创建中…" : "创建发布任务"}
+                    </button>
+                  </div>
                 </div>
-              )}
-            </article>
-          ))}
+
+                {openVersions === content.id && (
+                  <div className="mt-4 space-y-2 border-t border-slate-800 pt-3">
+                    {versions.isLoading && (
+                      <p className="text-sm text-slate-400">版本加载中…</p>
+                    )}
+                    {versions.isError && (
+                      <p className="text-sm text-red-400">
+                        {errorText(versions.error)}
+                      </p>
+                    )}
+                    {versions.data?.items.map((version) => (
+                      <div
+                        key={version.id}
+                        className="rounded border border-slate-800 bg-slate-950 p-3 text-sm"
+                      >
+                        <p className="flex flex-wrap gap-x-3 text-xs text-slate-500">
+                          <span>v{version.version}</span>
+                          <span>来源：{version.source}</span>
+                        </p>
+                        <p className="mt-1 font-medium">
+                          {version.title || "无标题"}
+                        </p>
+                        <p className="mt-1 whitespace-pre-wrap text-slate-300">
+                          {version.body || "（空正文）"}
+                        </p>
+                      </div>
+                    ))}
+                    {versions.isSuccess && versions.data.items.length === 0 && (
+                      <p className="text-sm text-slate-400">暂无版本。</p>
+                    )}
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </section>
       </div>
     </div>

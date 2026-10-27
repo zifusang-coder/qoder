@@ -172,6 +172,77 @@ export function isManualExportPlatform(platform: string): boolean {
   return MANUAL_EXPORT_PLATFORMS.some((value) => value === platform);
 }
 
+export type JobActionKind = "precheck" | "approve" | "execute" | "export";
+
+export function actionFor(
+  job: Job,
+): { action: JobActionKind; label: string } | null {
+  if (job.status === "draft" || job.status === "precheck_failed") {
+    return { action: "precheck", label: "发布前检查" };
+  }
+  if (job.status === "awaiting_review") {
+    return { action: "approve", label: "人工通过" };
+  }
+  if (job.status === "approved") {
+    if (job.platform === "wechat") {
+      return { action: "execute", label: "发布到公众号草稿" };
+    }
+    if (isManualExportPlatform(job.platform)) {
+      return { action: "export", label: "导出素材包" };
+    }
+  }
+  return null;
+}
+
+export const JOB_STATUS_LABELS: Record<string, string> = {
+  draft: "草稿",
+  prechecking: "检查中",
+  precheck_failed: "检查未通过",
+  awaiting_review: "待人工审核",
+  approved: "已通过审核",
+  exporting: "导出中",
+  exported: "已导出",
+  export_failed: "导出失败",
+  publishing: "发布中",
+  published: "已发布",
+  publish_failed: "发布失败",
+  cancelled: "已取消",
+};
+
+export function jobStatusLabel(status: string): string {
+  return JOB_STATUS_LABELS[status] ?? status;
+}
+
+export const PROJECT_STATUS_LABELS: Record<string, string> = {
+  draft: "草稿",
+  active: "进行中",
+  archived: "已归档",
+};
+
+export function projectStatusLabel(status: string): string {
+  return PROJECT_STATUS_LABELS[status] ?? status;
+}
+
+export const CONTENT_STATUS_LABELS: Record<string, string> = {
+  draft: "草稿",
+  published: "已发布",
+  archived: "已归档",
+};
+
+export function contentStatusLabel(status: string): string {
+  return CONTENT_STATUS_LABELS[status] ?? status;
+}
+
+export const CONTENT_KIND_LABELS: Record<string, string> = {
+  article: "文章",
+  note: "笔记",
+  video: "视频",
+};
+
+export function contentKindLabel(kind: string): string {
+  return CONTENT_KIND_LABELS[kind] ?? kind;
+}
+
 export function errorText(err: unknown): string {
   if (!(err instanceof Error) || !err.message) return "请求失败";
   const detail: unknown = "detail" in err ? err.detail : undefined;

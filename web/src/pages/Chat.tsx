@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 
 export default function Chat() {
   return (
-    <main className="mx-auto flex h-screen max-w-3xl flex-col p-6">
+    <section className="mx-auto flex h-[calc(100vh-9rem)] w-full max-w-3xl flex-col">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">运营助手</h1>
         <Link className="text-sm text-indigo-400" to="/settings">
@@ -24,6 +24,6 @@ export default function Chat() {
           发送
         </button>
       </div>
-    </main>
+    </section>
   );
 }

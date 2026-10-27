@@ -2,58 +2,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../client";
 import {
+  actionFor,
   errorText,
-  isManualExportPlatform,
+  jobStatusLabel,
   platformLabel,
   type Job,
+  type JobActionKind,
   type JobList,
   type PrecheckResult,
 } from "../types";
-
-type JobActionKind = "precheck" | "approve" | "execute" | "export";
 
 type JobAction = { job: Job; action: JobActionKind };
 
 type ActionResult = { action: JobActionKind; passed?: boolean };
 
 type Feedback = { jobId: string; kind: "ok" | "warn" | "error"; text: string };
-
-const STATUS_LABELS: Record<string, string> = {
-  draft: "草稿",
-  prechecking: "检查中",
-  precheck_failed: "检查未通过",
-  awaiting_review: "待人工审核",
-  approved: "已通过审核",
-  exporting: "导出中",
-  exported: "已导出",
-  export_failed: "导出失败",
-  publishing: "发布中",
-  published: "已发布",
-  publish_failed: "发布失败",
-  cancelled: "已取消",
-};
-
-function statusLabel(status: string): string {
-  return STATUS_LABELS[status] ?? status;
-}
-
-function actionFor(job: Job): { action: JobActionKind; label: string } | null {
-  if (job.status === "draft" || job.status === "precheck_failed") {
-    return { action: "precheck", label: "发布前检查" };
-  }
-  if (job.status === "awaiting_review") {
-    return { action: "approve", label: "人工通过" };
-  }
-  if (job.status === "approved") {
-    if (job.platform === "wechat") {
-      return { action: "execute", label: "发布到公众号草稿" };
-    }
-    if (isManualExportPlatform(job.platform)) {
-      return { action: "export", label: "导出素材包" };
-    }
-  }
-  return null;
-}
 
 function successText(result: ActionResult): string {
   if (result.action === "precheck") {
@@ -153,7 +116,7 @@ export default function Publish() {
                     </span>
                   </h2>
                   <p className="mt-1 text-xs text-slate-500">
-                    状态：{statusLabel(job.status)} · 创建于{" "}
+                    状态：{jobStatusLabel(job.status)} · 创建于{" "}
                     {formatTime(job.created_at)}
                   </p>
                 </div>

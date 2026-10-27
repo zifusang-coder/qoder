@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../client";
 import {
   errorText,
+  projectStatusLabel,
   type ProfileList,
   type Project,
   type ProjectList,
@@ -39,12 +40,14 @@ export default function Projects() {
         method: "POST",
         body: JSON.stringify(payload),
       }),
-    onSuccess: (project) => {
+    onSuccess: (project, payload) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
       setCreatedId(project.id);
-      setTitle("");
-      setTopic("");
-      setProfileId("");
+      setTitle((prev) => (prev === payload.title ? "" : prev));
+      setTopic((prev) => (prev === payload.topic ? "" : prev));
+      setProfileId((prev) =>
+        prev === (payload.profile_id ?? "") ? "" : prev,
+      );
       setMessage({ kind: "ok", text: `已创建项目「${project.title}」` });
     },
     onError: () => setMessage(null),
@@ -118,6 +121,9 @@ export default function Projects() {
             ))}
           </select>
         </label>
+        {profiles.isError && (
+          <p className="text-xs text-red-400">{errorText(profiles.error)}</p>
+        )}
         <div className="flex items-end">
           <button
             className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
@@ -169,7 +175,7 @@ export default function Projects() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-medium">{project.title}</span>
               <span className="text-xs text-slate-500">
-                {project.status}
+                {projectStatusLabel(project.status)}
               </span>
             </div>
             <p className="mt-1 text-sm text-slate-400">

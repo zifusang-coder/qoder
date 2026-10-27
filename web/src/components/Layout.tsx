@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { setToken } from "../client";
 
@@ -12,8 +13,11 @@ const NAV_ITEMS = [
 
 export default function Layout() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   function logout() {
+    // Drop cached data from the previous session so the next login starts clean.
+    queryClient.clear();
     setToken(null);
     navigate("/login", { replace: true });
   }

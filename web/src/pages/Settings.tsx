@@ -97,7 +97,7 @@ export default function Settings() {
   }
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 p-8">
+    <section className="mx-auto max-w-3xl space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">系统设置</h1>
         <Link className="text-sm text-indigo-400" to="/chat">
@@ -242,6 +242,6 @@ export default function Settings() {
           </div>
         ))}
       </section>
-    </main>
+    </section>
   );
 }

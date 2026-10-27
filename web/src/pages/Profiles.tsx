@@ -22,11 +22,38 @@ const EMPTY_FORM = {
 };
 
 function splitList(value: string): string[] {
-  return value
-    .split(/[,，]/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .slice(0, 20);
+  return [
+    ...new Set(
+      value
+        .split(/[,，]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ].slice(0, 20);
+}
+
+function sameList(raw: string, values: string[]): boolean {
+  const current = splitList(raw);
+  return (
+    current.length === values.length &&
+    current.every((value, index) => value === values[index])
+  );
+}
+
+function formMatchesPayload(
+  form: typeof EMPTY_FORM,
+  payload: ProfilePayload,
+): boolean {
+  return (
+    form.name === payload.name &&
+    form.account_name === payload.account_name &&
+    form.positioning === payload.positioning &&
+    form.audience === payload.audience &&
+    form.tone === payload.tone &&
+    sameList(form.taboos, payload.taboos) &&
+    sameList(form.goals, payload.goals) &&
+    sameList(form.platform_focus, payload.platform_focus)
+  );
 }
 
 export default function Profiles() {
@@ -61,27 +88,42 @@ export default function Profiles() {
         method: "POST",
         body: JSON.stringify(payload),
       }),
-    onSuccess: (profile) => {
+    onSuccess: (profile, payload) => {
+      // Insert the new profile optimistically so `selected` resolves before
+      // the list refetch finishes.
+      qc.setQueryData<ProfileList>(["profiles"], (old) =>
+        old
+          ? {
+              ...old,
+              items: [profile, ...old.items.filter((p) => p.id !== profile.id)],
+            }
+          : { items: [profile] },
+      );
       qc.invalidateQueries({ queryKey: ["profiles"] });
       setSelectedId(profile.id);
-      setForm(EMPTY_FORM);
+      setForm((prev) => (formMatchesPayload(prev, payload) ? EMPTY_FORM : prev));
       setFormMessage("");
     },
   });
 
   const addMemory = useMutation({
     mutationFn: (payload: {
+      profileId: string;
       content: string;
       kind: string;
       weight: number;
     }) =>
-      api<ProfileMemory>(`/profiles/${profileId}/memories`, {
+      api<ProfileMemory>(`/profiles/${payload.profileId}/memories`, {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          content: payload.content,
+          kind: payload.kind,
+          weight: payload.weight,
+        }),
       }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["memories", profileId] });
-      setMemoryContent("");
+    onSuccess: (_memory, vars) => {
+      qc.invalidateQueries({ queryKey: ["memories", vars.profileId] });
+      setMemoryContent((prev) => (prev === vars.content ? "" : prev));
     },
   });
 
@@ -119,6 +161,7 @@ export default function Profiles() {
       return;
     }
     addMemory.mutate({
+      profileId,
       content,
       kind: memoryKind.trim() || "insight",
       weight,
@@ -417,9 +460,9 @@ function Chips({ label, values }: { label: string; values: string[] }) {
     <div className="text-sm">
       <p className="text-xs text-slate-500">{label}</p>
       <div className="mt-1 flex flex-wrap gap-1">
-        {values.map((value) => (
+        {values.map((value, index) => (
           <span
-            key={value}
+            key={`${value}-${index}`}
             className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300"
           >
             {value}
