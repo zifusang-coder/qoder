@@ -1,10 +1,12 @@
+import logging
 import uuid
-from typing import Literal
+from typing import Annotated, Literal
 
 from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -16,14 +18,18 @@ from app.security import decrypt_secret, encrypt_secret
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+logger = logging.getLogger(__name__)
+
 ProviderKind = Literal["openai_compatible", "anthropic"]
 
 
 class ProviderIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     kind: ProviderKind = "openai_compatible"
-    base_url: str
-    api_key: str = Field(min_length=8)
+    base_url: str = Field(max_length=500)
+    api_key: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=8, max_length=512)
+    ]
     tiers: dict[str, str] = Field(default_factory=dict)
     is_default: bool = False
 
@@ -53,8 +59,9 @@ def _mask(key: str) -> str:
 def _to_out(provider: LLMProvider) -> ProviderOut:
     try:
         masked = _mask(decrypt_secret(provider.api_key_enc))
-    except InvalidToken:
+    except (InvalidToken, UnicodeDecodeError):
         # MASTER_KEY 轮换后旧密文无法解密，只降级展示，绝不泄露密文或明文
+        logger.warning("api_key_decrypt_failed provider_id=%s", provider.id)
         masked = "****"
     return ProviderOut(
         id=str(provider.id),
@@ -107,7 +114,11 @@ async def create_provider(
         is_default=payload.is_default,
     )
     session.add(provider)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise AppError("default_conflict", "默认提供商冲突，请重试", 409) from None
     await session.refresh(provider)
     return _to_out(provider)
 
