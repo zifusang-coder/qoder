@@ -1,0 +1,28 @@
+id: wechat-article
+name: 公众号长文
+version: "0.1.0"
+layer: produce
+description: 按大纲写出结构完整的公众号文章，适配手机阅读节奏
+inputs:
+  type: object
+  required: [topic, outline]
+  properties:
+    topic:
+      type: string
+    outline:
+      type: string
+    materials:
+      type: string
+    target_length:
+      type: integer
+      default: 1800
+context:
+  profile: true
+  references: []
+outputs:
+  format: markdown
+llm:
+  tier: premium
+  temperature: 0.7
+tools: [llm]
+cost_estimate_tokens: 6000

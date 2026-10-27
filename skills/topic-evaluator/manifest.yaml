@@ -1,0 +1,44 @@
+id: topic-evaluator
+name: 选题评估
+version: "0.1.0"
+layer: discover
+description: 从受众匹配、时效性、差异化、可执行性四维评估选题并给出结论
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic:
+      type: string
+      description: 待评估的选题
+    platform:
+      type: string
+      description: 目标平台，如 wechat/xiaohongshu/douyin
+    background:
+      type: string
+      description: 补充背景或已有素材
+context:
+  profile: true
+  references: []
+outputs:
+  format: json
+  schema:
+    type: object
+    required: [score, verdict, reasons, angles]
+    properties:
+      score:
+        type: number
+      verdict:
+        type: string
+      reasons:
+        type: array
+        items:
+          type: string
+      angles:
+        type: array
+        items:
+          type: string
+llm:
+  tier: standard
+  temperature: 0.4
+tools: [llm]
+cost_estimate_tokens: 1200
