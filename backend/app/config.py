@@ -1,9 +1,16 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
+_DEV_DEFAULTS = {
+    "jwt_secret": "dev-only-change-me",
+    "master_key": "dev-only-master-key-change-me",
+    "admin_password": "admin12345",
+}
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 ROOT_DIR = BACKEND_DIR.parent
@@ -24,6 +31,17 @@ class Settings(BaseSettings):
     skills_dir: Path = ROOT_DIR / "skills"
     outputs_dir: Path = ROOT_DIR / "outputs"
     cors_origins: str = "http://localhost:5173"
+
+    @model_validator(mode="after")
+    def _reject_dev_secrets_outside_dev(self) -> "Settings":
+        if self.env == "dev":
+            return self
+        insecure = [
+            name for name, default in _DEV_DEFAULTS.items() if getattr(self, name) == default
+        ]
+        if insecure:
+            raise ValueError(f"非 dev 环境必须覆盖默认密钥: {', '.join(insecure)}")
+        return self
 
 
 @lru_cache
