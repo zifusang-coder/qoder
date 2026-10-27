@@ -1,5 +1,7 @@
+import asyncio
 import io
 import json
+import threading
 import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
@@ -28,6 +30,18 @@ def storage(tmp_path):
         yield instance
     finally:
         app.dependency_overrides.pop(get_storage, None)
+
+
+class BlockingStorage(Storage):
+    def __init__(self, root):
+        super().__init__(root)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def save_bytes(self, project_id, relpath, data):
+        self.started.set()
+        assert self.release.wait(10)
+        return super().save_bytes(project_id, relpath, data)
 
 
 async def _create_job(
@@ -103,8 +117,8 @@ async def test_export_creates_zip(client, db_session, storage):
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "exported"
-    assert body["export_path"].startswith("exports/")
-    assert body["export_path"].endswith(".zip")
+    assert body["export_path"].startswith("exports/xiaohongshu-")
+    assert body["export_path"].endswith("-v1.zip")
     assert "tenant_id" not in body
 
     path = storage.root / project["id"] / body["export_path"]
@@ -289,6 +303,77 @@ async def test_export_resumes_stale_export(client, db_session, storage):
     body = response.json()
     assert body["status"] == "exported"
     assert (storage.root / project["id"] / body["export_path"]).is_file()
+
+
+async def test_export_second_call_while_in_flight_returns_409(
+    client, db_session, storage
+):
+    from app.main import app
+
+    _, _, job = await _create_job(client)
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == uuid.UUID(job["id"]))
+        .values(
+            status="exporting",
+            error=EXPORT_IN_FLIGHT_MESSAGE,
+            updated_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+    )
+    await db_session.commit()
+
+    blocking = BlockingStorage(storage.root)
+    app.dependency_overrides[get_storage] = lambda: blocking
+
+    first = asyncio.create_task(_export(client, job["id"]))
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5
+    while not blocking.started.is_set():
+        assert loop.time() < deadline, "导出未在超时前开始"
+        await asyncio.sleep(0.01)
+    try:
+        second = await asyncio.wait_for(_export(client, job["id"]), timeout=5)
+    finally:
+        blocking.release.set()
+    assert second.status_code == 409
+    assert second.json()["code"] == "export_in_progress"
+
+    done = await first
+    assert done.status_code == 200
+    assert done.json()["status"] == "exported"
+
+
+async def test_export_tolerates_failure_after_commit(
+    client, db_session, storage, monkeypatch
+):
+    import app.services.publish as publish_service
+
+    original = publish_service.apply_action
+
+    async def after_commit_failure(session, job_id, action, **kwargs):
+        result = await original(session, job_id, action, **kwargs)
+        if action == "export_done":
+            raise RuntimeError("refresh failed after commit")
+        return result
+
+    monkeypatch.setattr(publish_service, "apply_action", after_commit_failure)
+
+    project, _, job = await _create_job(client)
+    response = await _export(client, job["id"])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "exported"
+
+    zips = list(storage.root.rglob("*.zip"))
+    assert len(zips) == 1
+    assert list(storage.root.rglob("*.tmp")) == []
+
+    stored = await _stored_job(db_session, job["id"])
+    assert stored.status == "exported"
+    assert stored.export_path
+    referenced = storage.root / project["id"] / stored.export_path
+    assert referenced.is_file()
+    assert referenced == zips[0]
 
 
 async def test_export_discards_bundle_when_finish_transition_fails(

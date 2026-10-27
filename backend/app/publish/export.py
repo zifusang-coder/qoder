@@ -8,8 +8,6 @@ from app.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-MANUAL_EXPORT_PLATFORMS = frozenset({"xiaohongshu", "zhihu", "kuaishou", "channels"})
-
 GUIDES: dict[str, list[str]] = {
     "xiaohongshu": [
         "打开小红书 App，点击「+」创建新笔记",
@@ -36,6 +34,8 @@ GUIDES: dict[str, list[str]] = {
         "确认可见范围后发表",
     ],
 }
+
+MANUAL_EXPORT_PLATFORMS = frozenset(GUIDES)
 
 
 def _guide_markdown(steps: list[str]) -> str:
@@ -83,9 +83,7 @@ class ExportAdapter:
             archive.writestr("publish_guide.md", _guide_markdown(checklist))
 
         job_hex = str(job_id).replace("-", "")
-        relpath = (
-            f"exports/{platform}-{exported_at:%Y%m%d%H%M%S}-{job_hex}-v{content_version}.zip"
-        )
+        relpath = f"exports/{platform}-{job_hex}-v{content_version}.zip"
         return self.storage.save_bytes(project_id, relpath, buffer.getvalue())
 
     def discard(self, project_id: str, relpath: str) -> None:

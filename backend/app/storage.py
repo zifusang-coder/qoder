@@ -1,4 +1,5 @@
 import os
+import uuid
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,7 +14,7 @@ class Storage:
     def __init__(self, root: Path):
         self.root = root.resolve()
 
-    def project_dir(self, project_id: str) -> Path:
+    def _project_path(self, project_id: str, *, create: bool) -> Path:
         if (
             not project_id
             or project_id in {".", ".."}
@@ -28,15 +29,21 @@ class Storage:
             raise StorageError("非法项目路径") from None
         if not path.is_relative_to(self.root):
             raise StorageError("非法项目路径")
-        path.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def resolve(self, project_id: str, relpath: str) -> Path:
+    def project_dir(self, project_id: str) -> Path:
+        return self._project_path(project_id, create=True)
+
+    def resolve(
+        self, project_id: str, relpath: str, *, create: bool = True
+    ) -> Path:
         if not relpath or not relpath.strip():
             raise StorageError("非法文件路径")
         if Path(relpath).is_absolute():
             raise StorageError("非法文件路径")
-        base = self.project_dir(project_id)
+        base = self._project_path(project_id, create=create)
         try:
             path = (base / relpath).resolve()
         except (ValueError, OSError):
@@ -54,7 +61,7 @@ class Storage:
     def save_bytes(self, project_id: str, relpath: str, data: bytes) -> str:
         path = self.resolve(project_id, relpath)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             tmp.write_bytes(data)
             os.replace(tmp, path)
@@ -64,7 +71,7 @@ class Storage:
         return str(path.relative_to(self.project_dir(project_id)))
 
     def delete(self, project_id: str, relpath: str) -> None:
-        self.resolve(project_id, relpath).unlink(missing_ok=True)
+        self.resolve(project_id, relpath, create=False).unlink(missing_ok=True)
 
     def read_text(self, project_id: str, relpath: str) -> str:
         return self.resolve(project_id, relpath).read_text(encoding="utf-8")
@@ -72,7 +79,9 @@ class Storage:
     def list_files(self, project_id: str) -> list[str]:
         base = self.project_dir(project_id)
         return sorted(
-            str(p.relative_to(base)) for p in base.rglob("*") if p.is_file()
+            str(p.relative_to(base))
+            for p in base.rglob("*")
+            if p.is_file() and not p.name.endswith(".tmp")
         )
 
 

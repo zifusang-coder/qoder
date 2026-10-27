@@ -402,6 +402,8 @@ async def export_job(
         if job.error == EXPORT_IN_FLIGHT_MESSAGE and age < EXPORT_LEASE_SECONDS:
             raise AppError("export_in_progress", "导出进行中，请稍后刷新", 409)
         job.error = EXPORT_IN_FLIGHT_MESSAGE
+        # 显式续租：只改 error 时值未变不会触发 UPDATE，updated_at 不会刷新
+        job.updated_at = datetime.now(UTC)
         await session.commit()
     else:
         job = await apply_action(
@@ -413,10 +415,11 @@ async def export_job(
             fields={"error": EXPORT_IN_FLIGHT_MESSAGE, "export_path": ""},
         )
 
+    project_id = str(content.project_id)
     try:
         relpath = await asyncio.to_thread(
             lambda: exporter.export(
-                project_id=str(content.project_id),
+                project_id=project_id,
                 platform=job.platform,
                 job_id=str(job.id),
                 content_id=str(content.id),
@@ -452,12 +455,23 @@ async def export_job(
             fields={"export_path": relpath, "error": ""},
         )
     except Exception:
-        logger.exception("导出完成状态写入失败 job=%s", job.id)
-        exporter.discard(str(content.project_id), relpath)
+        logger.exception("导出完成状态写入失败 job=%s", job_id)
+        await session.rollback()
+        # commit 已成功但后续 refresh/ack 失败时不能误删有效产物
+        current = (
+            await session.execute(
+                select(PublishJob)
+                .where(PublishJob.id == job_id, PublishJob.tenant_id == tenant_id)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if current is not None and current.status == "exported":
+            return current
+        exporter.discard(project_id, relpath)
         try:
             await apply_action(
                 session,
-                job.id,
+                job_id,
                 "fail",
                 tenant_id=tenant_id,
                 actor=actor,
@@ -465,6 +479,6 @@ async def export_job(
                 fields={"error": EXPORT_FAILED_MESSAGE},
             )
         except Exception:
-            logger.exception("导出失败状态写入失败 job=%s", job.id)
+            logger.exception("导出失败状态写入失败 job=%s", job_id)
             await session.rollback()
         raise AppError("export_failed", EXPORT_FAILED_MESSAGE, 500) from None
