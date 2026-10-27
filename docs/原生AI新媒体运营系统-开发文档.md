@@ -368,6 +368,14 @@ exported / published: 终态
 - 安全:凭据与 access_token 不入响应与日志;httpx/httpcore 日志级别固定 WARNING;失败落库再失败只记录任务 id。
 - 遗留:进程崩溃导致 `publishing` 悬挂的对账恢复在 Task 1.16 实现;超时重试可能产生重复草稿,恢复流程需人工确认。
 
+#### 4.4.6 手动导出(Task 1.15 已落地)
+
+- 适用平台:小红书 / 知乎 / 快手 / 视频号;接口 `POST /publish/jobs/{id}/export`,可从 `draft` / `awaiting_review` / `approved` 发起;其他平台返回 409 `export_unsupported`。
+- 产物:确定性 ZIP(`manifest.json` / `content.md` / `publish_guide.md`),路径 `exports/{platform}-{job_id}-v{version}.zip`,始终固定任务创建时的内容版本,后续新增版本不影响已创建的导出任务。
+- 并发与幂等:导出前持久提交 `exporting` 与租约标记再执行 I/O;60 秒内的重复请求返回 409 `export_in_progress`;已 `exported` 的任务重复导出幂等返回 200;陈旧租约可恢复,重试原子覆盖同一路径。
+- 失败:导出失败落 `export_failed`,返回 500 `导出失败，请稍后重试`,原始异常只进日志;写库竞态下若另一路径已完成导出,返回真实成功结果。
+- 边界:`exported` 仅表示已生成人工发布包,不等于已发布;系统不提供绕过人工审核的自动发布路径。
+
 ### 4.5 归因与画像回写
 
 - **数据采集**:
@@ -453,7 +461,7 @@ exported / published: 终态
 | 内容 | `GET/POST /contents` `GET/PATCH /contents/{id}` `POST /contents/{id}/versions` `POST /contents/{id}/repurpose` | 多平台改写 |
 | 技能 | `GET /skills` `POST /skills/{id}/run` `POST /skills/{id}/run/stream`(SSE) `GET /skill-runs` | 执行与审计 |
 | 对话 | `POST /conversations` `GET /conversations/{id}/messages` `POST /chat/stream`(SSE) | 受控 Agent 入口 |
-| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing` |
+| 发布 | `POST /publish/jobs` `GET /publish/jobs` `GET /publish/jobs/{id}` `PATCH /publish/jobs/{id}/schedule` `POST /publish/jobs/{id}/actions` `POST /publish/jobs/{id}/precheck`(Task 1.13 已落地) `POST /publish/jobs/{id}/execute`(Task 1.14 已落地,仅公众号) `POST /publish/jobs/{id}/export`(Task 1.15 已落地,手动导出四平台) | 状态机驱动;precheck 报告写入任务 `checks`;用户动作仅 `approve` / `reject` / `cancel` / `retry`,`submit` 由 precheck 内部调用;执行前先落 `publishing` |
 | 账号 | `GET/POST /accounts` `PATCH/DELETE /accounts/{id}` | 公众号 AppID/Secret 绑定;凭据加密落库、响应仅掩码;DELETE 为软停用 |
 | 归因 | `POST /analytics/import` `GET /analytics/snapshots` `POST /content/{id}/postmortem` | 手动/CSV 导入 + 复盘 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
