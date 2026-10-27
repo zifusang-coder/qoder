@@ -15,10 +15,9 @@ from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
-from app.models.profile import Profile, ProfileMemory
 from app.models.skill import SkillSetting
 from app.models.user import User
-from app.services.profiles import build_profile_block
+from app.services.profiles import profile_block_for
 from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import LoadedSkill, ManifestError
@@ -95,27 +94,7 @@ def _registry_skill(registry: SkillRegistry, skill_id: str) -> LoadedSkill:
 async def _profile_block(
     session: AsyncSession, profile_id: uuid.UUID | None, user: User
 ) -> str:
-    if profile_id is None:
-        return ""
-    profile = (
-        await session.execute(
-            select(Profile).where(
-                Profile.id == profile_id,
-                Profile.tenant_id == user.tenant_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if profile is None:
-        raise AppError("not_found", "账号画像不存在", 404)
-    memories = (
-        await session.execute(
-            select(ProfileMemory).where(
-                ProfileMemory.tenant_id == user.tenant_id,
-                ProfileMemory.profile_id == profile.id,
-            )
-        )
-    ).scalars().all()
-    return build_profile_block(profile, list(memories))
+    return await profile_block_for(session, profile_id, user.tenant_id)
 
 
 def _validate_inputs(skill: LoadedSkill, inputs: dict) -> None:

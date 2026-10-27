@@ -1,3 +1,9 @@
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.errors import AppError
 from app.models.profile import Profile, ProfileMemory
 
 MAX_MEMORIES = 12
@@ -29,3 +35,29 @@ def build_profile_block(
         lines.extend(f"- {_escape(m.content)}" for m in top)
     lines.append(MARKER_CLOSE)
     return "\n".join(lines)
+
+
+async def profile_block_for(
+    session: AsyncSession, profile_id: uuid.UUID | None, tenant_id: str
+) -> str:
+    if profile_id is None:
+        return ""
+    profile = (
+        await session.execute(
+            select(Profile).where(
+                Profile.id == profile_id,
+                Profile.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if profile is None:
+        raise AppError("not_found", "账号画像不存在", 404)
+    memories = (
+        await session.execute(
+            select(ProfileMemory).where(
+                ProfileMemory.tenant_id == tenant_id,
+                ProfileMemory.profile_id == profile.id,
+            )
+        )
+    ).scalars().all()
+    return build_profile_block(profile, list(memories))
