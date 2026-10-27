@@ -5168,6 +5168,7 @@ git commit -m "feat: add skill listing, toggle, sync run and SSE endpoints"
 - Create: `skills/xhs-note/{manifest.yaml,prompt.md}`
 - Create: `skills/copywriting/{manifest.yaml,prompt.md}`
 - Create: `skills/title-hook/{manifest.yaml,prompt.md}`
+- Create: `backend/tests/test_builtin_skills.py`
 
 - [ ] **Step 1: 写 `skills/topic-evaluator`**
 
@@ -5199,18 +5200,23 @@ outputs:
   format: json
   schema:
     type: object
-    required: [score, verdict, reasons, angles]
+    required: [score, verdict, reasons]
     properties:
       score:
-        type: number
+        type: integer
+        minimum: 0
+        maximum: 100
       verdict:
         type: string
+        enum: [advance, revise, drop]
       reasons:
         type: array
+        maxItems: 3
         items:
           type: string
       angles:
         type: array
+        maxItems: 3
         items:
           type: string
 llm:
@@ -5235,9 +5241,9 @@ cost_estimate_tokens: 1200
 - score：总分 0-100，整数
 - verdict：advance / revise / drop 之一
 - reasons：3 条以内理由，每条不超过 40 字
-- angles：若建议推进，给出 2-3 个可执行切入角度
+- angles：建议推进时给出 2-3 个可执行切入角度；revise/drop 时可省略
 
-分数低于 60 时 verdict 必须是 revise 或 drop。不要输出 Markdown 代码块之外的解释。
+分数低于 60 时 verdict 必须是 revise 或 drop。不要输出 JSON 以外的任何内容。
 ```
 
 - [ ] **Step 2: 写 `skills/article-outline`**
@@ -5279,7 +5285,7 @@ cost_estimate_tokens: 1500
 `prompt.md`：
 
 ```markdown
-你是公众号主编。为给定选题输出可直接写作的大纲。
+你是公众号主编。为给定选题与目标平台输出可直接写作的大纲。
 
 要求：
 - 开头 3 行内给出钩子，必须具体到场景或冲突，禁止空泛提问。
@@ -5287,6 +5293,7 @@ cost_estimate_tokens: 1500
 - 每个分论点标注建议字数，合计接近目标字数。
 - 结尾给一个明确行动建议，不要喊口号。
 - 遵守账号画像中的语气与禁区。
+未提供 platform 时按 wechat；未提供 target_length 时按 1800 字。
 
 输出 Markdown，使用二级标题分节，不要写正文全文。
 ```
@@ -5334,7 +5341,8 @@ cost_estimate_tokens: 6000
 写作要求：
 - 段落短，单段不超过 4 行，适配手机阅读。
 - 每个观点都要落到具体场景、数据或操作步骤，不写正确的废话。
-- 不编造具体数字、案例与人名；不确定的信息用「据公开报道」并说明需核实。
+- 按 target_length 控制全文长度；未提供时约 1800 字。
+- 不编造具体数字、案例与人名；不确定的信息明确标注「未核实」，并省略具体数字与案例。
 - 不使用「首先/其次/最后」这类模板连接词。
 - 遵守账号画像的语气与禁区。
 
@@ -5384,9 +5392,10 @@ cost_estimate_tokens: 2000
 2. 正文：开头 2 行讲清「谁在什么场景遇到什么问题」；中段给 3-5 条可执行做法；结尾一句轻量互动。
 3. 配图建议：3-6 张，逐张说明画面与图上文字。
 4. 标签：5-8 个，混合大词与长尾词。
+风格：按用户提供的 style 调整语气；未提供时按经验分享。
 
 限制：
-- 全文不超过 600 字。
+- 正文不超过 600 字（配图建议与标签不计入）。
 - 少用感叹号，不使用「家人们」「绝绝子」等过时口头禅。
 - 不虚构亲测效果，不出现医疗、收益承诺。
 ```
@@ -5430,21 +5439,22 @@ cost_estimate_tokens: 1500
 `prompt.md`：
 
 ```markdown
-你是短视频编导兼文案。按目标平台特性输出可直接拍摄的文案。
+你是短视频编导兼文案。按目标平台特性输出可直接使用的内容。
 
-输出结构：
+通用要求：
 - 前 3 秒钩子：一句能让人停下滑动的话，不夸张承诺。
-- 口播正文：按 `时长 × 每分钟 220 字` 控制长度；每句尽量短。
-- 画面提示：在关键句后用括号标注镜头或字幕建议。
+- 口播正文：按 `duration_seconds / 60 × 220` 字控制长度（如 60 秒约 220 字）；每句尽量短。
+- 画面提示：在关键句后用括号标注镜头或字幕建议（zhihu 不需要）。
 - 结尾：一个具体动作引导，避免「点赞关注」式空话。
 
 平台差异：
 - douyin/kuaishou：节奏快，先给结果再解释。
 - channels：语速稍缓，强调可信与熟人感。
-- zhihu：先给结论与边界，再展开论证。
+- zhihu：输出纯文字回答开头，先给结论与边界，再展开论证；不要口播标注或画面提示。
 - bilibili：允许更完整的背景铺垫与章节感。
 
-只输出文案，不写创作说明。
+未提供 duration_seconds 时按 60 秒；未提供 key_points 时从主题中提炼 3 个要点。
+只输出内容，不写创作说明。
 ```
 
 - [ ] **Step 6: 写 `skills/title-hook`**
@@ -5474,6 +5484,24 @@ context:
   references: []
 outputs:
   format: json
+  schema:
+    type: object
+    required: [titles]
+    properties:
+      titles:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          required: [text, style, reason]
+          properties:
+            text:
+              type: string
+            style:
+              type: string
+              enum: [信息型, 故事型, 反常识型, 清单型]
+            reason:
+              type: string
 llm:
   tier: fast
   temperature: 0.9
@@ -5489,12 +5517,14 @@ cost_estimate_tokens: 800
 只输出 JSON：
 {
   "titles": [
-    {"text": "标题", "style": "信息型/故事型/反常识型/清单型", "reason": "为什么适合该平台，20 字以内"}
+    {"text": "标题", "style": "信息型", "reason": "为什么适合该平台，20 字以内"}
   ]
 }
 
 要求：
-- 数量等于 count，风格尽量分散。
+- 数量等于 count；未提供 count 时输出 8 条。
+- 未提供 platform 时按 wechat。
+- style 只能取：信息型 / 故事型 / 反常识型 / 清单型，且风格尽量分散。
 - 每个标题不超过 30 字，不使用「震惊」「必看」等违规词。
 - 不承诺收益、不制造焦虑、不虚假对比。
 - 同一批标题不得只有措辞差异。
@@ -5502,20 +5532,29 @@ cost_estimate_tokens: 800
 
 - [ ] **Step 7: 校验全部技能**
 
-Run: `cd /Users/tongxi/Desktop/新媒体运营系统 && python scripts/validate_skills.py`
+Run: `cd backend && uv run python ../scripts/validate_skills.py`
 Expected：`共加载 6 个技能，错误 0 个`
 
-- [ ] **Step 8: 人工冒烟**
+补充回归测试 `backend/tests/test_builtin_skills.py`：从仓库根 `skills/` 加载全部技能，断言 `errors == []` 且包含这 6 个 id（子集断言，避免与 Task 1.8 冲突）。
+
+- [ ] **Step 8: 人工冒烟（待配置 LLM 凭证后执行）**
 
 启动后端与前端，配置好 LLM 提供商后，在技能页依次执行 `topic-evaluator`（JSON）、`article-outline`、`xhs-note`。
 Expected：结构化技能返回可解析 JSON；文本技能无「写作说明」混入；输出符合账号画像语气。
 
+> 本次执行环境没有 LLM 提供商凭证，未执行该步；已完成 manifest/注册表校验与 191 个自动化测试。
+
 - [ ] **Step 9: 提交**
 
 ```bash
-git add skills
+git add skills backend/tests/test_builtin_skills.py
 git commit -m "feat: add first six creation skills"
 ```
+
+**落地说明：**
+- 提交序列：`7f82da4`（6 个技能文件）→ `7933eb2`（契约收紧：默认值回退、copywriting 时长公式与知乎形态、topic-evaluator 可选 angles、title-hook 输出 schema、内置技能加载测试）。
+- 默认值由 `jsonschema` 或执行器自动注入并不会发生，因此每个可选字段的默认值都在 prompt 中显式回退；`outputs.schema` 目前仅作为契约文档，执行器尚未校验模型输出（Task 1.8 起如需强校验再补）。
+- 最终：validator 6/6、`pytest` 191 passed、ruff 干净；人工 LLM 冒烟待凭证。
 
 ---
 
