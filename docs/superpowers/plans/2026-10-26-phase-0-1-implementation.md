@@ -3405,9 +3405,11 @@ Expected: `1 passed`
 - [ ] **Step 5: 提交**
 
 ```bash
-git add backend/app/services backend/tests/test_profile_block.py
+git add backend/app/services/profiles.py backend/tests/test_profile_block.py
 git commit -m "feat: build profile context block with marker escaping"
 ```
+
+实际提交：`2e39745`。验证结果：目标用例 1 passed，后端全量 138 passed，`uv run ruff check .` 通过。
 
 ---
 
