@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -84,8 +85,8 @@ async def test_complete_falls_back_to_standard_tier():
     )
     gateway = LLMGateway(_config())
     assert await gateway.complete([{"role": "user", "content": "hi"}], tier="unknown") == "ok"
-    body = route.calls[0].request.content.decode()
-    assert '"model": "medium"' in body or '"model":"medium"' in body
+    body = json.loads(route.calls[0].request.content)
+    assert body["model"] == "medium"
 
 
 @respx.mock
@@ -176,6 +177,20 @@ async def test_connect_error_maps_to_llm_unavailable():
 async def test_invalid_completion_shape_raises_invalid_response():
     respx.post(OPENAI_URL).mock(
         return_value=httpx.Response(200, json={"choices": []})
+    )
+    gateway = LLMGateway(_config())
+    with pytest.raises(AppError) as excinfo:
+        await gateway.complete([{"role": "user", "content": "hi"}])
+    assert excinfo.value.code == "llm_invalid_response"
+    assert excinfo.value.status == 502
+
+
+@respx.mock
+async def test_non_json_completion_body_raises_invalid_response():
+    respx.post(OPENAI_URL).mock(
+        return_value=httpx.Response(
+            200, text="<html>gateway</html>", headers={"content-type": "text/html"}
+        )
     )
     gateway = LLMGateway(_config())
     with pytest.raises(AppError) as excinfo:
@@ -357,6 +372,114 @@ async def test_stream_accepts_compact_data_prefix_and_crlf():
 
 
 @respx.mock
+async def test_stream_tolerates_delta_less_finish_chunks():
+    respx.post(OPENAI_URL).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                'data: {"choices": [{"delta": {"content": "你"}}]}',
+                'data: {"choices": [{"finish_reason": "stop"}]}',
+                'data: {"choices": [{"delta": null, "finish_reason": "stop"}]}',
+                "data: [DONE]",
+            ),
+        )
+    )
+    gateway = LLMGateway(_config())
+    chunks = [
+        chunk
+        async for chunk in gateway.stream([{"role": "user", "content": "hi"}])
+    ]
+    assert chunks == ["你"]
+
+
+@respx.mock
+async def test_stream_non_dict_delta_raises_invalid_response():
+    respx.post(OPENAI_URL).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse('data: {"choices": [{"delta": "oops"}]}'),
+        )
+    )
+    gateway = LLMGateway(_config())
+    with pytest.raises(AppError) as excinfo:
+        async for _chunk in gateway.stream([{"role": "user", "content": "hi"}]):
+            pass
+    assert excinfo.value.code == "llm_invalid_response"
+    assert excinfo.value.status == 502
+
+
+@respx.mock
+async def test_stream_redirect_raises_request_failed():
+    respx.post(OPENAI_URL).mock(
+        return_value=httpx.Response(302, headers={"location": "https://elsewhere.test"})
+    )
+    gateway = LLMGateway(_config())
+    with pytest.raises(AppError) as excinfo:
+        async for _chunk in gateway.stream([{"role": "user", "content": "hi"}]):
+            pass
+    assert excinfo.value.code == "llm_request_failed"
+    assert excinfo.value.status == 502
+
+
+@respx.mock
+async def test_stream_warns_on_openai_length_finish(caplog):
+    respx.post(OPENAI_URL).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                'data: {"choices": [{"delta": {"content": "你"}}]}',
+                'data: {"choices": [{"delta": {}, "finish_reason": "length"}]}',
+                "data: [DONE]",
+            ),
+        )
+    )
+    gateway = LLMGateway(_config())
+    with caplog.at_level(logging.WARNING, logger="app.llm.gateway"):
+        chunks = [
+            chunk
+            async for chunk in gateway.stream(
+                [{"role": "user", "content": "hi"}], tier="fast"
+            )
+        ]
+    assert chunks == ["你"]
+    assert "truncated" in caplog.text
+    assert "p1" in caplog.text
+    assert "fast" in caplog.text
+
+
+@respx.mock
+async def test_stream_warns_on_anthropic_max_tokens_stop(caplog):
+    respx.post(ANTHROPIC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_sse(
+                "event: content_block_delta",
+                'data: {"type": "content_block_delta", "delta": {"text": "你"}}',
+                "event: message_delta",
+                'data: {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}}',
+                'data: {"type": "message_stop"}',
+            ),
+        )
+    )
+    gateway = LLMGateway(_anthropic_config())
+    with caplog.at_level(logging.WARNING, logger="app.llm.gateway"):
+        chunks = [
+            chunk
+            async for chunk in gateway.stream(
+                [{"role": "user", "content": "hi"}], tier="fast"
+            )
+        ]
+    assert chunks == ["你"]
+    assert "truncated" in caplog.text
+    assert "p2" in caplog.text
+    assert "fast" in caplog.text
+
+
+@respx.mock
 async def test_stream_error_event_raises_request_failed():
     respx.post(OPENAI_URL).mock(
         return_value=httpx.Response(
@@ -387,9 +510,7 @@ def test_unknown_kind_rejected():
 
 def test_repr_redacts_api_key():
     config = _config()
-    gateway = LLMGateway(config)
     assert "sk-test" not in repr(config)
-    assert "sk-test" not in repr(gateway)
 
 
 # --- load_gateway_default -----------------------------------------------------

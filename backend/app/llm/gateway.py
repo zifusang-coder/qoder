@@ -66,7 +66,7 @@ class LLMGateway:
         return collapsed[:300]
 
     def _raise_for_upstream_error(self, response: httpx.Response) -> None:
-        if response.status_code < 400:
+        if response.is_success:
             return
         upstream = self._sanitize(response.text)
         detail = {"upstream": upstream} if upstream else None
@@ -202,7 +202,7 @@ class LLMGateway:
                     "POST", self.endpoint, headers=self._headers(), json=payload
                 ) as response,
             ):
-                if response.status_code >= 400:
+                if not response.is_success:
                     await response.aread()
                     self._raise_for_upstream_error(response)
                 yielded = False
@@ -228,6 +228,7 @@ class LLMGateway:
                             },
                         )
                     text = self._extract_delta(event)
+                    self._maybe_warn_truncation(event, tier)
                     if text:
                         yielded = True
                         yield text
@@ -237,6 +238,32 @@ class LLMGateway:
             raise AppError("llm_timeout", "LLM 请求超时", 504) from exc
         except httpx.RequestError as exc:
             raise AppError("llm_unavailable", "LLM 服务不可用", 502) from exc
+
+    def _maybe_warn_truncation(self, event: object, tier: str) -> None:
+        """Log when the provider stopped because the token budget ran out."""
+        if not isinstance(event, dict):
+            return
+        if self.config.kind == "anthropic":
+            if event.get("type") != "message_delta":
+                return
+            delta = event.get("delta")
+            if not isinstance(delta, dict):
+                return
+            truncated = delta.get("stop_reason") == "max_tokens"
+        else:
+            choices = event.get("choices")
+            if not isinstance(choices, list) or not choices:
+                return
+            first = choices[0]
+            if not isinstance(first, dict):
+                return
+            truncated = first.get("finish_reason") == "length"
+        if truncated:
+            logger.warning(
+                "LLM response truncated provider_id=%s tier=%s",
+                self.config.provider_id,
+                tier,
+            )
 
     def _extract_delta(self, event: dict) -> str | None:
         if not isinstance(event, dict):
@@ -260,6 +287,8 @@ class LLMGateway:
         if not isinstance(first, dict):
             raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
         delta = first.get("delta")
+        if delta is None:
+            return None
         if not isinstance(delta, dict):
             raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
         content = delta.get("content")
