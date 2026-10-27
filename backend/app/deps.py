@@ -18,11 +18,13 @@ async def get_current_user(
         payload = decode_token(authorization.removeprefix("Bearer ").strip())
     except Exception as exc:  # token 过期、签名错误统一按未授权处理
         raise AppError("unauthorized", "登录已失效，请重新登录", 401) from exc
+    subject = payload.get("sub")
+    tenant_id = payload.get("tid")
+    if not subject or not tenant_id:
+        raise AppError("unauthorized", "登录已失效，请重新登录", 401)
     user = (
         await session.execute(
-            select(User).where(
-                User.email == payload["sub"], User.tenant_id == payload["tid"]
-            )
+            select(User).where(User.email == subject, User.tenant_id == tenant_id)
         )
     ).scalar_one_or_none()
     if user is None:

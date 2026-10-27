@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
+import jwt
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,5 +60,57 @@ async def test_login_and_me_roundtrip(db_session):
 async def test_me_requires_token(db_session):
     async with auth_client(db_session) as client:
         resp = await client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "unauthorized"
+
+
+async def test_login_unknown_email_returns_401(db_session):
+    async with auth_client(db_session) as client:
+        resp = await client.post(
+            "/api/auth/login",
+            json={"email": "nobody@local", "password": "any-password"},
+        )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "invalid_credentials"
+
+
+async def test_expired_token_rejected(db_session):
+    settings = get_settings()
+    now = datetime.now(UTC)
+    expired = jwt.encode(
+        {
+            "sub": settings.admin_email,
+            "tid": "default",
+            "iat": now - timedelta(minutes=10),
+            "exp": now - timedelta(minutes=5),
+        },
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+    async with auth_client(db_session) as client:
+        resp = await client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {expired}"},
+        )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "unauthorized"
+
+
+async def test_tampered_token_rejected(db_session):
+    settings = get_settings()
+    async with auth_client(db_session) as client:
+        login_resp = await client.post(
+            "/api/auth/login",
+            json={
+                "email": settings.admin_email,
+                "password": settings.admin_password,
+            },
+        )
+        assert login_resp.status_code == 200
+        token = login_resp.json()["access_token"]
+        resp = await client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}x"},
+        )
     assert resp.status_code == 401
     assert resp.json()["code"] == "unauthorized"

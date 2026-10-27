@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -18,6 +19,10 @@ async def ensure_admin(session: AsyncSession) -> None:
             email=settings.admin_email,
             password_hash=hash_password(settings.admin_password),
             display_name="管理员",
+            is_admin=True,
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()

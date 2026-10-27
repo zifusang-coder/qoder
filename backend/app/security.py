@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import VerificationError
 from cryptography.fernet import Fernet
 
 from app.config import get_settings
@@ -19,7 +19,7 @@ def hash_password(raw: str) -> str:
 def verify_password(raw: str, hashed: str) -> bool:
     try:
         return _hasher.verify(hashed, raw)
-    except VerifyMismatchError:
+    except VerificationError:
         return False
 
 
@@ -36,7 +36,12 @@ def create_token(subject: str, tenant_id: str) -> str:
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"])
+    return jwt.decode(
+        token,
+        get_settings().jwt_secret,
+        algorithms=["HS256"],
+        options={"require": ["sub", "tid", "iat", "exp"]},
+    )
 
 
 def _fernet() -> Fernet:
