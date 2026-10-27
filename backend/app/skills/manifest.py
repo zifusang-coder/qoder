@@ -67,6 +67,8 @@ def _profile_flag(value, skill_id: str) -> bool:
     # 兼容设计文档的 required/optional/none 与布尔写法
     if isinstance(value, bool):
         return value
+    if not isinstance(value, str):
+        raise ManifestError(f"{skill_id}: context.profile 非法取值 {value!r}")
     if value in {"required", "optional"}:
         return True
     if value == "none":
@@ -98,7 +100,9 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if layer not in ALLOWED_LAYERS:
         raise ManifestError(f"{skill_id}: 非法 layer {layer}")
 
-    inputs = data.get("inputs") or {"type": "object", "properties": {}}
+    inputs = data.get("inputs")
+    if inputs is None:
+        inputs = {"type": "object", "properties": {}}
     if not isinstance(inputs, dict):
         raise ManifestError(f"{skill_id}: inputs 必须是 JSON Schema 对象")
 
@@ -107,7 +111,9 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if unknown:
         raise ManifestError(f"{skill_id}: 不允许的工具 {sorted(unknown)}")
 
-    context = data.get("context") or {}
+    context = data.get("context")
+    if context is None:
+        context = {}
     if not isinstance(context, dict):
         raise ManifestError(f"{skill_id}: context 必须是对象")
     references = _string_list(
@@ -129,7 +135,9 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if not prompt_path.exists() or not prompt_path.read_text(encoding="utf-8").strip():
         raise ManifestError(f"{skill_id}: prompt.md 为空")
 
-    outputs = data.get("outputs") or {}
+    outputs = data.get("outputs")
+    if outputs is None:
+        outputs = {}
     if not isinstance(outputs, dict):
         raise ManifestError(f"{skill_id}: outputs 必须是对象")
     output_format = str(outputs.get("format", "markdown"))
@@ -139,7 +147,9 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if output_schema is not None and not isinstance(output_schema, dict):
         raise ManifestError(f"{skill_id}: outputs.schema 必须是对象")
 
-    llm = data.get("llm") or {}
+    llm = data.get("llm")
+    if llm is None:
+        llm = {}
     if not isinstance(llm, dict):
         raise ManifestError(f"{skill_id}: llm 必须是对象")
     tier = str(llm.get("tier", "standard"))
@@ -152,10 +162,9 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if not math.isfinite(temperature) or not 0 <= temperature <= 2:
         raise ManifestError(f"{skill_id}: llm.temperature 必须在 0-2 之间")
 
-    try:
-        cost = int(data.get("cost_estimate_tokens", 0))
-    except (TypeError, ValueError):
-        raise ManifestError(f"{skill_id}: cost_estimate_tokens 必须是整数") from None
+    cost = data.get("cost_estimate_tokens", 0)
+    if isinstance(cost, bool) or not isinstance(cost, int):
+        raise ManifestError(f"{skill_id}: cost_estimate_tokens 必须是整数")
     if cost < 0:
         raise ManifestError(f"{skill_id}: cost_estimate_tokens 不能为负")
 
