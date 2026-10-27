@@ -4001,12 +4001,15 @@ git commit -m "feat: add skill manifest loader, registry and validator"
 
 **Files:**
 - Modify: `backend/app/llm/gateway.py`
+- Modify: `backend/app/models/skill.py`
+- Create: `backend/app/skills/runner.py`
 - Create: `backend/app/skills/executor.py`
 - Create: `backend/tests/test_skill_executor.py`
+- Create: 新的 Alembic 迁移（`skill_runs.created_by`）
 
 - [ ] **Step 1: 让网关记录本次用量**
 
-`backend/app/llm/gateway.py` 的改动：
+`backend/app/llm/gateway.py` 当前 `complete()` 使用 `response.json()` 解析，改动用例如下（保持现有 Anthropic / OpenAI 分支不变，只在解析出 `data` 后记录用量）：
 
 ```python
 from app.llm.types import LLMConfig, Usage
@@ -4016,67 +4019,131 @@ from app.llm.types import LLMConfig, Usage
         self.timeout = timeout
         self.last_usage = Usage()
 ...
-            data = resp.json()
-        usage = data.get("usage") or {}
+        # complete() 每次调用前清零，避免复用网关时把上一次用量算到失败的这次上
+        self.last_usage = Usage()
+        ...
+        data = response.json()
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if not isinstance(usage, dict):
+            usage = {}
         if self.config.kind == "anthropic":
-            self.last_usage = Usage(usage.get("input_tokens", 0), usage.get("output_tokens", 0))
+            self.last_usage = Usage(
+                int(usage.get("input_tokens") or 0),
+                int(usage.get("output_tokens") or 0),
+            )
         else:
             self.last_usage = Usage(
-                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+                int(usage.get("prompt_tokens") or 0),
+                int(usage.get("completion_tokens") or 0),
             )
-        if self.config.kind == "anthropic":
-            return "".join(block.get("text", "") for block in data.get("content", []))
-        return data["choices"][0]["message"]["content"]
 ```
+
+注意：`stream()` 本轮不记录用量；实际用量记录以非流式 `complete()` 为准。
 
 - [ ] **Step 2: 写失败测试 `backend/tests/test_skill_executor.py`**
 
 ```python
+import uuid
 from pathlib import Path
+
+import pytest
 
 from app.llm.types import Usage
 from app.skills.executor import SkillExecutor, parse_json_output
 from app.skills.registry import SkillRegistry
 
 FIXTURE = Path(__file__).parent / "fixtures" / "skills"
+TENANT = "00000000-0000-0000-0000-000000000001"
 
 
 class FakeGateway:
-    last_usage = Usage(11, 7)
-
     def __init__(self, reply: str = "口号：少加班，多产出"):
         self.reply = reply
+        self.last_usage = Usage(11, 7)
+        self.messages = []
 
     async def complete(self, messages, **kwargs):
         self.messages = messages
         return self.reply
 
 
-def test_parse_json_output_handles_fences():
-    assert parse_json_output('```json\n{"a": 1}\n```') == {"a": 1}
-    assert parse_json_output('说明文字 {"a": 2} 结束') == {"a": 2}
+class FailingGateway:
+    def __init__(self):
+        self.last_usage = Usage()
+
+    async def complete(self, messages, **kwargs):
+        raise RuntimeError("upstream boom")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('```json\n{"a": 1}\n```', {"a": 1}),
+        ('说明文字 {"a": 2} 结束', {"a": 2}),
+    ],
+)
+def test_parse_json_output_handles_fences(raw, expected):
+    assert parse_json_output(raw) == expected
+
+
+def test_parse_json_output_rejects_non_object():
+    with pytest.raises(ValueError, match="必须是对象"):
+        assert parse_json_output("[1, 2, 3]")
 
 
 async def test_executor_runs_and_audits(db_session):
-    executor = SkillExecutor(
-        registry=SkillRegistry(FIXTURE),
-        gateway=FakeGateway(),
-        session=db_session,
-        tenant_id="00000000-0000-0000-0000-000000000001",
-        profile_block="<profile_context>账号名：效率笔记</profile_context>",
-    )
-    result = await executor.run("demo-skill", {"topic": "AI 周报"})
-    assert result.text == "口号：少加班，多产出"
-    assert result.prompt_tokens == 11
-    assert result.data is None
-
     from sqlalchemy import select
 
     from app.models.skill import SkillRun
 
+    user_id = uuid.uuid4()
+    gateway = FakeGateway()
+    executor = SkillExecutor(
+        registry=SkillRegistry(FIXTURE),
+        gateway=gateway,
+        session=db_session,
+        tenant_id=TENANT,
+        profile_block="<profile_context>账号名：效率笔记</profile_context>",
+        created_by=user_id,
+    )
+    result = await executor.run("demo-skill", {"topic": "AI 周报"})
+    assert result.text == "口号：少加班，多产出"
+    assert result.prompt_tokens == 11
+    assert result.completion_tokens == 7
+    assert result.data is None
+
+    assert gateway.messages[0]["role"] == "system"
+    assert "效率笔记" in gateway.messages[0]["content"]
+    assert gateway.messages[1] == {"role": "user", "content": '{"topic": "AI 周报"}'}
+
     run = (await db_session.execute(select(SkillRun))).scalar_one()
     assert run.status == "succeeded"
     assert run.skill_id == "demo-skill"
+    assert run.created_by == user_id
+    assert run.prompt_tokens == 11
+    assert run.completion_tokens == 7
+    assert run.duration_ms >= 0
+    assert run.finished_at is not None
+
+
+async def test_executor_audits_failure(db_session):
+    from sqlalchemy import select
+
+    from app.models.skill import SkillRun
+
+    executor = SkillExecutor(
+        registry=SkillRegistry(FIXTURE),
+        gateway=FailingGateway(),
+        session=db_session,
+        tenant_id=TENANT,
+    )
+    with pytest.raises(RuntimeError, match="upstream boom"):
+        await executor.run("demo-skill", {"topic": "AI 周报"})
+
+    run = (await db_session.execute(select(SkillRun))).scalar_one()
+    assert run.status == "failed"
+    assert "upstream boom" in run.error
+    assert run.finished_at is not None
 ```
 
 - [ ] **Step 3: 运行确认失败**
@@ -4084,16 +4151,86 @@ async def test_executor_runs_and_audits(db_session):
 Run: `cd backend && uv run pytest tests/test_skill_executor.py -q`
 Expected: FAIL（模块不存在）
 
-- [ ] **Step 4: 写 `backend/app/skills/executor.py`**
+- [ ] **Step 4: 先写 `backend/app/skills/runner.py`（executor 的依赖）**
+
+先放最小可用实现，Task 1.5 再补齐沙箱与测试：
+
+```python
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+
+class ScriptError(RuntimeError):
+    pass
+
+
+async def run_script(
+    script: Path, payload: dict, cwd: Path, timeout: float = 30.0
+) -> dict:
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONIOENCODING": "utf-8",
+        "LANG": "C.UTF-8",
+    }
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(script),
+        cwd=str(cwd),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(json.dumps(payload, ensure_ascii=False).encode()),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as exc:
+        proc.kill()
+        await proc.wait()
+        raise ScriptError(f"脚本超时（>{timeout}s）") from exc
+    if proc.returncode != 0:
+        raise ScriptError(stderr.decode(errors="ignore")[-1000:] or "脚本执行失败")
+    try:
+        return json.loads(stdout.decode() or "{}")
+    except json.JSONDecodeError as exc:
+        raise ScriptError("脚本输出不是合法 JSON") from exc
+```
+
+- [ ] **Step 5: 给 `SkillRun` 增加 `created_by` 审计列**
+
+`backend/app/models/skill.py` 增加：
+
+```python
+import uuid
+
+from sqlalchemy import Uuid
+...
+class SkillRun(TenantScoped):
+    ...
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+```
+
+`created_by` 只做审计归属，不参与租户隔离；所有查询仍以 `tenant_id` 为准。
+
+- [ ] **Step 6: 写 `backend/app/skills/executor.py`**
 
 ```python
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import jsonschema
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.gateway import LLMGateway
 from app.llm.types import Usage
@@ -4143,10 +4280,10 @@ class SkillExecutor:
         self,
         registry: SkillRegistry,
         gateway: LLMGateway,
-        session,
+        session: AsyncSession,
         tenant_id: str,
         profile_block: str = "",
-        created_by=None,
+        created_by: uuid.UUID | None = None,
     ):
         self.registry = registry
         self.gateway = gateway
@@ -4175,11 +4312,16 @@ class SkillExecutor:
             status="running",
             inputs=inputs,
             outputs={},
+            created_by=self.created_by,
         )
         self.session.add(record)
         await self.session.commit()
         await self.session.refresh(record)
         return record
+
+    def _usage(self) -> Usage:
+        usage = getattr(self.gateway, "last_usage", None)
+        return usage if isinstance(usage, Usage) else Usage()
 
     async def run(self, skill_id: str, inputs: dict) -> SkillRunResult:
         skill = self.registry.get(skill_id)
@@ -4205,8 +4347,8 @@ class SkillExecutor:
                     skill.manifest.dir,
                 )
                 text = json.dumps(data, ensure_ascii=False)
+            usage = self._usage()
             duration = int((time.monotonic() - started) * 1000)
-            usage = getattr(self.gateway, "last_usage", Usage())
             record.status = "succeeded"
             record.outputs = {"text": text, "data": data}
             record.prompt_tokens = usage.prompt_tokens
@@ -4224,76 +4366,53 @@ class SkillExecutor:
                 duration_ms=duration,
             )
         except Exception as exc:
+            usage = self._usage()
             record.status = "failed"
             record.error = str(exc)[:2000]
+            record.prompt_tokens = usage.prompt_tokens
+            record.completion_tokens = usage.completion_tokens
             record.duration_ms = int((time.monotonic() - started) * 1000)
             record.finished_at = datetime.now(timezone.utc)
             await self.session.commit()
             raise
 ```
 
-- [ ] **Step 5: 写 `backend/app/skills/runner.py`**
-
-（被 executor 导入，本步先写最小实现，Task 1.5 补测试）
-
-```python
-import asyncio
-import json
-import os
-import sys
-from pathlib import Path
-
-
-class ScriptError(RuntimeError):
-    pass
-
-
-async def run_script(
-    script: Path, payload: dict, cwd: Path, timeout: float = 30.0
-) -> dict:
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "PYTHONIOENCODING": "utf-8",
-        "LANG": "C.UTF-8",
-    }
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(script),
-        cwd=str(cwd),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(json.dumps(payload, ensure_ascii=False).encode()),
-            timeout=timeout,
-        )
-    except asyncio.TimeoutError as exc:
-        proc.kill()
-        await proc.wait()
-        raise ScriptError(f"脚本超时（>{timeout}s）") from exc
-    if proc.returncode != 0:
-        raise ScriptError(stderr.decode(errors="ignore")[-1000:] or "脚本执行失败")
-    try:
-        return json.loads(stdout.decode() or "{}")
-    except json.JSONDecodeError as exc:
-        raise ScriptError("脚本输出不是合法 JSON") from exc
-```
-
-- [ ] **Step 6: 运行测试确认通过**
+- [ ] **Step 7: 运行测试确认通过**
 
 Run: `cd backend && uv run pytest tests/test_skill_executor.py -q`
-Expected: `2 passed`
+Expected: `9 passed`
 
-- [ ] **Step 7: 迁移并提交**
+再跑全量，确认网关改动没有回归：
+
+Run: `cd backend && uv run pytest -q`
+Expected: 全部通过
+
+- [ ] **Step 8: 生成并验证迁移**
+
+`skill_runs` 表已在 Task 1.3 建好，本步只新增 `created_by` 列。必须启动数据库生成迁移，验证后关闭容器：
 
 ```bash
-cd backend && alembic revision --autogenerate -m "add skill runs and settings"
+make up
+cd backend
+uv run alembic upgrade head
+uv run alembic revision --autogenerate -m "add skill run created_by"
+# 人工检查：迁移只包含 skill_runs.created_by（nullable），不应包含其他表或列
+uv run alembic upgrade head
+uv run alembic downgrade -1
+uv run alembic upgrade head
+uv run alembic check
+cd ..
+make down
+```
+
+- [ ] **Step 9: 提交**
+
+```bash
 git add backend
 git commit -m "feat: add skill executor with JSON parsing and run audit"
 ```
+
+实际落地：提交 `572ae6c`（执行器、审计与迁移 `407bf6c8a1c3_add_skill_run_created_by.py`）与 `73746e8`（质量修复）。最终实现相对上文示例额外包含：`_fail_run()` 在失败/取消时先 `rollback()`、按 `tenant_id` 重取审计行并写入 `failed`/`cancelled`，审计写入失败只记日志以保留原始异常；`run()` 捕获 `BaseException`；runner 使用 `start_new_session=True` 且以 `finally` 收割子进程，要求 stdout 为 JSON 对象；gateway 用 `_token_count()` 安全转换用量，并在 `stream()` 入口清零 `last_usage`。验证：执行器 9 passed、网关 37 passed、后端全量 170 passed，`ruff` 通过；迁移仅新增可空 `skill_runs.created_by`，`upgrade/downgrade/upgrade` 与 `alembic check` 通过，随后已执行 `make down`。runner 的独立回归测试与进程组清理留待 Task 1.5，API 错误码映射与审计会话归属留待 Task 1.6。
 
 ---
 
