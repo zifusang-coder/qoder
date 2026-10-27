@@ -54,10 +54,11 @@ def _string_list(value, field_name: str, skill_id: str) -> list[str]:
     return list(value)
 
 
-def _inside(base: Path, relative: str, field_name: str, skill_id: str) -> Path:
-    target = (base / relative).resolve()
+def _inside(skill_dir: Path, relative: str, field_name: str, skill_id: str) -> Path:
+    root = skill_dir.resolve()
+    target = (root / relative).resolve()
     try:
-        target.relative_to(base.resolve())
+        target.relative_to(root)
     except ValueError:
         raise ManifestError(f"{skill_id}: {field_name} 不能指向技能目录之外") from None
     return target
@@ -82,7 +83,10 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if not manifest_path.exists():
         raise ManifestError(f"{skill_dir.name}: 缺少 manifest.yaml")
     try:
-        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        raw_manifest = manifest_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(raw_manifest) or {}
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ManifestError(f"{skill_dir.name}: manifest.yaml 无法读取") from exc
     except yaml.YAMLError as exc:
         raise ManifestError(f"{skill_dir.name}: manifest.yaml 不是合法 YAML") from exc
     if not isinstance(data, dict):
@@ -120,7 +124,9 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
         context.get("references"), "context.references", skill_id
     )
     for ref in references:
-        target = _inside(skill_dir / "references", ref, "引用文件", skill_id)
+        target = _inside(
+            skill_dir, f"references/{ref}", "引用文件", skill_id
+        )
         if not target.is_file():
             raise ManifestError(f"{skill_id}: 引用文件不存在 references/{ref}")
 
@@ -132,7 +138,11 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
             raise ManifestError(f"{skill_id}: 后处理脚本不存在 {postprocess}")
 
     prompt_path = skill_dir / "prompt.md"
-    if not prompt_path.exists() or not prompt_path.read_text(encoding="utf-8").strip():
+    try:
+        prompt = prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise ManifestError(f"{skill_id}: prompt.md 无法读取") from None
+    if not prompt.strip():
         raise ManifestError(f"{skill_id}: prompt.md 为空")
 
     outputs = data.get("outputs")
@@ -156,7 +166,10 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
     if tier not in ALLOWED_TIERS:
         raise ManifestError(f"{skill_id}: 非法 llm.tier {tier}")
     try:
-        temperature = float(llm.get("temperature", 0.7))
+        raw_temperature = llm.get("temperature", 0.7)
+        if isinstance(raw_temperature, bool):
+            raise TypeError
+        temperature = float(raw_temperature)
     except (TypeError, ValueError):
         raise ManifestError(f"{skill_id}: llm.temperature 必须是数字") from None
     if not math.isfinite(temperature) or not 0 <= temperature <= 2:
@@ -186,6 +199,4 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
         cost_estimate_tokens=cost,
         dir=skill_dir,
     )
-    return LoadedSkill(
-        manifest=manifest, prompt=prompt_path.read_text(encoding="utf-8")
-    )
+    return LoadedSkill(manifest=manifest, prompt=prompt)

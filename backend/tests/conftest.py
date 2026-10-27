@@ -14,6 +14,7 @@ from app.main import app
 from app.models.base import DEFAULT_TENANT_ID, Base
 from app.models.user import User
 from app.seed import ensure_admin
+from app.skills.registry import get_registry
 
 
 @pytest_asyncio.fixture
@@ -86,5 +87,7 @@ async def client(db_session):
 def skills_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SKILLS_DIR", str(tmp_path))
     get_settings.cache_clear()
+    get_registry.cache_clear()
     yield tmp_path
     get_settings.cache_clear()
+    get_registry.cache_clear()
