@@ -27,7 +27,7 @@ cd web && npm install && npm run dev
 
 打开 http://localhost:5173 ，使用本地开发默认账号登录：凭据取自已存在的 `.env`，若不存在则由 `make setup` 从 `.env.example` 复制，模板默认 `admin@local` / `admin12345`。这些默认值仅限本地开发：`ENV` 非 `dev` 时应用会拒绝占位符 `JWT_SECRET` / `MASTER_KEY` 并启动失败，默认管理员密码也必须修改。
 
-前端对话页仍为占位壳；后端已提供 `/api/chat` 编排接口（关键词路由到技能，未命中时通用问答）。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
+前端已接入对话页（非流式 `/api/chat`）、公众号账号管理、项目发布任务的检查/审核/驳回/取消/重试/定时重排，以及发布数据导入与概览。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
 
 ### 定时发布 worker
 
@@ -69,9 +69,9 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 
 ## Phase 1 已知限制
 
-- 技能 `/api/skills/{id}/stream` 仅用于低延迟预览：不写 `skill_runs` 审计、不做输出校验与后处理、不统计 token；需要审计时调用 `/api/skills/{id}/run`。
-- 公众号草稿需要先通过 `/api/accounts` 完成授权并传入 `account_id`；前端尚未提供账号管理与选择界面。
-- 发布任务的驳回、取消、重试与定时重排目前仅提供后端 API，前端只覆盖创建、审核通过与导出/执行。
+- 对话接口为非流式；`/api/skills/{id}/stream` 的流式预览不写审计、不做输出校验与后处理。
+- 公众号账号的 `meta`（封面素材 ID、作者、评论设置）仅在创建授权时写入，之后只能重命名或更新 AppID/AppSecret；需要调整 `meta` 时请停用后重新授权。
+- 停用账号会立即销毁加密凭据且不可恢复；已有发布任务仍保留，但再次执行会因账号不可用而失败。
 
 ## 约定
 

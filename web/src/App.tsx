@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { ApiError, api, getToken } from "./client";
 import Layout from "./components/Layout";
+import Accounts from "./pages/Accounts";
 import Analytics from "./pages/Analytics";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/profiles" element={<Profiles />} />
           <Route path="/projects" element={<Projects />} />
           <Route path="/projects/:id" element={<ProjectDetail />} />
+          <Route path="/accounts" element={<Accounts />} />
           <Route path="/publish" element={<Publish />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/settings" element={<Settings />} />

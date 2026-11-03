@@ -20,6 +20,14 @@ export interface ProfileMemory {
   tags: string[];
 }
 
+export interface Account {
+  id: string;
+  platform: string;
+  name: string;
+  status: string;
+  credential_masked: string;
+}
+
 export interface Project {
   id: string;
   title: string;
@@ -146,6 +154,15 @@ export interface PostmortemResult {
   run_id: string;
 }
 
+export interface ChatOut {
+  reply: string;
+  intent: string;
+  skill_id?: string | null;
+  run_id?: string | null;
+  data?: Record<string, unknown> | null;
+  missing?: string[] | null;
+}
+
 export const PLATFORMS = [
   ["wechat", "公众号"],
   ["xiaohongshu", "小红书"],
@@ -172,7 +189,44 @@ export function isManualExportPlatform(platform: string): boolean {
   return MANUAL_EXPORT_PLATFORMS.some((value) => value === platform);
 }
 
-export type JobActionKind = "precheck" | "approve" | "execute" | "export";
+export type JobActionKind =
+  | "precheck"
+  | "approve"
+  | "reject"
+  | "cancel"
+  | "execute"
+  | "export"
+  | "retry"
+  | "retry_export";
+
+const CANCELLABLE_STATUSES = new Set([
+  "draft",
+  "precheck_failed",
+  "awaiting_review",
+  "approved",
+  "export_failed",
+  "publish_failed",
+]);
+
+const RESCHEDULABLE_STATUSES = new Set([
+  "draft",
+  "prechecking",
+  "precheck_failed",
+  "awaiting_review",
+  "approved",
+]);
+
+export function canCancel(job: Job): boolean {
+  return CANCELLABLE_STATUSES.has(job.status);
+}
+
+export function canReject(job: Job): boolean {
+  return job.status === "awaiting_review";
+}
+
+export function canReschedule(job: Job): boolean {
+  return RESCHEDULABLE_STATUSES.has(job.status);
+}
 
 export function actionFor(
   job: Job,
@@ -190,6 +244,17 @@ export function actionFor(
     if (isManualExportPlatform(job.platform)) {
       return { action: "export", label: "导出素材包" };
     }
+  }
+  if (job.status === "export_failed") {
+    // 导出失败必须先经 actions 的 retry 回到 exporting，再调用 export
+    return isManualExportPlatform(job.platform)
+      ? { action: "retry_export", label: "重试导出" }
+      : null;
+  }
+  if (job.status === "publish_failed") {
+    return job.platform === "wechat"
+      ? { action: "retry", label: "重试发布" }
+      : null;
   }
   return null;
 }

@@ -10,6 +10,7 @@ import {
   jobStatusLabel,
   platformLabel,
   projectStatusLabel,
+  type Account,
   type Content,
   type Job,
   type Project,
@@ -32,6 +33,9 @@ export default function ProjectDetail() {
   const [targetPlatform, setTargetPlatform] = useState("xiaohongshu");
   const [jobNotice, setJobNotice] = useState<Notice | null>(null);
   const [repurposeNotice, setRepurposeNotice] = useState<Notice | null>(null);
+  const [accountSelections, setAccountSelections] = useState<
+    Record<string, string>
+  >({});
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -44,6 +48,14 @@ export default function ProjectDetail() {
     queryFn: () => api<Content[]>(`/projects/${projectId}/contents`),
     enabled: Boolean(projectId),
   });
+
+  const accounts = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api<Account[]>("/accounts"),
+  });
+  const wechatAccounts = (accounts.data ?? []).filter(
+    (account) => account.platform === "wechat" && account.status === "active",
+  );
 
   const versions = useQuery({
     queryKey: ["versions", openVersions],
@@ -71,15 +83,22 @@ export default function ProjectDetail() {
   });
 
   const createJob = useMutation({
-    mutationFn: (content: Content) =>
+    mutationFn: ({
+      content,
+      accountId,
+    }: {
+      content: Content;
+      accountId: string;
+    }) =>
       api<Job>("/publish/jobs", {
         method: "POST",
         body: JSON.stringify({
           content_id: content.id,
           platform: content.platform,
+          ...(accountId ? { account_id: accountId } : {}),
         }),
       }),
-    onSuccess: (job, content) => {
+    onSuccess: (job, { content }) => {
       qc.invalidateQueries({ queryKey: ["jobs"] });
       // The endpoint is idempotent: it may replay an existing job, so report
       // the content it belongs to rather than claiming a new job was created.
@@ -285,6 +304,9 @@ export default function ProjectDetail() {
               {errorText(contents.error)}
             </p>
           )}
+          {accounts.isError && (
+            <p className="text-sm text-red-400">{errorText(accounts.error)}</p>
+          )}
           {contents.isSuccess && contents.data.length === 0 && (
             <p className="text-sm text-slate-400">
               还没有内容，先在左侧创建。
@@ -308,7 +330,15 @@ export default function ProjectDetail() {
           )}
           {contents.data?.map((content) => {
             const pending =
-              createJob.isPending && createJob.variables?.id === content.id;
+              createJob.isPending &&
+              createJob.variables?.content.id === content.id;
+            const needsAccount = content.platform === "wechat";
+            const selectedAccountId =
+              accountSelections[content.id] ?? wechatAccounts[0]?.id ?? "";
+            const missingAccount =
+              needsAccount && accounts.isSuccess && !selectedAccountId;
+            const accountBlocked =
+              needsAccount && (!accounts.isSuccess || !selectedAccountId);
             return (
               <article
                 key={content.id}
@@ -341,22 +371,75 @@ export default function ProjectDetail() {
                       type="button"
                       className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium disabled:opacity-50"
                       disabled={
-                        createJob.isPending || content.current_version < 1
+                        createJob.isPending ||
+                        content.current_version < 1 ||
+                        accountBlocked
                       }
                       title={
                         content.current_version < 1
                           ? "内容还没有版本，无法发布"
-                          : undefined
+                          : accountBlocked
+                            ? accounts.isSuccess
+                              ? "请先授权公众号账号"
+                              : "正在加载发布账号"
+                            : undefined
                       }
                       onClick={() => {
                         setJobNotice(null);
-                        createJob.mutate(content);
+                        createJob.mutate({
+                          content,
+                          accountId: needsAccount ? selectedAccountId : "",
+                        });
                       }}
                     >
                       {pending ? "创建中…" : "创建发布任务"}
                     </button>
                   </div>
                 </div>
+
+                {needsAccount && (
+                  <div className="mt-3 space-y-1">
+                    <label className="block text-xs text-slate-500">
+                      发布账号
+                      <select
+                        className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 disabled:opacity-50"
+                        value={selectedAccountId}
+                        onChange={(e) =>
+                          setAccountSelections((prev) => ({
+                            ...prev,
+                            [content.id]: e.target.value,
+                          }))
+                        }
+                        disabled={
+                          !accounts.isSuccess || wechatAccounts.length === 0
+                        }
+                      >
+                        {!accounts.isSuccess && (
+                          <option value="">
+                            {accounts.isError ? "账号加载失败" : "加载中…"}
+                          </option>
+                        )}
+                        {accounts.isSuccess && wechatAccounts.length === 0 && (
+                          <option value="">暂无可用账号</option>
+                        )}
+                        {wechatAccounts.map((account) => (
+                          <option key={account.id} value={account.id}>
+                            {account.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {missingAccount && (
+                      <p className="text-xs text-amber-400">
+                        还没有可用的公众号账号，请先
+                        <Link className="ml-1 text-indigo-400" to="/accounts">
+                          授权账号
+                        </Link>
+                        。
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {openVersions === content.id && (
                   <div className="mt-4 space-y-2 border-t border-slate-800 pt-3">

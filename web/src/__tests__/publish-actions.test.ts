@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, type Job, type JobActionKind } from "../types";
+import {
+  actionFor,
+  canCancel,
+  canReject,
+  canReschedule,
+  type Job,
+  type JobActionKind,
+} from "../types";
 
 function job(overrides: Partial<Job> = {}): Job {
   return {
@@ -37,9 +44,68 @@ describe("actionFor", () => {
     ["approved", "channels", { action: "export", label: "导出素材包" }],
     ["approved", "douyin", null],
     ["approved", "bilibili", null],
+    [
+      "export_failed",
+      "xiaohongshu",
+      { action: "retry_export", label: "重试导出" },
+    ],
+    ["export_failed", "wechat", null],
+    ["publish_failed", "wechat", { action: "retry", label: "重试发布" }],
+    ["publish_failed", "xiaohongshu", null],
     ["published", "wechat", null],
+    ["cancelled", "wechat", null],
+    ["exported", "xiaohongshu", null],
+    ["exporting", "xiaohongshu", null],
+    ["publishing", "wechat", null],
     ["approved", "unknown", null],
   ])("status %s on %s offers %o", (status, platform, expected) => {
     expect(actionFor(job({ status, platform }))).toEqual(expected);
+  });
+});
+
+describe("canCancel", () => {
+  it.each<[string, boolean]>([
+    ["draft", true],
+    ["precheck_failed", true],
+    ["awaiting_review", true],
+    ["approved", true],
+    ["export_failed", true],
+    ["publish_failed", true],
+    ["prechecking", false],
+    ["exporting", false],
+    ["exported", false],
+    ["publishing", false],
+    ["published", false],
+    ["cancelled", false],
+  ])("status %s -> %s", (status, expected) => {
+    expect(canCancel(job({ status }))).toBe(expected);
+  });
+});
+
+describe("canReject", () => {
+  it.each<[string, boolean]>([
+    ["awaiting_review", true],
+    ["draft", false],
+    ["approved", false],
+    ["published", false],
+  ])("status %s -> %s", (status, expected) => {
+    expect(canReject(job({ status }))).toBe(expected);
+  });
+});
+
+describe("canReschedule", () => {
+  it.each<[string, boolean]>([
+    ["draft", true],
+    ["prechecking", true],
+    ["precheck_failed", true],
+    ["awaiting_review", true],
+    ["approved", true],
+    ["exporting", false],
+    ["exported", false],
+    ["publishing", false],
+    ["published", false],
+    ["cancelled", false],
+  ])("status %s -> %s", (status, expected) => {
+    expect(canReschedule(job({ status }))).toBe(expected);
   });
 });
