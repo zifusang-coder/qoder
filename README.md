@@ -1,6 +1,6 @@
 # 新媒体运营系统
 
-原生 AI 新媒体运营系统（Phase 0/1 MVP）。设计见 [设计文档](docs/原生AI新媒体运营系统-开发文档.md)。
+原生 AI 新媒体运营系统（Phase 0/1 MVP，已开始 Phase 2 工程基础）。设计见 [设计文档](docs/原生AI新媒体运营系统-开发文档.md)。
 
 ## 本地启动
 
@@ -27,7 +27,7 @@ cd web && npm install && npm run dev
 
 打开 http://localhost:5173 ，使用本地开发默认账号登录：凭据取自已存在的 `.env`，若不存在则由 `make setup` 从 `.env.example` 复制，模板默认 `admin@local` / `admin12345`。这些默认值仅限本地开发：`ENV` 非 `dev` 时应用会拒绝占位符 `JWT_SECRET` / `MASTER_KEY` 并启动失败，默认管理员密码也必须修改。
 
-前端已接入对话页（非流式 `/api/chat`）、公众号账号管理、项目发布任务的检查/审核/驳回/取消/重试/定时重排，以及发布数据导入与概览。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
+前端已接入对话页（非流式 `/api/chat`）、公众号账号管理、项目发布任务的检查/审核/驳回/取消/重试/定时重排、内容日历，以及发布数据导入与概览。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
 
 ### 定时发布 worker
 
@@ -49,6 +49,32 @@ content_id,platform,captured_at,views,likes,comments,shares,saves,followers_delt
 
 `captured_at` 必须为 `YYYY-MM-DD`；`platform` 必须与内容自身平台一致。同一内容、平台、日期重复导入会覆盖指标而不是新增行。
 
+### 内容日历
+
+`GET /api/calendar?start=<ISO>&end=<ISO>` 聚合指定时间范围内有定时时间或发布时间、且未取消的发布任务；`start`/`end` 必须带时区，范围最长 90 天。前端 `/calendar` 提供周一开始的月视图，已发布、待审核/已通过、失败任务分色显示。
+
+### 对象存储
+
+默认 `STORAGE_BACKEND=local`，产物写入 `OUTPUTS_DIR`。切换到 S3 兼容存储（AWS S3 / MinIO / 腾讯云 COS 的 S3 网关）时：
+
+```bash
+cd backend && uv sync --extra s3
+```
+
+```text
+STORAGE_BACKEND=s3
+STORAGE_S3_ENDPOINT=http://127.0.0.1:9000   # AWS S3 可留空
+STORAGE_S3_BUCKET=newmedia
+STORAGE_S3_ACCESS_KEY=...
+STORAGE_S3_SECRET_KEY=...
+STORAGE_S3_REGION=
+STORAGE_S3_PREFIX=
+STORAGE_S3_USE_SSL=false
+STORAGE_S3_PATH_STYLE=true                  # MinIO 需要
+```
+
+项目文件仍通过相对路径暴露，下载接口为 `GET /api/projects/{project_id}/files/download?path=...`。对象存储凭据只从环境读取，不写入日志或接口响应。
+
 ### 发布边界
 
 - 公众号：仅通过官方接口创建草稿，群发需人工在公众号后台完成。
@@ -66,6 +92,13 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 ```
 
 首次运行前安装依赖：`make setup`（后端）与 `npm --prefix web install`（前端）。只有本地联调与人工验收需要 `make up` 启动 PostgreSQL 和 Redis。
+
+## Phase 2 工程基础
+
+- 对象存储抽象已完成：本地与 S3 兼容后端共用读写/列表接口，文件下载同时支持两种后端。
+- 内容日历已完成：后端按时间范围聚合任务，前端提供月视图。
+- 尚未接入 pgvector 记忆检索：当前环境没有嵌入模型凭据，且 `postgres:16-alpine` 镜像不含 `vector` 扩展；需要先提供 embedding provider 并切换到 pgvector 镜像。
+- S3 后端目前只用内存假客户端覆盖了读写、分页列表与路径穿越测试，尚未对真实 MinIO/COS 联调；真实 LLM 与公众号凭据冒烟仍待人工执行。
 
 ## Phase 1 已知限制
 

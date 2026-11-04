@@ -10,6 +10,7 @@ from app.api import (
     accounts,
     analytics,
     auth,
+    calendar,
     chat,
     profiles,
     projects,
@@ -78,6 +79,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(accounts.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
+app.include_router(calendar.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(publish.router, prefix="/api")

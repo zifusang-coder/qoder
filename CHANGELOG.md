@@ -2,6 +2,23 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号在进入正式发布流程后按语义化版本管理。
 
+## [Unreleased]
+
+### 新增
+
+- **对象存储抽象**：本地与 S3 兼容后端（AWS S3 / MinIO / COS S3 网关）共用读写、列表接口；新增项目文件下载接口；S3 依赖通过 `uv sync --extra s3` 安装。
+- **内容日历**：`GET /api/calendar` 按时间范围聚合未取消的定时/已发布任务；前端新增周一开始的月视图与导航入口。
+
+### 验证
+
+- 后端：`uv run pytest -q` 524 passed，`uv run ruff check app tests` 通过。
+- 前端：`npm run test -- --run` 78 passed，`npm run build` 通过。
+
+### 已知限制
+
+- pgvector 记忆检索未接入：缺少 embedding provider 凭据，且当前 PostgreSQL 镜像不含 `vector` 扩展。
+- S3 后端尚未对真实 MinIO/COS 联调；真实 LLM 与公众号凭据冒烟仍待人工执行。
+
 ## [0.1.0] - 2026-10-27
 
 Phase 0/1 MVP：创作、发布、归因最小闭环。对应提交范围 `02f8e61..938a461`（分支 `phase-0-1-mvp`）。

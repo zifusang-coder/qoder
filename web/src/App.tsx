@@ -4,6 +4,7 @@ import { ApiError, api, getToken } from "./client";
 import Layout from "./components/Layout";
 import Accounts from "./pages/Accounts";
 import Analytics from "./pages/Analytics";
+import Calendar from "./pages/Calendar";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
 import Profiles from "./pages/Profiles";
@@ -44,6 +45,7 @@ export default function App() {
           <Route path="/projects" element={<Projects />} />
           <Route path="/projects/:id" element={<ProjectDetail />} />
           <Route path="/accounts" element={<Accounts />} />
+          <Route path="/calendar" element={<Calendar />} />
           <Route path="/publish" element={<Publish />} />
           <Route path="/analytics" element={<Analytics />} />
           <Route path="/settings" element={<Settings />} />

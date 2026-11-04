@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,6 +31,15 @@ class Settings(BaseSettings):
     admin_password: str = "admin12345"
     skills_dir: Path = ROOT_DIR / "skills"
     outputs_dir: Path = ROOT_DIR / "outputs"
+    storage_backend: Literal["local", "s3"] = "local"
+    storage_s3_endpoint: str = ""
+    storage_s3_bucket: str = ""
+    storage_s3_region: str = ""
+    storage_s3_access_key: str = ""
+    storage_s3_secret_key: str = ""
+    storage_s3_prefix: str = ""
+    storage_s3_use_ssl: bool = True
+    storage_s3_path_style: bool = True
     cors_origins: str = "http://localhost:5173"
 
     @model_validator(mode="after")
@@ -41,6 +51,12 @@ class Settings(BaseSettings):
         ]
         if insecure:
             raise ValueError(f"非 dev 环境必须覆盖默认密钥: {', '.join(insecure)}")
+        return self
+
+    @model_validator(mode="after")
+    def _require_s3_bucket(self) -> "Settings":
+        if self.storage_backend == "s3" and not self.storage_s3_bucket.strip():
+            raise ValueError("storage_backend=s3 时必须配置 STORAGE_S3_BUCKET")
         return self
 
 

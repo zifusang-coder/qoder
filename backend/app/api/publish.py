@@ -31,7 +31,7 @@ from app.services.publish import (
     reopen,
     reschedule,
 )
-from app.storage import Storage, get_storage
+from app.storage import StorageBackend, get_storage
 
 router = APIRouter(prefix="/publish", tags=["publish"])
 
@@ -480,7 +480,7 @@ async def export_publish(
     job_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
-    storage: Storage = Depends(get_storage),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> JobOut:
     job = await _owned_job(session, job_id, user)
     if job.platform not in MANUAL_EXPORT_PLATFORMS:

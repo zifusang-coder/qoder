@@ -1,9 +1,11 @@
+import asyncio
 import uuid
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 import jsonschema
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -25,7 +27,12 @@ from app.services.repurpose import repurpose_content
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
 from app.skills.runner import ScriptError
-from app.storage import Storage, get_storage
+from app.storage import (
+    StorageBackend,
+    StorageError,
+    StorageNotFound,
+    get_storage,
+)
 
 router = APIRouter(tags=["projects"])
 
@@ -359,10 +366,35 @@ async def list_project_files(
     project_id: str,
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
-    storage: Storage = Depends(get_storage),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> dict:
     project = await _owned_project(session, project_id, user)
-    return {"items": storage.list_files(str(project.id))}
+    return {"items": await asyncio.to_thread(storage.list_files, str(project.id))}
+
+
+@router.get("/projects/{project_id}/files/download")
+async def download_project_file(
+    project_id: str,
+    path: Annotated[str, Query(min_length=1, max_length=500)],
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+) -> Response:
+    project = await _owned_project(session, project_id, user)
+    try:
+        data = await asyncio.to_thread(storage.read_bytes, str(project.id), path)
+    except StorageNotFound:
+        raise AppError("not_found", "文件不存在", 404) from None
+    except StorageError:
+        raise AppError("invalid_path", "文件路径不合法", 422) from None
+    filename = PurePosixPath(path).name
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"
+        },
+    )
 
 
 @router.post("/projects/{project_id}/files", status_code=201)
@@ -371,7 +403,7 @@ async def upload_project_file(
     file: Annotated[UploadFile, File()],
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
-    storage: Storage = Depends(get_storage),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> dict:
     project = await _owned_project(session, project_id, user)
     chunks: list[bytes] = []
@@ -382,7 +414,9 @@ async def upload_project_file(
             raise AppError("file_too_large", "文件超过 10MB", 413)
         chunks.append(chunk)
     name = _safe_upload_name(file.filename)
-    relpath = storage.save_bytes(str(project.id), f"files/{name}", b"".join(chunks))
+    relpath = await asyncio.to_thread(
+        storage.save_bytes, str(project.id), f"files/{name}", b"".join(chunks)
+    )
     return {"path": relpath, "size": size}
 
 

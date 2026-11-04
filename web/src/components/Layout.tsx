@@ -7,6 +7,7 @@ const NAV_ITEMS = [
   { to: "/profiles", label: "账号画像" },
   { to: "/projects", label: "项目" },
   { to: "/accounts", label: "发布账号" },
+  { to: "/calendar", label: "日历" },
   { to: "/publish", label: "发布" },
   { to: "/analytics", label: "数据" },
   { to: "/settings", label: "设置" },

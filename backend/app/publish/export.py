@@ -3,7 +3,7 @@ import json
 import zipfile
 from datetime import UTC, datetime
 
-from app.storage import Storage
+from app.storage import StorageBackend
 
 GUIDES: dict[str, list[str]] = {
     "xiaohongshu": [
@@ -44,7 +44,7 @@ def _guide_markdown(steps: list[str]) -> str:
 class ExportAdapter:
     capability = "manual_export"
 
-    def __init__(self, storage: Storage):
+    def __init__(self, storage: StorageBackend):
         self.storage = storage
 
     def export(

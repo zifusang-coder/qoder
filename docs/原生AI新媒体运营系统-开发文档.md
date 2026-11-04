@@ -566,6 +566,7 @@ exported / published: 终态
 - 搬运视频/TTS/字幕技能(ffmpeg + edge-tts + faster-whisper + rembg)。
 - 内容日历 + 定时发布;评论洞察;pgvector 记忆检索;热榜发现层接入。
 - **验收**:定时发布可重放且幂等;视频技能产出可在内容库预览。
+- **进展(2026-11-02)**:定时发布与重排已在 Phase 1 交付;对象存储抽象(本地/S3 兼容)与内容日历已交付。pgvector 记忆检索待 embedding provider 凭据与 pgvector 镜像;视频技能与抖音/B 站自动发布待资质与媒体处理链。
 
 ### Phase 3 — SaaS 化(第 9-12 周)
 

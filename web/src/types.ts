@@ -154,6 +154,23 @@ export interface PostmortemResult {
   run_id: string;
 }
 
+export interface CalendarItem {
+  job_id: string;
+  content_id: string;
+  project_id: string;
+  project_title: string;
+  content_title: string;
+  platform: string;
+  status: string;
+  scheduled_at: string | null;
+  published_at: string | null;
+  account_name: string | null;
+}
+
+export interface CalendarOut {
+  items: CalendarItem[];
+}
+
 export interface ChatOut {
   reply: string;
   intent: string;
