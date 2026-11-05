@@ -492,12 +492,13 @@ exported / published: 终态
 | 账号 | `GET/POST /accounts` `PATCH/DELETE /accounts/{id}` | 公众号 AppID/Secret 绑定;凭据加密落库、响应仅掩码;DELETE 为软停用 |
 | 归因 | `POST /analytics/import` `GET /analytics/overview`(Task 1.17 已落地) `POST /analytics/contents/{id}/postmortem`(Task 1.18 已落地) | CSV 导入 + 项目概览 + 复盘与画像记忆回写 |
 | 日历 | `GET/POST /calendar` `PATCH/DELETE /calendar/{id}` | |
+| 媒体 | `POST /projects/{id}/media/{skill_id}`(202 入队) `GET /projects/{id}/media/jobs/{job_id}` `POST /projects/{id}/media/jobs/{job_id}/retry` `GET /projects/{id}/media` `GET /projects/{id}/files/preview` | 生成走 arq worker;`media_jobs` 记录状态与错误;失败可重试;预览按 MIME 白名单 |
 | 设置 | `GET/PUT /settings/llm-providers` `POST /settings/llm-providers/{id}/test` `GET /settings/models` | 密钥掩码返回 |
 
 ### 6.3 异步任务
 
 - `POST /skills/{id}/run` 同步短任务(<30s)直接返回;长任务返回 `202 + task_id`,前端轮询或 SSE 订阅。
-- 视频/批量处理一律走 arq worker,`skill_runs.status` 作为任务状态源。
+- 视频/批量处理一律走 arq worker;媒体任务以 `media_jobs.status` 为对外状态源,`skill_runs` 保留执行审计。LLM 失败时 `tts-voiceover` 可降级为原始稿合成并记录 `llm_fallback`。
 - 定时发布由 arq cron 每分钟扫描 `approved` 且到期的公众号任务;worker 通过 `make worker` 启动,与 API 进程分离。
 
 ---
@@ -566,7 +567,7 @@ exported / published: 终态
 - 搬运视频/TTS/字幕技能(ffmpeg + edge-tts + faster-whisper + rembg)。
 - 内容日历 + 定时发布;评论洞察;pgvector 记忆检索;热榜发现层接入。
 - **验收**:定时发布可重放且幂等;视频技能产出可在内容库预览。
-- **进展(2026-11-04)**:定时发布与重排已在 Phase 1 交付;对象存储抽象(本地/S3 兼容,真实 MinIO 已联调)、内容日历、pgvector 记忆检索(真实千问 embedding + HNSW)已交付。`short-video` 与 `tts-voiceover` 媒体技能已交付:千问分镜 → edge-tts → ffmpeg → 媒体 API 导入 → 鉴权预览全链路真实环境验收通过。抖音/B 站自动发布仍待平台资质;搬运视频(faster-whisper)与抠图(rembg)未实现。
+- **进展(2026-11-04)**:定时发布与重排已在 Phase 1 交付;对象存储抽象(本地/S3 兼容,真实 MinIO 已联调)、内容日历、pgvector 记忆检索(真实千问 embedding + HNSW)已交付。`short-video` 与 `tts-voiceover` 媒体技能已交付:千问分镜 → edge-tts → ffmpeg → 媒体 API 导入 → 鉴权预览全链路真实环境验收通过。媒体生成已改为 arq 后台任务 + 前端轮询,失败可重试;配音在 LLM 限流/不可用时降级为原始稿合成。抖音/B 站自动发布仍待平台资质;搬运视频(faster-whisper)与抠图(rembg)未实现。
 
 ### Phase 3 — SaaS 化(第 9-12 周)
 

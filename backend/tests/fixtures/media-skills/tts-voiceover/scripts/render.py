@@ -17,12 +17,13 @@ def main() -> None:
         path = out / name
         path.write_bytes(content)
         written.append({"name": name, "path": str(path), "kind": kind})
+    output = payload.get("output") or {}
     print(
         json.dumps(
             {
                 "kind": "audio",
-                "title": "测试配音",
-                "narration": "测试口播",
+                "title": output.get("title") or "测试配音",
+                "narration": output.get("narration") or "测试口播",
                 "voice": "zh-CN-XiaoxiaoNeural",
                 "rate": "+0%",
                 "duration_seconds": 2.5,

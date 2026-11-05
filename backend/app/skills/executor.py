@@ -31,6 +31,7 @@ class SkillRunResult:
     prompt_tokens: int
     completion_tokens: int
     duration_ms: int
+    llm_fallback: str | None = None
 
 
 def strip_fences(text: str) -> str:
@@ -150,25 +151,39 @@ class SkillExecutor:
         except Exception:
             logger.exception("技能运行审计保存失败 run_id=%s", run_id)
 
-    async def run(self, skill_id: str, inputs: dict) -> SkillRunResult:
+    async def run(
+        self,
+        skill_id: str,
+        inputs: dict,
+        *,
+        fallback: dict | None = None,
+    ) -> SkillRunResult:
         skill = self.registry.get(skill_id)
         inputs = declared_inputs(skill, inputs)
         started = time.monotonic()
         record = await self._open_run(skill_id, inputs)
         run_id = record.id
+        llm_fallback: str | None = None
         try:
             jsonschema.validate(inputs, skill.manifest.inputs)
             messages = self.build_messages(skill, inputs)
-            text = await self.gateway.complete(
-                messages,
-                tier=skill.manifest.llm_tier,
-                temperature=skill.manifest.temperature,
-            )
-            data = (
-                parse_json_output(text)
-                if skill.manifest.output_format == "json"
-                else None
-            )
+            try:
+                text = await self.gateway.complete(
+                    messages,
+                    tier=skill.manifest.llm_tier,
+                    temperature=skill.manifest.temperature,
+                )
+                data = (
+                    parse_json_output(text)
+                    if skill.manifest.output_format == "json"
+                    else None
+                )
+            except AppError as exc:
+                if fallback is None or not exc.code.startswith("llm_"):
+                    raise
+                llm_fallback = exc.code
+                data = dict(fallback)
+                text = json.dumps(data, ensure_ascii=False)
             if skill.manifest.postprocess:
                 data = await run_script(
                     skill.manifest.dir / skill.manifest.postprocess,
@@ -181,6 +196,8 @@ class SkillExecutor:
             duration = int((time.monotonic() - started) * 1000)
             record.status = "succeeded"
             record.outputs = {"text": text, "data": data}
+            if llm_fallback:
+                record.outputs["llm_fallback"] = llm_fallback
             record.prompt_tokens = usage.prompt_tokens
             record.completion_tokens = usage.completion_tokens
             record.duration_ms = duration
@@ -194,6 +211,7 @@ class SkillExecutor:
                 prompt_tokens=usage.prompt_tokens,
                 completion_tokens=usage.completion_tokens,
                 duration_ms=duration,
+                llm_fallback=llm_fallback,
             )
         except BaseException as exc:
             await self._fail_run(run_id, started, exc)

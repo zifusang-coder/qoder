@@ -11,12 +11,14 @@
 - **pgvector 记忆检索**：`profile_memories` 新增 1024 维向量列与 HNSW 余弦索引；数据库镜像切换为 `pgvector/pgvector:pg16`；记忆写入时生成向量，对话/技能/改写/复盘按查询文本语义检索并回退权重排序；新增 `make embed-backfill`。
 - **媒体技能**：新增 `short-video`（LLM 分镜 → Pillow 卡片 → ffmpeg 竖屏 MP4，可选 edge-tts 配音与 SRT）与 `tts-voiceover`（口播文本清洗 → MP3 + SRT）；共享 `media_common.py` / `tts_common.py`；后处理超时可配置；新增 `make media-setup` 安装 `media` 可选依赖。
 - **项目媒体 API**：`POST /projects/{id}/media/{skill_id}` 生成并导入产物到 `media/<run_id>/`，创建 `video`/`audio` 内容与版本；`GET /projects/{id}/media` 聚合媒体产物；`GET /projects/{id}/files/preview` 按 MIME 白名单内联预览并带 `nosniff`。
-- **前端媒体体验**：项目详情新增短视频/口播配音生成表单、媒体产物列表、鉴权 blob 预览（video/audio/image/text）、字幕与下载入口；新增媒体工具函数单测。
+- **异步媒体任务**：新增 `media_jobs` 表与迁移；媒体生成改为 `202` 入队，由 arq worker 的 `process_media_job` 执行；新增任务轮询与失败重试接口，队列不可用时返回 `503 queue_unavailable` 并将任务落为失败。
+- **TTS 降级**：LLM 清洗失败（限流/不可用/超时等 `llm_*` 错误）时，`tts-voiceover` 直接使用原始口播稿合成，并在技能审计与音频元数据中记录 `llm_fallback`。
+- **前端媒体体验**：项目详情新增短视频/口播配音生成表单、媒体产物列表、鉴权 blob 预览（video/audio/image/text）、字幕与下载入口；任务每 2 秒轮询，失败可重试，降级配音展示提示；新增媒体工具函数单测。
 
 ### 验证
 
-- 后端：`uv run pytest -q` 534 passed，`uv run ruff check .` 通过。
-- 前端：`npm run test -- --run` 78 passed，`npm run build` 通过。
+- 后端：`uv run pytest -q` 552 passed、2 skipped，`uv run ruff check .` 通过。
+- 前端：`npm test` 86 passed，`npm run build` 通过。
 - 真实 MinIO 联调：上传、列表、下载与导出 zip 均通过，对象键含项目隔离前缀。
 - 真实千问 embedding：`text-embedding-v3` 返回 1024 维向量；pgvector 语义排序与回填已在本机 PostgreSQL 验证。
 - 真实短视频链路：千问分镜 → edge-tts 配音 → ffmpeg 合成 → 媒体 API 导入 → 鉴权预览全部通过；产物为 1080×1920 H.264 + AAC，时长 25.968s。
@@ -27,7 +29,8 @@
 - COS 等其他 S3 兼容存储尚未逐家联调；生产部署前需按环境复核。
 - 语义检索依赖默认 OpenAI 兼容提供商同时提供 `/embeddings`；不满足时自动回退权重排序。
 - 媒体生成依赖宿主机 `ffmpeg`/`ffprobe` 与 edge-tts 在线服务；edge-tts 不可达时任务失败，不产出半成品。
-- `tts-voiceover` 的 LLM 文本清洗依赖提供商配额；千问账号触发 `limit_requests` 时接口返回 502 `llm_rate_limited`，需稍后重试或更换提供商。
+- 媒体任务依赖 `make worker` 消费队列；只启动 API 时任务会停留在 `queued`。
+- `tts-voiceover` 的 LLM 文本清洗依赖提供商配额；千问触发 `limit_requests` 时会自动降级为原始口播稿合成，并在产物中标记 `llm_fallback`。
 - 媒体后处理超时默认 300s（短视频）/180s（配音）；长时长视频仍建议人工抽检首尾帧与字幕对齐。
 
 ## [0.1.0] - 2026-10-27

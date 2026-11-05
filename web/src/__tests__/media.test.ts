@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   formatBytes,
   formatDuration,
+  isMediaJobActive,
   mediaFileName,
+  mediaJobStatusLabel,
   previewApiPath,
   previewKind,
 } from "../media";
@@ -45,6 +47,26 @@ describe("formatDuration", () => {
     expect(formatDuration(3725)).toBe("01:02:05");
     expect(formatDuration(Number.NaN)).toBe("00:00");
     expect(formatDuration(-2)).toBe("00:00");
+  });
+});
+
+describe("isMediaJobActive", () => {
+  it("treats only queued and running as active", () => {
+    expect(isMediaJobActive("queued")).toBe(true);
+    expect(isMediaJobActive("running")).toBe(true);
+    expect(isMediaJobActive("succeeded")).toBe(false);
+    expect(isMediaJobActive("failed")).toBe(false);
+    expect(isMediaJobActive(undefined)).toBe(false);
+  });
+});
+
+describe("mediaJobStatusLabel", () => {
+  it("maps job statuses and falls back to the raw value", () => {
+    expect(mediaJobStatusLabel("queued")).toBe("排队中");
+    expect(mediaJobStatusLabel("running")).toBe("生成中");
+    expect(mediaJobStatusLabel("succeeded")).toBe("已完成");
+    expect(mediaJobStatusLabel("failed")).toBe("生成失败");
+    expect(mediaJobStatusLabel("unknown")).toBe("unknown");
   });
 });
 

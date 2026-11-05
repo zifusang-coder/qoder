@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 from urllib.parse import quote
 
 import jsonschema
+from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 from pydantic import (
     BaseModel,
@@ -21,10 +22,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
+from app.models.media import MediaJob
 from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
-from app.services.media import generate_media
+from app.queue import get_queue
+from app.services.media import (
+    create_media_job,
+    mark_queue_failed,
+    retry_media_job,
+)
 from app.services.repurpose import repurpose_content
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
@@ -180,6 +187,21 @@ class MediaListOut(BaseModel):
     items: list[MediaOut]
 
 
+class MediaJobOut(BaseModel):
+    id: str
+    project_id: str
+    skill_id: str
+    status: str
+    content_id: str | None
+    error_code: str
+    error_message: str
+    attempts: int
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 def _parse_uuid(value: str, message: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -206,6 +228,23 @@ def _version_out(v: ContentVersion) -> VersionOut:
     return VersionOut(
         id=str(v.id), content_id=str(v.content_id), version=v.version,
         title=v.title, body=v.body, source=v.source,
+    )
+
+
+def _media_job_out(job: MediaJob) -> MediaJobOut:
+    return MediaJobOut(
+        id=str(job.id),
+        project_id=str(job.project_id),
+        skill_id=job.skill_id,
+        status=job.status,
+        content_id=str(job.content_id) if job.content_id else None,
+        error_code=job.error_code,
+        error_message=job.error_message,
+        attempts=job.attempts,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
     )
 
 
@@ -583,10 +622,42 @@ async def list_project_media(
     )
 
 
+async def _owned_media_job(
+    session: AsyncSession, project: Project, job_id: str, user: User
+) -> MediaJob:
+    job = (
+        await session.execute(
+            select(MediaJob).where(
+                MediaJob.id == _parse_uuid(job_id, "媒体任务不存在"),
+                MediaJob.project_id == project.id,
+                MediaJob.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if job is None:
+        raise AppError("not_found", "媒体任务不存在", 404)
+    return job
+
+
+async def _enqueue_media_job(
+    queue: ArqRedis | None, session: AsyncSession, job: MediaJob
+) -> None:
+    if queue is None:
+        await mark_queue_failed(session, job)
+        raise AppError("queue_unavailable", "任务队列暂不可用，请稍后重试", 503)
+    try:
+        await queue.enqueue_job("process_media_job", str(job.id))
+    except Exception:  # noqa: BLE001 - 队列不可用需落库并返回可重试错误
+        await mark_queue_failed(session, job)
+        raise AppError(
+            "queue_unavailable", "任务队列暂不可用，请稍后重试", 503
+        ) from None
+
+
 @router.post(
     "/projects/{project_id}/media/{skill_id}",
-    response_model=MediaOut,
-    status_code=201,
+    response_model=MediaJobOut,
+    status_code=202,
 )
 async def create_project_media(
     project_id: str,
@@ -595,29 +666,56 @@ async def create_project_media(
     user: User = Depends(get_current_user),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
-    storage: StorageBackend = Depends(get_storage),  # noqa: B008
-) -> MediaOut:
+    queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
+) -> MediaJobOut:
     project = await _owned_project(session, project_id, user)
-    try:
-        content, version = await generate_media(
-            session=session,
-            registry=registry,
-            storage=storage,
-            tenant_id=user.tenant_id,
-            project=project,
-            skill_id=skill_id,
-            payload=payload.model_dump(),
-            created_by=user.id,
-        )
-    except ManifestError as exc:
-        raise AppError("not_found", str(exc), 404) from exc
-    except jsonschema.ValidationError as exc:
-        raise AppError("skill_inputs_invalid", "技能输入参数校验失败", 422) from exc
-    except ScriptError as exc:
-        raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc
-    except ValueError as exc:
-        raise AppError("skill_output_invalid", "模型输出格式异常", 502) from exc
-    return _media_out(content, version)
+    job = await create_media_job(
+        session=session,
+        registry=registry,
+        tenant_id=user.tenant_id,
+        project=project,
+        skill_id=skill_id,
+        payload=payload.model_dump(),
+        created_by=user.id,
+    )
+    await _enqueue_media_job(queue, session, job)
+    return _media_job_out(job)
+
+
+@router.get(
+    "/projects/{project_id}/media/jobs/{job_id}",
+    response_model=MediaJobOut,
+)
+async def get_project_media_job(
+    project_id: str,
+    job_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> MediaJobOut:
+    project = await _owned_project(session, project_id, user)
+    job = await _owned_media_job(session, project, job_id, user)
+    return _media_job_out(job)
+
+
+@router.post(
+    "/projects/{project_id}/media/jobs/{job_id}/retry",
+    response_model=MediaJobOut,
+    status_code=202,
+)
+async def retry_project_media_job(
+    project_id: str,
+    job_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
+) -> MediaJobOut:
+    project = await _owned_project(session, project_id, user)
+    await _owned_media_job(session, project, job_id, user)
+    job = await retry_media_job(
+        session=session, job_id=job_id, tenant_id=user.tenant_id
+    )
+    await _enqueue_media_job(queue, session, job)
+    return _media_job_out(job)
 
 
 @router.post(

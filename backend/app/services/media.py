@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import math
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import jsonschema
@@ -9,14 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
+from app.models.media import MediaJob
 from app.models.project import Content, ContentVersion, Project
 from app.services.outputs import prepare_inputs
 from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
-from app.skills.manifest import ManifestError
+from app.skills.manifest import LoadedSkill, ManifestError
 from app.skills.registry import SkillRegistry
 from app.storage import StorageBackend
+
+logger = logging.getLogger(__name__)
 
 MEDIA_SKILLS = {"short-video", "tts-voiceover"}
 MEDIA_KINDS = {"video", "audio"}
@@ -48,6 +53,26 @@ def build_inputs(skill_id: str, payload: dict) -> dict:
     if not str(inputs.get(required, "")).strip():
         message = "请填写视频主题" if required == "topic" else "请填写口播稿"
         raise AppError("skill_inputs_invalid", message, 422)
+    return inputs
+
+
+def _resolve_skill(registry: SkillRegistry, skill_id: str) -> LoadedSkill:
+    if skill_id not in MEDIA_SKILLS:
+        raise AppError("not_found", "媒体技能不存在", 404)
+    try:
+        return registry.get(skill_id)
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+
+
+def _validated_inputs(
+    skill_id: str, skill: LoadedSkill, payload: dict, tenant_id: str
+) -> dict:
+    inputs = prepare_inputs(skill, build_inputs(skill_id, payload), tenant_id)
+    try:
+        jsonschema.validate(inputs, skill.manifest.inputs)
+    except jsonschema.ValidationError as exc:
+        raise AppError("skill_inputs_invalid", "技能输入参数校验失败", 422) from exc
     return inputs
 
 
@@ -98,20 +123,12 @@ async def generate_media(
     payload: dict,
     gateway: LLMGateway | None = None,
     created_by: uuid.UUID | None = None,
+    fallback: dict | None = None,
 ) -> tuple[Content, ContentVersion]:
-    if skill_id not in MEDIA_SKILLS:
-        raise AppError("not_found", "媒体技能不存在", 404)
-    try:
-        skill = registry.get(skill_id)
-    except ManifestError as exc:
-        raise AppError("not_found", str(exc), 404) from exc
+    skill = _resolve_skill(registry, skill_id)
     await require_enabled(session, tenant_id, skill_id)
 
-    inputs = prepare_inputs(skill, build_inputs(skill_id, payload), tenant_id)
-    try:
-        jsonschema.validate(inputs, skill.manifest.inputs)
-    except jsonschema.ValidationError as exc:
-        raise AppError("skill_inputs_invalid", "技能输入参数校验失败", 422) from exc
+    inputs = _validated_inputs(skill_id, skill, payload, tenant_id)
 
     project_id = project.id
     profile_id = project.profile_id
@@ -136,7 +153,7 @@ async def generate_media(
         profile_block=profile_block,
         created_by=created_by,
     )
-    result = await executor.run(skill_id, inputs)
+    result = await executor.run(skill_id, inputs, fallback=fallback)
     data = result.data or {}
 
     raw_files = data.get("files")
@@ -178,6 +195,9 @@ async def generate_media(
         kind = "video" if skill_id == "short-video" else "audio"
     title = str(data.get("title") or project_title or "").strip()[:300]
     body = str(data.get("narration") or data.get("text") or "")
+    audio = data.get("audio") if isinstance(data.get("audio"), dict) else {}
+    if result.llm_fallback:
+        audio = {**audio, "llm_fallback": result.llm_fallback}
     meta = {
         "run_id": result.run_id,
         "kind": kind,
@@ -186,7 +206,7 @@ async def generate_media(
         "preview": by_name.get(str(data.get("preview") or "")),
         "cover": by_name.get(str(data.get("cover") or "")),
         "subtitles": by_name.get(str(data.get("subtitles") or "")),
-        "audio": data.get("audio") if isinstance(data.get("audio"), dict) else {},
+        "audio": audio,
     }
 
     record = Content(
@@ -214,3 +234,145 @@ async def generate_media(
     await session.refresh(record)
     await session.refresh(version)
     return record, version
+
+
+async def create_media_job(
+    *,
+    session: AsyncSession,
+    registry: SkillRegistry,
+    tenant_id: str,
+    project: Project,
+    skill_id: str,
+    payload: dict,
+    created_by: uuid.UUID | None = None,
+) -> MediaJob:
+    skill = _resolve_skill(registry, skill_id)
+    await require_enabled(session, tenant_id, skill_id)
+    _validated_inputs(skill_id, skill, payload, tenant_id)
+    job = MediaJob(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        skill_id=skill_id,
+        status="queued",
+        payload=payload,
+        created_by=created_by,
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+async def mark_queue_failed(session: AsyncSession, job: MediaJob) -> None:
+    job.status = "failed"
+    job.error_code = "queue_unavailable"
+    job.error_message = "任务队列暂不可用，请稍后重试"
+    job.finished_at = datetime.now(UTC)
+    await session.commit()
+
+
+async def retry_media_job(
+    *, session: AsyncSession, job_id: str, tenant_id: str
+) -> MediaJob:
+    job = await _load_job(session, job_id)
+    if job.tenant_id != tenant_id:
+        raise AppError("not_found", "媒体任务不存在", 404)
+    if job.status != "failed":
+        raise AppError("invalid_state", "只有失败的任务可以重试", 409)
+    job.status = "queued"
+    job.error_code = ""
+    job.error_message = ""
+    job.started_at = None
+    job.finished_at = None
+    await session.commit()
+    await session.refresh(job)
+    return job
+
+
+async def _load_job(session: AsyncSession, job_id: str) -> MediaJob:
+    try:
+        parsed = uuid.UUID(str(job_id))
+    except (ValueError, TypeError):
+        raise AppError("not_found", "媒体任务不存在", 404) from None
+    job = await session.get(MediaJob, parsed)
+    if job is None:
+        raise AppError("not_found", "媒体任务不存在", 404)
+    return job
+
+
+def _tts_fallback(job: MediaJob, project: Project, payload: dict) -> dict | None:
+    if job.skill_id != "tts-voiceover":
+        return None
+    return {
+        "title": str(payload.get("title") or project.title or "").strip()[:300],
+        "narration": str(payload.get("text") or ""),
+    }
+
+
+async def run_media_job(
+    *,
+    session: AsyncSession,
+    job_id: str,
+    registry: SkillRegistry,
+    storage: StorageBackend,
+    gateway: LLMGateway | None = None,
+) -> MediaJob:
+    job = await _load_job(session, job_id)
+    if job.status == "succeeded":
+        return job
+
+    job.status = "running"
+    job.attempts += 1
+    job.started_at = datetime.now(UTC)
+    job.finished_at = None
+    job.error_code = ""
+    job.error_message = ""
+    await session.commit()
+    job_uuid = job.id
+
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    try:
+        project = await session.get(Project, job.project_id)
+        if project is None or project.tenant_id != job.tenant_id:
+            raise AppError("project_missing", "项目不存在", 404)
+        content, version = await generate_media(
+            session=session,
+            registry=registry,
+            storage=storage,
+            tenant_id=job.tenant_id,
+            project=project,
+            skill_id=job.skill_id,
+            payload=payload,
+            gateway=gateway,
+            created_by=job.created_by,
+            fallback=_tts_fallback(job, project, payload),
+        )
+    except AppError as exc:
+        await session.rollback()
+        failed = await session.get(MediaJob, job_uuid)
+        if failed is not None:
+            failed.status = "failed"
+            failed.error_code = exc.code
+            failed.error_message = exc.message[:2000]
+            failed.finished_at = datetime.now(UTC)
+            await session.commit()
+        return failed
+    except Exception:
+        logger.exception("媒体任务执行异常 job=%s", job_uuid)
+        await session.rollback()
+        failed = await session.get(MediaJob, job_uuid)
+        if failed is not None:
+            failed.status = "failed"
+            failed.error_code = "internal_error"
+            failed.error_message = "媒体生成失败，请稍后重试"
+            failed.finished_at = datetime.now(UTC)
+            await session.commit()
+        return failed
+
+    job.status = "succeeded"
+    job.content_id = content.id
+    job.skill_run_id = version.skill_run_id
+    job.finished_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(job)
+    return job

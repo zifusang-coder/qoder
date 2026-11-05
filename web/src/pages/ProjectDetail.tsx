@@ -1,9 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../client";
 import MediaPreview from "../components/MediaPreview";
-import { formatDuration, mediaFileName } from "../media";
+import {
+  formatDuration,
+  isMediaJobActive,
+  mediaFileName,
+  mediaJobStatusLabel,
+} from "../media";
 import {
   PLATFORMS,
   contentKindLabel,
@@ -15,7 +20,7 @@ import {
   type Account,
   type Content,
   type Job,
-  type MediaItem,
+  type MediaJob,
   type MediaList,
   type Project,
   type RepurposeResult,
@@ -66,6 +71,7 @@ export default function ProjectDetail() {
   );
   const [mediaRate, setMediaRate] = useState("+0%");
   const [mediaNotice, setMediaNotice] = useState<Notice | null>(null);
+  const [activeMediaJobId, setActiveMediaJobId] = useState("");
   const [openMedia, setOpenMedia] = useState("");
 
   const project = useQuery({
@@ -84,6 +90,15 @@ export default function ProjectDetail() {
     queryKey: ["media", projectId],
     queryFn: () => api<MediaList>(`/projects/${projectId}/media`),
     enabled: Boolean(projectId),
+  });
+
+  const mediaJob = useQuery({
+    queryKey: ["mediaJob", projectId, activeMediaJobId],
+    queryFn: () =>
+      api<MediaJob>(`/projects/${projectId}/media/jobs/${activeMediaJobId}`),
+    enabled: Boolean(projectId && activeMediaJobId),
+    refetchInterval: (query) =>
+      isMediaJobActive(query.state.data?.status) ? 2000 : false,
   });
 
   const accounts = useQuery({
@@ -173,23 +188,52 @@ export default function ProjectDetail() {
       skill: MediaMode;
       body: Record<string, unknown>;
     }) =>
-      api<MediaItem>(`/projects/${projectId}/media/${skill}`, {
+      api<MediaJob>(`/projects/${projectId}/media/${skill}`, {
         method: "POST",
         body: JSON.stringify(body),
       }),
-    onSuccess: (item) => {
-      qc.invalidateQueries({ queryKey: ["media", projectId] });
-      qc.invalidateQueries({ queryKey: ["contents", projectId] });
+    onSuccess: (job) => {
+      setActiveMediaJobId(job.id);
       setMediaNotice({
         kind: "ok",
-        text: `已生成${item.kind === "video" ? "短视频" : "配音"}，可在下方预览`,
+        text: "任务已提交，正在后台生成…",
       });
-      setMediaTopic("");
-      setMediaText("");
-      setMediaTitle("");
     },
     onError: (err) => setMediaNotice({ kind: "error", text: errorText(err) }),
   });
+
+  const retryMedia = useMutation({
+    mutationFn: (jobId: string) =>
+      api<MediaJob>(`/projects/${projectId}/media/jobs/${jobId}/retry`, {
+        method: "POST",
+      }),
+    onSuccess: (job) => {
+      setActiveMediaJobId(job.id);
+      setMediaNotice({ kind: "ok", text: "已重新提交生成任务" });
+      qc.invalidateQueries({
+        queryKey: ["mediaJob", projectId, job.id],
+      });
+    },
+    onError: (err) => setMediaNotice({ kind: "error", text: errorText(err) }),
+  });
+
+  const activeMediaJob = mediaJob.data;
+  const mediaJobBusy =
+    createMedia.isPending || isMediaJobActive(activeMediaJob?.status);
+
+  useEffect(() => {
+    const job = mediaJob.data;
+    if (!job || job.status !== "succeeded") return;
+    qc.invalidateQueries({ queryKey: ["media", projectId] });
+    qc.invalidateQueries({ queryKey: ["contents", projectId] });
+    setMediaNotice({
+      kind: "ok",
+      text: `已生成${job.skill_id === "short-video" ? "短视频" : "配音"}，可在下方预览`,
+    });
+    setMediaTopic("");
+    setMediaText("");
+    setMediaTitle("");
+  }, [mediaJob.data, projectId, qc]);
 
   function submitContent(event: FormEvent) {
     event.preventDefault();
@@ -536,14 +580,14 @@ export default function ProjectDetail() {
               </label>
             </div>
             <p className="text-xs text-slate-500">
-              生成需要调用大模型与本地 ffmpeg，配音还需访问 edge-tts
-              网络，通常需要十几秒到一分钟。
+              生成任务会进入后台队列（需要运行 make worker），完成后自动刷新；
+              配音还需访问 edge-tts 网络。
             </p>
             <button
               className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
-              disabled={createMedia.isPending}
+              disabled={mediaJobBusy}
             >
-              {createMedia.isPending ? "生成中…" : "生成媒体"}
+              {mediaJobBusy ? "生成中…" : "生成媒体"}
             </button>
             {mediaNotice && (
               <p
@@ -554,6 +598,36 @@ export default function ProjectDetail() {
                 }
               >
                 {mediaNotice.text}
+              </p>
+            )}
+            {activeMediaJob && activeMediaJob.status !== "succeeded" && (
+              <div className="rounded border border-slate-800 bg-slate-950 p-3 text-sm">
+                <p className="text-slate-300">
+                  媒体任务：{mediaJobStatusLabel(activeMediaJob.status)}
+                  {activeMediaJob.attempts > 1
+                    ? `（第 ${activeMediaJob.attempts} 次尝试）`
+                    : ""}
+                </p>
+                {activeMediaJob.status === "failed" && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span className="text-red-400">
+                      {activeMediaJob.error_message || "生成失败"}
+                    </span>
+                    <button
+                      type="button"
+                      className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                      disabled={retryMedia.isPending}
+                      onClick={() => retryMedia.mutate(activeMediaJob.id)}
+                    >
+                      {retryMedia.isPending ? "提交中…" : "重试"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {mediaJob.isError && (
+              <p className="text-sm text-red-400">
+                任务状态查询失败：{errorText(mediaJob.error)}
               </p>
             )}
           </form>
@@ -606,6 +680,12 @@ export default function ProjectDetail() {
               {item.audio.status === "failed" && (
                 <p className="mt-2 text-xs text-amber-400">
                   配音生成失败，已输出静音视频。
+                </p>
+              )}
+              {item.audio.llm_fallback && (
+                <p className="mt-2 text-xs text-amber-400">
+                  LLM 调用失败（{item.audio.llm_fallback}
+                  ），已直接使用原始口播稿完成配音。
                 </p>
               )}
               <p className="mt-2 text-xs text-slate-500">

@@ -202,12 +202,31 @@ export interface MediaItem {
   preview: string | null;
   cover: string | null;
   subtitles: string | null;
-  audio: { status?: string; voice?: string };
+  audio: {
+    status?: string;
+    voice?: string;
+    llm_fallback?: string;
+  };
   created_at: string;
 }
 
 export interface MediaList {
   items: MediaItem[];
+}
+
+export interface MediaJob {
+  id: string;
+  project_id: string;
+  skill_id: string;
+  status: string;
+  content_id: string | null;
+  error_code: string;
+  error_message: string;
+  attempts: number;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export const PLATFORMS = [

@@ -39,6 +39,21 @@ export function formatDuration(seconds: number): string {
     : `${pad(minutes)}:${pad(secs)}`;
 }
 
+export function isMediaJobActive(status: string | undefined): boolean {
+  return status === "queued" || status === "running";
+}
+
+const MEDIA_JOB_STATUS_LABELS: Record<string, string> = {
+  queued: "排队中",
+  running: "生成中",
+  succeeded: "已完成",
+  failed: "生成失败",
+};
+
+export function mediaJobStatusLabel(status: string): string {
+  return MEDIA_JOB_STATUS_LABELS[status] ?? status;
+}
+
 export function formatBytes(size: number): string {
   if (!Number.isFinite(size) || size <= 0) return "0 B";
   if (size < 1024) return `${size} B`;

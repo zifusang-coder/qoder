@@ -21,6 +21,7 @@ from app.worker import (
     STALE_PUBLISH_MESSAGE,
     WorkerSettings,
     list_due_jobs,
+    process_media_job,
     publish_due_jobs,
     reconcile_stale_publishing,
 )
@@ -768,7 +769,7 @@ async def test_adapter_error_isolated_to_failing_job(worker_factory):
 
 
 def test_worker_settings_wire_cron():
-    assert WorkerSettings.functions == []
+    assert WorkerSettings.functions == [process_media_job]
     assert len(WorkerSettings.cron_jobs) == 1
     cron_job = WorkerSettings.cron_jobs[0]
     assert cron_job.job_id == "publish-due-jobs"

@@ -29,15 +29,15 @@ cd web && npm install && npm run dev
 
 前端已接入对话页（非流式 `/api/chat`）、公众号账号管理、项目发布任务的检查/审核/驳回/取消/重试/定时重排、内容日历、项目内短视频/口播配音生成与媒体预览，以及发布数据导入与概览。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
 
-### 定时发布 worker
+### 定时发布与媒体任务 worker
 
-定时发布与 API 进程分离，需要 Redis 已由 Compose 启动：
+定时发布和媒体生成都与 API 进程分离，需要 Redis 已由 Compose 启动：
 
 ```bash
 make worker
 ```
 
-等价于 `cd backend && uv run arq app.worker.WorkerSettings`。worker 每分钟扫描 `approved` 且到期的公众号任务并执行；执行前会先对账卡在 `publishing` 的陈旧任务，不在 docker-compose 中常驻。
+等价于 `cd backend && uv run arq app.worker.WorkerSettings`。worker 每分钟扫描 `approved` 且到期的公众号任务并执行；执行前会先对账卡在 `publishing` 的陈旧任务。同时消费 `process_media_job` 队列，执行短视频/配音生成。worker 不在 docker-compose 中常驻；未启动 worker 时媒体任务会停留在 `queued`。
 
 ### 数据导入
 
@@ -98,15 +98,19 @@ EMBEDDING_MODEL=text-embedding-v3
 接口：
 
 ```text
-POST /api/projects/{project_id}/media/short-video
-POST /api/projects/{project_id}/media/tts-voiceover
+POST /api/projects/{project_id}/media/short-video        # 202，返回媒体任务
+POST /api/projects/{project_id}/media/tts-voiceover      # 202，返回媒体任务
+GET  /api/projects/{project_id}/media/jobs/{job_id}      # 轮询任务状态
+POST /api/projects/{project_id}/media/jobs/{job_id}/retry
 GET  /api/projects/{project_id}/media
 GET  /api/projects/{project_id}/files/preview?path=media/<run_id>/video.mp4
 ```
 
+生成请求会先写入 `media_jobs` 并入队，API 立即返回 `202`；任务在 worker 中执行，状态依次为 `queued` → `running` → `succeeded`/`failed`。前端每 2 秒轮询一次，成功后自动刷新媒体列表，失败时展示错误并提供重试按钮。队列不可用时接口返回 `503 queue_unavailable` 并把任务落为失败，便于稍后重试。
+
 预览接口按扩展名白名单返回 `video/mp4`、`audio/mpeg`、图片或纯文本，响应带 `Content-Disposition: inline` 与 `X-Content-Type-Options: nosniff`。前端不能给 `<video>` 直接加 Bearer 头，因此媒体预览组件的流程是：先用带鉴权的 `fetchBlob` 取回二进制，再以 Object URL 播放；组件卸载时释放 URL。
 
-生成请求字段：`topic`（短视频必填）或 `text`（配音必填）、`title`、`platform`、`duration_seconds`（8–180）、`voice`、`voice_name`、`theme`、`rate`、`instructions`。LLM 调用失败（含提供商限流）返回 `llm_rate_limited` 等结构化错误，不会落库半成品。
+生成请求字段：`topic`（短视频必填）或 `text`（配音必填）、`title`、`platform`、`duration_seconds`（8–180）、`voice`、`voice_name`、`theme`、`rate`、`instructions`。任务失败会记录结构化 `error_code`（如 `llm_rate_limited`、`llm_unavailable`），不会落库半成品。`tts-voiceover` 在 LLM 清洗失败时会降级为直接使用原始口播稿合成，音频元数据标记 `llm_fallback`，前端展示黄色提示。
 
 ### 发布边界
 
@@ -131,7 +135,7 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 - 对象存储抽象已完成：本地与 S3 兼容后端共用读写/列表接口，文件下载同时支持两种后端；已用真实 MinIO 验证上传、列表、下载与导出链路。
 - 内容日历已完成：后端按时间范围聚合任务，前端提供月视图。
 - pgvector 记忆检索已完成：数据库镜像切换到 `pgvector/pgvector:pg16`，新增 1024 维向量列与 HNSW 余弦索引；写入时生成向量，检索失败回退权重排序，并提供 `make embed-backfill` 回填命令。
-- 媒体技能已完成：`short-video` 与 `tts-voiceover` 产出 MP4/MP3/SRT，项目媒体接口导入存储并生成内容版本，前端提供生成表单与鉴权预览。
+- 媒体技能已完成：`short-video` 与 `tts-voiceover` 产出 MP4/MP3/SRT，项目媒体接口导入存储并生成内容版本，前端提供生成表单与鉴权预览；生成改为 arq 后台任务 + 轮询，失败可重试，配音在 LLM 限流时降级为原始稿合成。
 - 真实 LLM（千问）与公众号草稿创建已在本地完成冒烟；真实短视频链路（千问分镜 + edge-tts + ffmpeg + 存储 + 预览）已通过验收。COS 等其他 S3 兼容存储尚未逐家联调，生产部署前需按环境复核。
 
 ## Phase 1 已知限制

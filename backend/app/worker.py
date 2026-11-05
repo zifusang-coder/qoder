@@ -24,12 +24,15 @@ from app.models.publish import PublishJob
 from app.publish.base import PublisherAdapter, PublishError
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
+from app.services.media import run_media_job
 from app.services.publish import (
     ContentChanged,
     JobNotFound,
     apply_action,
     execute_job,
 )
+from app.skills.registry import get_registry
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -209,9 +212,22 @@ async def publish_due_jobs(
     return executed
 
 
+async def process_media_job(_ctx: dict | None, job_id: str) -> None:
+    async with SessionLocal() as session:
+        try:
+            await run_media_job(
+                session=session,
+                job_id=job_id,
+                registry=get_registry(),
+                storage=get_storage(),
+            )
+        except Exception:
+            # run_media_job 已把业务失败写入任务行；这里只兜底基础设施异常
+            logger.exception("媒体任务执行异常 job=%s", job_id)
+
+
 class WorkerSettings:
-    # cron_jobs 会自动注册协程，functions 留空即可
-    functions: ClassVar[list] = []
+    functions: ClassVar[list] = [process_media_job]
     cron_jobs: ClassVar[list] = [
         cron(publish_due_jobs, second=0, job_id="publish-due-jobs")
     ]
