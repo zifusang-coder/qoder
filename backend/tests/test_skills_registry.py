@@ -56,11 +56,23 @@ def test_registry_loads_all():
         {"llm": {"tier": "turbo"}},
         {"llm": {"temperature": True}},
         {"cost_estimate_tokens": 1.9},
+        {"postprocess_timeout": 0},
+        {"postprocess_timeout": 601},
+        {"postprocess_timeout": True},
+        {"postprocess_timeout": "fast"},
     ],
 )
 def test_invalid_manifest_is_rejected(tmp_path, changes):
     with pytest.raises(ManifestError):
         load_skill(_mutated_copy(tmp_path, **changes))
+
+
+def test_postprocess_timeout_is_configurable(tmp_path):
+    skill = load_skill(_mutated_copy(tmp_path, postprocess_timeout=120))
+    assert skill.manifest.postprocess_timeout == 120.0
+
+    default = load_skill(FIXTURE / "demo-skill")
+    assert default.manifest.postprocess_timeout == 30.0
 
 
 def test_reference_outside_skill_dir_is_rejected(tmp_path):

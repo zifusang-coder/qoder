@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 from urllib.parse import quote
@@ -13,7 +14,7 @@ from pydantic import (
     StringConstraints,
     field_validator,
 )
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +24,7 @@ from app.errors import AppError
 from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
+from app.services.media import generate_media
 from app.services.repurpose import repurpose_content
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
@@ -129,6 +131,55 @@ class RepurposeOut(VersionOut):
     platform: Platform
 
 
+class MediaIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topic: str = Field(default="", max_length=500)
+    text: str = Field(default="", max_length=2000)
+    title: str = Field(default="", max_length=120)
+    platform: Platform = "douyin"
+    duration_seconds: int = Field(default=30, ge=8, le=180)
+    voice: bool = True
+    voice_name: Annotated[
+        str, StringConstraints(min_length=1, max_length=64)
+    ] = "zh-CN-XiaoxiaoNeural"
+    theme: Literal["dark", "light", "warm"] = "dark"
+    rate: Annotated[
+        str, StringConstraints(pattern=r"^[+-]\d{1,2}%$")
+    ] = "+0%"
+    instructions: str = Field(default="", max_length=1000)
+
+
+class MediaFileOut(BaseModel):
+    name: str
+    path: str
+    kind: str
+    size: int
+
+
+class MediaOut(BaseModel):
+    run_id: str
+    content_id: str
+    project_id: str
+    version_id: str
+    version: int
+    platform: str
+    kind: str
+    title: str
+    body: str
+    duration_seconds: float
+    files: list[MediaFileOut]
+    preview: str | None
+    cover: str | None
+    subtitles: str | None
+    audio: dict
+    created_at: datetime
+
+
+class MediaListOut(BaseModel):
+    items: list[MediaOut]
+
+
 def _parse_uuid(value: str, message: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -155,6 +206,46 @@ def _version_out(v: ContentVersion) -> VersionOut:
     return VersionOut(
         id=str(v.id), content_id=str(v.content_id), version=v.version,
         title=v.title, body=v.body, source=v.source,
+    )
+
+
+def _media_out(content: Content, version: ContentVersion) -> MediaOut:
+    meta = version.meta if isinstance(version.meta, dict) else {}
+    raw_files = meta.get("files")
+    files = [
+        MediaFileOut(
+            name=str(item["name"]),
+            path=str(item["path"]),
+            kind=str(item.get("kind") or "text"),
+            size=int(item.get("size") or 0),
+        )
+        for item in (raw_files if isinstance(raw_files, list) else [])
+        if isinstance(item, dict) and item.get("name") and item.get("path")
+    ]
+    try:
+        duration = float(meta.get("duration_seconds") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    audio = meta.get("audio")
+    return MediaOut(
+        run_id=str(meta.get("run_id") or ""),
+        content_id=str(content.id),
+        project_id=str(content.project_id),
+        version_id=str(version.id),
+        version=version.version,
+        platform=content.platform,
+        kind=content.kind,
+        title=content.title,
+        body=version.body,
+        duration_seconds=duration,
+        files=files,
+        preview=meta.get("preview") if isinstance(meta.get("preview"), str) else None,
+        cover=meta.get("cover") if isinstance(meta.get("cover"), str) else None,
+        subtitles=(
+            meta.get("subtitles") if isinstance(meta.get("subtitles"), str) else None
+        ),
+        audio=audio if isinstance(audio, dict) else {},
+        created_at=version.created_at,
     )
 
 
@@ -194,6 +285,17 @@ async def _next_version(session: AsyncSession, content_id: uuid.UUID) -> int:
 
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+PREVIEW_TYPES = {
+    ".mp4": "video/mp4",
+    ".mp3": "audio/mpeg",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".srt": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+}
 
 
 def _safe_upload_name(name: str | None) -> str:
@@ -397,6 +499,37 @@ async def download_project_file(
     )
 
 
+@router.get("/projects/{project_id}/files/preview")
+async def preview_project_file(
+    project_id: str,
+    path: Annotated[str, Query(min_length=1, max_length=500)],
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+) -> Response:
+    project = await _owned_project(session, project_id, user)
+    suffix = PurePosixPath(path).suffix.lower()
+    media_type = PREVIEW_TYPES.get(suffix)
+    if media_type is None:
+        raise AppError("unsupported_media_type", "不支持在线预览该文件类型", 415)
+    try:
+        data = await asyncio.to_thread(storage.read_bytes, str(project.id), path)
+    except StorageNotFound:
+        raise AppError("not_found", "文件不存在", 404) from None
+    except StorageError:
+        raise AppError("invalid_path", "文件路径不合法", 422) from None
+    filename = PurePosixPath(path).name
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=60",
+        },
+    )
+
+
 @router.post("/projects/{project_id}/files", status_code=201)
 async def upload_project_file(
     project_id: str,
@@ -418,6 +551,73 @@ async def upload_project_file(
         storage.save_bytes, str(project.id), f"files/{name}", b"".join(chunks)
     )
     return {"path": relpath, "size": size}
+
+
+@router.get("/projects/{project_id}/media", response_model=MediaListOut)
+async def list_project_media(
+    project_id: str,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> MediaListOut:
+    project = await _owned_project(session, project_id, user)
+    rows = (
+        await session.execute(
+            select(Content, ContentVersion)
+            .join(
+                ContentVersion,
+                and_(
+                    ContentVersion.content_id == Content.id,
+                    ContentVersion.version == Content.current_version,
+                ),
+            )
+            .where(
+                Content.project_id == project.id,
+                Content.tenant_id == user.tenant_id,
+                Content.kind.in_(sorted({"video", "audio"})),
+            )
+            .order_by(Content.created_at.desc())
+        )
+    ).all()
+    return MediaListOut(
+        items=[_media_out(content, version) for content, version in rows]
+    )
+
+
+@router.post(
+    "/projects/{project_id}/media/{skill_id}",
+    response_model=MediaOut,
+    status_code=201,
+)
+async def create_project_media(
+    project_id: str,
+    skill_id: str,
+    payload: MediaIn,
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
+) -> MediaOut:
+    project = await _owned_project(session, project_id, user)
+    try:
+        content, version = await generate_media(
+            session=session,
+            registry=registry,
+            storage=storage,
+            tenant_id=user.tenant_id,
+            project=project,
+            skill_id=skill_id,
+            payload=payload.model_dump(),
+            created_by=user.id,
+        )
+    except ManifestError as exc:
+        raise AppError("not_found", str(exc), 404) from exc
+    except jsonschema.ValidationError as exc:
+        raise AppError("skill_inputs_invalid", "技能输入参数校验失败", 422) from exc
+    except ScriptError as exc:
+        raise AppError("skill_script_failed", "后处理脚本执行失败", 500) from exc
+    except ValueError as exc:
+        raise AppError("skill_output_invalid", "模型输出格式异常", 502) from exc
+    return _media_out(content, version)
 
 
 @router.post(

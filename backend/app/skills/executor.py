@@ -174,6 +174,7 @@ class SkillExecutor:
                     skill.manifest.dir / skill.manifest.postprocess,
                     {"inputs": inputs, "output": data if data is not None else text},
                     skill.manifest.dir,
+                    timeout=skill.manifest.postprocess_timeout,
                 )
                 text = json.dumps(data, ensure_ascii=False)
             usage = self._usage()

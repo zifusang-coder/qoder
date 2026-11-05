@@ -19,7 +19,7 @@ from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.skill import SkillSetting
 from app.models.user import User
 from app.services.outputs import prepare_inputs, public_output_data
-from app.services.profiles import profile_block_for
+from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import LoadedSkill, ManifestError
@@ -194,7 +194,10 @@ async def run_skill(
     inputs = prepare_inputs(skill, payload.inputs, user.tenant_id)
     _validate_inputs(skill, inputs)
     profile_block = await profile_block_for(
-        session, payload.profile_id, user.tenant_id
+        session,
+        payload.profile_id,
+        user.tenant_id,
+        query=inputs_query(inputs),
     )
     gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(
@@ -252,7 +255,10 @@ async def stream_skill(
     inputs = prepare_inputs(skill, payload.inputs, user.tenant_id)
     _validate_inputs(skill, inputs)
     profile_block = await profile_block_for(
-        session, payload.profile_id, user.tenant_id
+        session,
+        payload.profile_id,
+        user.tenant_id,
+        query=inputs_query(inputs),
     )
     gateway = await get_llm_gateway(session, user)
     executor = SkillExecutor(

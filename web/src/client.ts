@@ -29,6 +29,20 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const resp = await request(path, init);
+  if (resp.status === 204) return undefined as T;
+  return (await resp.json()) as T;
+}
+
+export async function fetchBlob(
+  path: string,
+  init: RequestInit = {},
+): Promise<Blob> {
+  const resp = await request(path, init);
+  return resp.blob();
+}
+
+async function request(path: string, init: RequestInit): Promise<Response> {
   const requestToken = getToken();
   const headers = new Headers(init.headers);
   // Let the browser set the multipart boundary for FormData uploads.
@@ -58,6 +72,5 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
       body.detail,
     );
   }
-  if (resp.status === 204) return undefined as T;
-  return (await resp.json()) as T;
+  return resp;
 }

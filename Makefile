@@ -1,8 +1,12 @@
-.PHONY: setup up down dev worker migrate test fmt
+.PHONY: setup up down dev worker migrate test fmt embed-backfill media-setup
 
 setup:
 	@test -f .env || cp .env.example .env
 	cd backend && uv sync
+
+media-setup:
+	@test -f .env || cp .env.example .env
+	cd backend && uv sync --extra media
 
 up: setup
 	docker compose up -d --wait
@@ -18,3 +22,5 @@ test: setup
 	cd backend && uv run pytest -q
 fmt: setup
 	cd backend && uv run ruff check --fix .
+embed-backfill: setup
+	cd backend && uv run python -m app.scripts.backfill_embeddings

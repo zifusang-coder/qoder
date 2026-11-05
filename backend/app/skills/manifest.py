@@ -30,6 +30,7 @@ class SkillManifest:
     temperature: float = 0.7
     tools: list[str] = field(default_factory=lambda: ["llm"])
     postprocess: str | None = None
+    postprocess_timeout: float = 30.0
     cost_estimate_tokens: int = 0
     dir: Path = Path(".")
 
@@ -137,6 +138,16 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
         if not _inside(skill_dir, postprocess, "postprocess", skill_id).is_file():
             raise ManifestError(f"{skill_id}: 后处理脚本不存在 {postprocess}")
 
+    raw_timeout = data.get("postprocess_timeout", 30.0)
+    if isinstance(raw_timeout, bool):
+        raise ManifestError(f"{skill_id}: postprocess_timeout 必须是数字")
+    try:
+        postprocess_timeout = float(raw_timeout)
+    except (TypeError, ValueError):
+        raise ManifestError(f"{skill_id}: postprocess_timeout 必须是数字") from None
+    if not math.isfinite(postprocess_timeout) or not 1 <= postprocess_timeout <= 600:
+        raise ManifestError(f"{skill_id}: postprocess_timeout 必须在 1-600 秒之间")
+
     prompt_path = skill_dir / "prompt.md"
     try:
         prompt = prompt_path.read_text(encoding="utf-8")
@@ -196,6 +207,7 @@ def load_skill(skill_dir: Path) -> LoadedSkill:
         temperature=temperature,
         tools=tools,
         postprocess=postprocess,
+        postprocess_timeout=postprocess_timeout,
         cost_estimate_tokens=cost,
         dir=skill_dir,
     )

@@ -1,0 +1,80 @@
+id: short-video
+name: 竖版短视频
+version: "0.1.0"
+layer: produce
+description: 生成竖版短视频分镜、配音、字幕与 MP4 成片，供抖音、视频号等平台使用
+inputs:
+  type: object
+  required: [topic, output_dir]
+  properties:
+    topic:
+      type: string
+      description: 视频主题或核心观点
+    output_dir:
+      type: string
+      description: 项目产物目录，必须位于 outputs 下
+    platform:
+      type: string
+      enum: [douyin, channels, xiaohongshu, bilibili, kuaishou, wechat]
+      default: douyin
+    duration_seconds:
+      type: integer
+      minimum: 8
+      maximum: 180
+      default: 30
+    voice:
+      type: boolean
+      default: true
+      description: 是否使用 edge-tts 生成配音，关闭后输出静音视频
+    voice_name:
+      type: string
+      enum:
+        - zh-CN-XiaoxiaoNeural
+        - zh-CN-XiaoyiNeural
+        - zh-CN-YunxiNeural
+        - zh-CN-YunyangNeural
+        - zh-CN-YunjianNeural
+        - zh-HK-HiuMaanNeural
+        - zh-TW-HsiaoChenNeural
+      default: zh-CN-XiaoxiaoNeural
+    theme:
+      type: string
+      enum: [dark, light, warm]
+      default: dark
+    instructions:
+      type: string
+      description: 额外创作要求，可留空
+context:
+  profile: true
+  references: []
+outputs:
+  format: json
+  schema:
+    type: object
+    required: [title, scenes]
+    properties:
+      title:
+        type: string
+      narration:
+        type: string
+      hashtags:
+        type: array
+        items:
+          type: string
+      scenes:
+        type: array
+        items:
+          type: object
+          required: [text]
+          properties:
+            text:
+              type: string
+            seconds:
+              type: number
+llm:
+  tier: standard
+  temperature: 0.8
+tools: [llm, script]
+postprocess: scripts/render_video.py
+postprocess_timeout: 300
+cost_estimate_tokens: 1200

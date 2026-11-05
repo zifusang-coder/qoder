@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     storage_s3_prefix: str = ""
     storage_s3_use_ssl: bool = True
     storage_s3_path_style: bool = True
+    embedding_model: str = ""
     cors_origins: str = "http://localhost:5173"
 
     @model_validator(mode="after")

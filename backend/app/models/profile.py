@@ -12,6 +12,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import JSONType, TenantScoped
+from app.models.vector import EmbeddingVector
 
 
 class Profile(TenantScoped):
@@ -49,3 +50,6 @@ class ProfileMemory(TenantScoped):
     weight: Mapped[float] = mapped_column(default=1.0)
     source: Mapped[str] = mapped_column(String(100), default="manual")
     tags: Mapped[list] = mapped_column(JSONType, default=list)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        EmbeddingVector, nullable=True
+    )

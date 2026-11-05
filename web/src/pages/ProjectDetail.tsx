@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../client";
+import MediaPreview from "../components/MediaPreview";
+import { formatDuration, mediaFileName } from "../media";
 import {
   PLATFORMS,
   contentKindLabel,
@@ -13,12 +15,27 @@ import {
   type Account,
   type Content,
   type Job,
+  type MediaItem,
+  type MediaList,
   type Project,
   type RepurposeResult,
   type VersionList,
 } from "../types";
 
 type Notice = { kind: "ok" | "error"; text: string };
+
+const VOICES: [string, string][] = [
+  ["zh-CN-XiaoxiaoNeural", "晓晓 · 温暖女声"],
+  ["zh-CN-XiaoyiNeural", "晓伊 · 活泼女声"],
+  ["zh-CN-YunxiNeural", "云希 · 清朗男声"],
+  ["zh-CN-YunyangNeural", "云扬 · 沉稳男声"],
+  ["zh-CN-YunjianNeural", "云健 · 浑厚男声"],
+  ["zh-HK-HiuMaanNeural", "曉曼 · 粤语女声"],
+  ["zh-TW-HsiaoChenNeural", "曉臻 · 台湾女声"],
+];
+
+type MediaMode = "short-video" | "tts-voiceover";
+
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -36,6 +53,20 @@ export default function ProjectDetail() {
   const [accountSelections, setAccountSelections] = useState<
     Record<string, string>
   >({});
+  const [mediaMode, setMediaMode] = useState<MediaMode>("short-video");
+  const [mediaTopic, setMediaTopic] = useState("");
+  const [mediaText, setMediaText] = useState("");
+  const [mediaTitle, setMediaTitle] = useState("");
+  const [mediaPlatform, setMediaPlatform] = useState("douyin");
+  const [mediaDuration, setMediaDuration] = useState(30);
+  const [mediaVoice, setMediaVoice] = useState(true);
+  const [mediaVoiceName, setMediaVoiceName] = useState(VOICES[0][0]);
+  const [mediaTheme, setMediaTheme] = useState<"dark" | "light" | "warm">(
+    "dark",
+  );
+  const [mediaRate, setMediaRate] = useState("+0%");
+  const [mediaNotice, setMediaNotice] = useState<Notice | null>(null);
+  const [openMedia, setOpenMedia] = useState("");
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -46,6 +77,12 @@ export default function ProjectDetail() {
   const contents = useQuery({
     queryKey: ["contents", projectId],
     queryFn: () => api<Content[]>(`/projects/${projectId}/contents`),
+    enabled: Boolean(projectId),
+  });
+
+  const media = useQuery({
+    queryKey: ["media", projectId],
+    queryFn: () => api<MediaList>(`/projects/${projectId}/media`),
     enabled: Boolean(projectId),
   });
 
@@ -128,6 +165,32 @@ export default function ProjectDetail() {
       setRepurposeNotice({ kind: "error", text: errorText(err) }),
   });
 
+  const createMedia = useMutation({
+    mutationFn: ({
+      skill,
+      body,
+    }: {
+      skill: MediaMode;
+      body: Record<string, unknown>;
+    }) =>
+      api<MediaItem>(`/projects/${projectId}/media/${skill}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    onSuccess: (item) => {
+      qc.invalidateQueries({ queryKey: ["media", projectId] });
+      qc.invalidateQueries({ queryKey: ["contents", projectId] });
+      setMediaNotice({
+        kind: "ok",
+        text: `已生成${item.kind === "video" ? "短视频" : "配音"}，可在下方预览`,
+      });
+      setMediaTopic("");
+      setMediaText("");
+      setMediaTitle("");
+    },
+    onError: (err) => setMediaNotice({ kind: "error", text: errorText(err) }),
+  });
+
   function submitContent(event: FormEvent) {
     event.preventDefault();
     createContent.mutate({
@@ -149,6 +212,37 @@ export default function ProjectDetail() {
     repurpose.mutate({
       source_content_id: effectiveSource,
       platform: targetPlatform,
+    });
+  }
+
+  function submitMedia(event: FormEvent) {
+    event.preventDefault();
+    if (mediaMode === "short-video" && !mediaTopic.trim()) {
+      setMediaNotice({ kind: "error", text: "请填写视频主题" });
+      return;
+    }
+    if (mediaMode === "tts-voiceover" && !mediaText.trim()) {
+      setMediaNotice({ kind: "error", text: "请填写口播稿" });
+      return;
+    }
+    setMediaNotice(null);
+    const common = {
+      title: mediaTitle.trim(),
+      platform: mediaPlatform,
+      voice_name: mediaVoiceName,
+    };
+    createMedia.mutate({
+      skill: mediaMode,
+      body:
+        mediaMode === "short-video"
+          ? {
+              ...common,
+              topic: mediaTopic.trim(),
+              duration_seconds: mediaDuration,
+              voice: mediaVoice,
+              theme: mediaTheme,
+            }
+          : { ...common, text: mediaText, rate: mediaRate },
     });
   }
 
@@ -292,7 +386,257 @@ export default function ProjectDetail() {
               </p>
             )}
           </form>
+
+          <form
+            className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
+            onSubmit={submitMedia}
+          >
+            <h2 className="font-medium">AI 媒体生成</h2>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  ["short-video", "短视频"],
+                  ["tts-voiceover", "口播配音"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={
+                    mediaMode === value
+                      ? "rounded bg-indigo-600 px-3 py-2 text-sm font-medium"
+                      : "rounded border border-slate-700 px-3 py-2 text-sm text-slate-300"
+                  }
+                  onClick={() => setMediaMode(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {mediaMode === "short-video" ? (
+              <>
+                <label className="block space-y-1 text-sm text-slate-400">
+                  <span>视频主题</span>
+                  <input
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    maxLength={500}
+                    required
+                    value={mediaTopic}
+                    onChange={(e) => setMediaTopic(e.target.value)}
+                    placeholder="例如：3 个方法让周报自动化"
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="block space-y-1 text-sm text-slate-400">
+                    <span>时长（秒）</span>
+                    <input
+                      className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      type="number"
+                      min={8}
+                      max={180}
+                      value={mediaDuration}
+                      onChange={(e) =>
+                        setMediaDuration(Number(e.target.value) || 8)
+                      }
+                    />
+                  </label>
+                  <label className="block space-y-1 text-sm text-slate-400">
+                    <span>视觉主题</span>
+                    <select
+                      className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      value={mediaTheme}
+                      onChange={(e) =>
+                        setMediaTheme(
+                          e.target.value as "dark" | "light" | "warm",
+                        )
+                      }
+                    >
+                      <option value="dark">深色</option>
+                      <option value="light">浅色</option>
+                      <option value="warm">暖色</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={mediaVoice}
+                    onChange={(e) => setMediaVoice(e.target.checked)}
+                  />
+                  使用 edge-tts 生成配音与字幕
+                </label>
+              </>
+            ) : (
+              <>
+                <label className="block space-y-1 text-sm text-slate-400">
+                  <span>口播稿</span>
+                  <textarea
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    rows={6}
+                    maxLength={2000}
+                    required
+                    value={mediaText}
+                    onChange={(e) => setMediaText(e.target.value)}
+                    placeholder="粘贴口播稿，最多 2000 字"
+                  />
+                </label>
+                <label className="block space-y-1 text-sm text-slate-400">
+                  <span>语速</span>
+                  <select
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    value={mediaRate}
+                    onChange={(e) => setMediaRate(e.target.value)}
+                  >
+                    <option value="-10%">慢 10%</option>
+                    <option value="+0%">正常</option>
+                    <option value="+10%">快 10%</option>
+                    <option value="+20%">快 20%</option>
+                  </select>
+                </label>
+              </>
+            )}
+            <label className="block space-y-1 text-sm text-slate-400">
+              <span>标题（可选）</span>
+              <input
+                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                maxLength={120}
+                value={mediaTitle}
+                onChange={(e) => setMediaTitle(e.target.value)}
+                placeholder="留空则使用模型标题"
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block space-y-1 text-sm text-slate-400">
+                <span>归属平台</span>
+                <select
+                  className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  value={mediaPlatform}
+                  onChange={(e) => setMediaPlatform(e.target.value)}
+                >
+                  {PLATFORMS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block space-y-1 text-sm text-slate-400">
+                <span>音色</span>
+                <select
+                  className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  value={mediaVoiceName}
+                  onChange={(e) => setMediaVoiceName(e.target.value)}
+                >
+                  {VOICES.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p className="text-xs text-slate-500">
+              生成需要调用大模型与本地 ffmpeg，配音还需访问 edge-tts
+              网络，通常需要十几秒到一分钟。
+            </p>
+            <button
+              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+              disabled={createMedia.isPending}
+            >
+              {createMedia.isPending ? "生成中…" : "生成媒体"}
+            </button>
+            {mediaNotice && (
+              <p
+                className={
+                  mediaNotice.kind === "ok"
+                    ? "text-sm text-emerald-400"
+                    : "text-sm text-red-400"
+                }
+              >
+                {mediaNotice.text}
+              </p>
+            )}
+          </form>
         </div>
+
+        <section className="space-y-3">
+          <h2 className="font-medium">媒体产物</h2>
+          {media.isLoading && (
+            <p className="text-sm text-slate-400">加载中…</p>
+          )}
+          {media.isError && (
+            <p className="text-sm text-red-400">{errorText(media.error)}</p>
+          )}
+          {media.isSuccess && media.data.items.length === 0 && (
+            <p className="text-sm text-slate-400">
+              还没有媒体产物，先在左侧生成短视频或配音。
+            </p>
+          )}
+          {media.data?.items.map((item) => (
+            <article
+              key={item.content_id}
+              className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="font-medium">{item.title || "未命名媒体"}</h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {platformLabel(item.platform)} ·{" "}
+                    {contentKindLabel(item.kind)}
+                    {item.duration_seconds > 0
+                      ? ` · ${formatDuration(item.duration_seconds)}`
+                      : ""}
+                    {` · ${new Date(item.created_at).toLocaleString()}`}
+                  </p>
+                </div>
+                {item.preview && (
+                  <button
+                    type="button"
+                    className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
+                    onClick={() =>
+                      setOpenMedia(
+                        openMedia === item.content_id ? "" : item.content_id,
+                      )
+                    }
+                  >
+                    {openMedia === item.content_id ? "收起预览" : "预览"}
+                  </button>
+                )}
+              </div>
+              {item.audio.status === "failed" && (
+                <p className="mt-2 text-xs text-amber-400">
+                  配音生成失败，已输出静音视频。
+                </p>
+              )}
+              <p className="mt-2 text-xs text-slate-500">
+                文件：
+                {item.files.map((file) => mediaFileName(file.path)).join("、")}
+              </p>
+              {openMedia === item.content_id && item.preview && (
+                <div className="mt-3 space-y-3 border-t border-slate-800 pt-3">
+                  <MediaPreview
+                    projectId={projectId}
+                    path={item.preview}
+                    title={item.title}
+                  />
+                  {item.subtitles && (
+                    <details>
+                      <summary className="cursor-pointer text-xs text-indigo-400">
+                        查看字幕
+                      </summary>
+                      <div className="mt-2">
+                        <MediaPreview
+                          projectId={projectId}
+                          path={item.subtitles}
+                        />
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+            </article>
+          ))}
+        </section>
 
         <section className="space-y-3">
           <h2 className="font-medium">内容列表</h2>

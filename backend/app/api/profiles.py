@@ -11,6 +11,7 @@ from app.deps import get_current_user
 from app.errors import AppError
 from app.models.profile import Profile, ProfileMemory
 from app.models.user import User
+from app.services.embeddings import embed_memories
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -267,6 +268,8 @@ async def create_memory(
         tags=payload.tags,
     )
     session.add(memory)
+    await session.flush()
+    await embed_memories(session, user.tenant_id, [memory])
     await session.commit()
     await session.refresh(memory)
     return _memory_out(memory)

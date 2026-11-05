@@ -27,7 +27,7 @@ cd web && npm install && npm run dev
 
 打开 http://localhost:5173 ，使用本地开发默认账号登录：凭据取自已存在的 `.env`，若不存在则由 `make setup` 从 `.env.example` 复制，模板默认 `admin@local` / `admin12345`。这些默认值仅限本地开发：`ENV` 非 `dev` 时应用会拒绝占位符 `JWT_SECRET` / `MASTER_KEY` 并启动失败，默认管理员密码也必须修改。
 
-前端已接入对话页（非流式 `/api/chat`）、公众号账号管理、项目发布任务的检查/审核/驳回/取消/重试/定时重排、内容日历，以及发布数据导入与概览。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
+前端已接入对话页（非流式 `/api/chat`）、公众号账号管理、项目发布任务的检查/审核/驳回/取消/重试/定时重排、内容日历、项目内短视频/口播配音生成与媒体预览，以及发布数据导入与概览。停止 uvicorn 与 vite 后，运行 `make down` 清理容器（`pgdata` 卷会保留）。
 
 ### 定时发布 worker
 
@@ -75,6 +75,39 @@ STORAGE_S3_PATH_STYLE=true                  # MinIO 需要
 
 项目文件仍通过相对路径暴露，下载接口为 `GET /api/projects/{project_id}/files/download?path=...`。对象存储凭据只从环境读取，不写入日志或接口响应。
 
+### 画像记忆向量检索（pgvector）
+
+`docker-compose.yml` 的数据库镜像为 `pgvector/pgvector:pg16`；`make migrate` 会自动启用 `vector` 扩展，并为 `profile_memories.embedding` 建立 1024 维 HNSW 余弦索引。
+
+```text
+EMBEDDING_MODEL=text-embedding-v3
+```
+
+启用后复用默认 OpenAI 兼容提供商的 `base_url` 与密钥调用 `POST {base_url}/embeddings`（固定 `dimensions=1024`，模型需支持该维度）。写入记忆时同步生成向量；对话、技能、一稿多改与复盘按查询文本做语义检索，调用失败时自动回退到权重排序。历史记忆可用 `make embed-backfill` 补齐；未设置 `EMBEDDING_MODEL` 时保持原有权重排序，不发起嵌入请求。
+
+### 媒体生成（短视频 / 口播配音）
+
+内置 `short-video` 与 `tts-voiceover` 两个媒体技能：前者由 LLM 生成分镜文案，用 Pillow 渲染卡片、ffmpeg 合成竖屏 MP4，可选 edge-tts 配音与 SRT 字幕；后者清洗口播文本后生成 MP3 与 SRT。渲染结果由项目媒体接口导入项目存储（`media/<run_id>/`），并创建 `video`/`audio` 类型的内容与版本。
+
+前置依赖：
+
+- `ffmpeg` 与 `ffprobe` 需在 `PATH` 中（本地已用 Homebrew 版本验证）。
+- edge-tts 依赖通过媒体可选依赖安装：`make media-setup`（等价于 `cd backend && uv sync --extra media`）。
+- edge-tts 需要访问微软在线语音服务；网络不可达时任务失败并返回可读错误，不会生成半成品内容。
+
+接口：
+
+```text
+POST /api/projects/{project_id}/media/short-video
+POST /api/projects/{project_id}/media/tts-voiceover
+GET  /api/projects/{project_id}/media
+GET  /api/projects/{project_id}/files/preview?path=media/<run_id>/video.mp4
+```
+
+预览接口按扩展名白名单返回 `video/mp4`、`audio/mpeg`、图片或纯文本，响应带 `Content-Disposition: inline` 与 `X-Content-Type-Options: nosniff`。前端不能给 `<video>` 直接加 Bearer 头，因此媒体预览组件的流程是：先用带鉴权的 `fetchBlob` 取回二进制，再以 Object URL 播放；组件卸载时释放 URL。
+
+生成请求字段：`topic`（短视频必填）或 `text`（配音必填）、`title`、`platform`、`duration_seconds`（8–180）、`voice`、`voice_name`、`theme`、`rate`、`instructions`。LLM 调用失败（含提供商限流）返回 `llm_rate_limited` 等结构化错误，不会落库半成品。
+
 ### 发布边界
 
 - 公众号：仅通过官方接口创建草稿，群发需人工在公众号后台完成。
@@ -95,10 +128,11 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 
 ## Phase 2 工程基础
 
-- 对象存储抽象已完成：本地与 S3 兼容后端共用读写/列表接口，文件下载同时支持两种后端。
+- 对象存储抽象已完成：本地与 S3 兼容后端共用读写/列表接口，文件下载同时支持两种后端；已用真实 MinIO 验证上传、列表、下载与导出链路。
 - 内容日历已完成：后端按时间范围聚合任务，前端提供月视图。
-- 尚未接入 pgvector 记忆检索：当前环境没有嵌入模型凭据，且 `postgres:16-alpine` 镜像不含 `vector` 扩展；需要先提供 embedding provider 并切换到 pgvector 镜像。
-- S3 后端目前只用内存假客户端覆盖了读写、分页列表与路径穿越测试，尚未对真实 MinIO/COS 联调；真实 LLM 与公众号凭据冒烟仍待人工执行。
+- pgvector 记忆检索已完成：数据库镜像切换到 `pgvector/pgvector:pg16`，新增 1024 维向量列与 HNSW 余弦索引；写入时生成向量，检索失败回退权重排序，并提供 `make embed-backfill` 回填命令。
+- 媒体技能已完成：`short-video` 与 `tts-voiceover` 产出 MP4/MP3/SRT，项目媒体接口导入存储并生成内容版本，前端提供生成表单与鉴权预览。
+- 真实 LLM（千问）与公众号草稿创建已在本地完成冒烟；真实短视频链路（千问分镜 + edge-tts + ffmpeg + 存储 + 预览）已通过验收。COS 等其他 S3 兼容存储尚未逐家联调，生产部署前需按环境复核。
 
 ## Phase 1 已知限制
 

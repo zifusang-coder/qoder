@@ -6,9 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
-from app.models.profile import Profile, ProfileMemory
+from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
-from app.services.profiles import build_profile_block
+from app.services.profiles import profile_block_from_profile
 from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import ManifestError
@@ -86,15 +86,12 @@ async def repurpose_content(
             )
         ).scalar_one_or_none()
         if profile:
-            memories = (
-                await session.execute(
-                    select(ProfileMemory).where(
-                        ProfileMemory.profile_id == profile_id,
-                        ProfileMemory.tenant_id == tenant_id,
-                    )
-                )
-            ).scalars().all()
-            profile_block = build_profile_block(profile, list(memories))
+            profile_block = await profile_block_from_profile(
+                session,
+                profile,
+                tenant_id,
+                query=f"{version_title}\n{version_body[:1500]}",
+            )
 
     # 延迟到 404/409 校验之后再解析网关，避免缺少 LLM 配置掩盖真实错误
     if gateway is None:

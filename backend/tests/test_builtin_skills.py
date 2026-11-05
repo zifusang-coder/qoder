@@ -3,7 +3,7 @@ from pathlib import Path
 from app.skills.registry import SkillRegistry
 
 ROOT = Path(__file__).resolve().parents[2] / "skills"
-EXPECTED_COUNT = 12  # Phase 1 内置技能目录数量，新增技能时同步更新验收清单
+EXPECTED_COUNT = 14  # 内置技能目录数量，新增技能时同步更新验收清单
 EXPECTED = {
     "topic-evaluator",
     "article-outline",
@@ -11,6 +11,8 @@ EXPECTED = {
     "xhs-note",
     "copywriting",
     "title-hook",
+    "short-video",
+    "tts-voiceover",
 }
 
 

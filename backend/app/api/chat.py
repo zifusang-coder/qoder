@@ -139,7 +139,10 @@ async def chat(
     intent = route_intent(payload.message, output_dir=output_dir)
     if intent.kind == "chat":
         profile_block = await profile_block_for(
-            session, payload.profile_id, user.tenant_id
+            session,
+            payload.profile_id,
+            user.tenant_id,
+            query=payload.message,
         )
         system_prompt = (
             f"{SYSTEM_CHAT}\n\n{profile_block}" if profile_block else SYSTEM_CHAT
@@ -171,7 +174,10 @@ async def chat(
         if key not in inputs or _is_blank(inputs[key])
     ]
     profile_block = await profile_block_for(
-        session, payload.profile_id, user.tenant_id
+        session,
+        payload.profile_id,
+        user.tenant_id,
+        query=payload.message,
     )
     if missing:
         labels = []

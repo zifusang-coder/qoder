@@ -19,10 +19,16 @@ def _write_skill(
     *,
     output_format: str = "markdown",
     postprocess: str | None = None,
+    postprocess_timeout: float | None = None,
 ) -> Path:
     skill_dir = root / skill_id
     skill_dir.mkdir(parents=True)
     postprocess_line = f"postprocess: {postprocess}\n" if postprocess else ""
+    timeout_line = (
+        f"postprocess_timeout: {postprocess_timeout}\n"
+        if postprocess_timeout is not None
+        else ""
+    )
     (skill_dir / "manifest.yaml").write_text(
         f"""id: {skill_id}
 name: 测试技能
@@ -36,7 +42,7 @@ inputs:
       type: string
 outputs:
   format: {output_format}
-{postprocess_line}llm:
+{postprocess_line}{timeout_line}llm:
   tier: fast
   temperature: 0.5
 tools: [llm]
@@ -215,6 +221,37 @@ print(json.dumps({"title": payload["output"]["title"].upper()}))
     assert result.text == '{"title": "HELLO"}'
     run = (await db_session.execute(select(SkillRun))).scalar_one()
     assert run.status == "succeeded"
+
+
+async def test_executor_passes_manifest_timeout_to_script(
+    db_session, tmp_path, monkeypatch
+):
+    skill_dir = _write_skill(
+        tmp_path,
+        "slow-post",
+        output_format="json",
+        postprocess="postprocess.py",
+        postprocess_timeout=180,
+    )
+    (skill_dir / "postprocess.py").write_text("print('{}')", encoding="utf-8")
+    captured: dict = {}
+
+    async def fake_run_script(script, payload, cwd, timeout=30.0):
+        captured["timeout"] = timeout
+        return {"ok": True}
+
+    monkeypatch.setattr("app.skills.executor.run_script", fake_run_script)
+
+    executor = SkillExecutor(
+        registry=SkillRegistry(tmp_path),
+        gateway=FakeGateway('{"title": "hello"}'),
+        session=db_session,
+        tenant_id=TENANT,
+    )
+    result = await executor.run("slow-post", {"topic": "AI"})
+
+    assert result.data == {"ok": True}
+    assert captured["timeout"] == 180.0
 
 
 async def test_executor_audits_schema_failure(db_session):

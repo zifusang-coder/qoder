@@ -180,6 +180,36 @@ export interface ChatOut {
   missing?: string[] | null;
 }
 
+export interface MediaFile {
+  name: string;
+  path: string;
+  kind: string;
+  size: number;
+}
+
+export interface MediaItem {
+  run_id: string;
+  content_id: string;
+  project_id: string;
+  version_id: string;
+  version: number;
+  platform: string;
+  kind: string;
+  title: string;
+  body: string;
+  duration_seconds: number;
+  files: MediaFile[];
+  preview: string | null;
+  cover: string | null;
+  subtitles: string | null;
+  audio: { status?: string; voice?: string };
+  created_at: string;
+}
+
+export interface MediaList {
+  items: MediaItem[];
+}
+
 export const PLATFORMS = [
   ["wechat", "公众号"],
   ["xiaohongshu", "小红书"],
@@ -319,6 +349,7 @@ export const CONTENT_KIND_LABELS: Record<string, string> = {
   article: "文章",
   note: "笔记",
   video: "视频",
+  audio: "音频",
 };
 
 export function contentKindLabel(kind: string): string {

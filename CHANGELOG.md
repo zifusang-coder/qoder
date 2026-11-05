@@ -8,16 +8,27 @@
 
 - **对象存储抽象**：本地与 S3 兼容后端（AWS S3 / MinIO / COS S3 网关）共用读写、列表接口；新增项目文件下载接口；S3 依赖通过 `uv sync --extra s3` 安装。
 - **内容日历**：`GET /api/calendar` 按时间范围聚合未取消的定时/已发布任务；前端新增周一开始的月视图与导航入口。
+- **pgvector 记忆检索**：`profile_memories` 新增 1024 维向量列与 HNSW 余弦索引；数据库镜像切换为 `pgvector/pgvector:pg16`；记忆写入时生成向量，对话/技能/改写/复盘按查询文本语义检索并回退权重排序；新增 `make embed-backfill`。
+- **媒体技能**：新增 `short-video`（LLM 分镜 → Pillow 卡片 → ffmpeg 竖屏 MP4，可选 edge-tts 配音与 SRT）与 `tts-voiceover`（口播文本清洗 → MP3 + SRT）；共享 `media_common.py` / `tts_common.py`；后处理超时可配置；新增 `make media-setup` 安装 `media` 可选依赖。
+- **项目媒体 API**：`POST /projects/{id}/media/{skill_id}` 生成并导入产物到 `media/<run_id>/`，创建 `video`/`audio` 内容与版本；`GET /projects/{id}/media` 聚合媒体产物；`GET /projects/{id}/files/preview` 按 MIME 白名单内联预览并带 `nosniff`。
+- **前端媒体体验**：项目详情新增短视频/口播配音生成表单、媒体产物列表、鉴权 blob 预览（video/audio/image/text）、字幕与下载入口；新增媒体工具函数单测。
 
 ### 验证
 
-- 后端：`uv run pytest -q` 524 passed，`uv run ruff check app tests` 通过。
+- 后端：`uv run pytest -q` 534 passed，`uv run ruff check .` 通过。
 - 前端：`npm run test -- --run` 78 passed，`npm run build` 通过。
+- 真实 MinIO 联调：上传、列表、下载与导出 zip 均通过，对象键含项目隔离前缀。
+- 真实千问 embedding：`text-embedding-v3` 返回 1024 维向量；pgvector 语义排序与回填已在本机 PostgreSQL 验证。
+- 真实短视频链路：千问分镜 → edge-tts 配音 → ffmpeg 合成 → 媒体 API 导入 → 鉴权预览全部通过；产物为 1080×1920 H.264 + AAC，时长 25.968s。
+- 媒体脚本测试：真实 ffmpeg 渲染与 `RUN_MEDIA_TTS=1` 的真实 edge-tts 合成均通过。
 
 ### 已知限制
 
-- pgvector 记忆检索未接入：缺少 embedding provider 凭据，且当前 PostgreSQL 镜像不含 `vector` 扩展。
-- S3 后端尚未对真实 MinIO/COS 联调；真实 LLM 与公众号凭据冒烟仍待人工执行。
+- COS 等其他 S3 兼容存储尚未逐家联调；生产部署前需按环境复核。
+- 语义检索依赖默认 OpenAI 兼容提供商同时提供 `/embeddings`；不满足时自动回退权重排序。
+- 媒体生成依赖宿主机 `ffmpeg`/`ffprobe` 与 edge-tts 在线服务；edge-tts 不可达时任务失败，不产出半成品。
+- `tts-voiceover` 的 LLM 文本清洗依赖提供商配额；千问账号触发 `limit_requests` 时接口返回 502 `llm_rate_limited`，需稍后重试或更换提供商。
+- 媒体后处理超时默认 300s（短视频）/180s（配音）；长时长视频仍建议人工抽检首尾帧与字幕对齐。
 
 ## [0.1.0] - 2026-10-27
 

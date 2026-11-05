@@ -17,6 +17,15 @@ from app.seed import ensure_admin
 from app.skills.registry import get_registry
 
 
+@pytest.fixture(autouse=True)
+def _disable_embeddings(monkeypatch):
+    # 本地 .env 可能开启 EMBEDDING_MODEL；测试默认关闭，语义检索用例自行开启
+    monkeypatch.setenv("EMBEDDING_MODEL", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncSession:
     engine = create_async_engine(

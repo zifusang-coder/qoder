@@ -10,7 +10,8 @@ from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.profile import Profile, ProfileMemory
 from app.models.project import Content, ContentVersion, Project
 from app.services.analytics import latest_snapshots
-from app.services.profiles import MAX_MEMORIES, build_profile_block
+from app.services.embeddings import embed_memories
+from app.services.profiles import profile_block_from_profile
 from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.registry import SkillRegistry
@@ -140,22 +141,12 @@ async def generate_postmortem(
             )
         ).scalar_one_or_none()
         if profile is not None:
-            memories = (
-                await session.execute(
-                    select(ProfileMemory)
-                    .where(
-                        ProfileMemory.tenant_id == tenant_id,
-                        ProfileMemory.profile_id == profile.id,
-                    )
-                    .order_by(
-                        ProfileMemory.weight.desc(),
-                        ProfileMemory.created_at.desc(),
-                        ProfileMemory.id,
-                    )
-                    .limit(MAX_MEMORIES)
-                )
-            ).scalars().all()
-            profile_block = build_profile_block(profile, list(memories))
+            profile_block = await profile_block_from_profile(
+                session,
+                profile,
+                tenant_id,
+                query=f"{content.title}\n{body[:MAX_EXCERPT]}",
+            )
 
     # 执行器内部会 commit，提前固化后续需要的值，避免依赖实例过期行为
     content_title = content.title
@@ -205,6 +196,7 @@ async def generate_postmortem(
         raise AppError("not_found", "内容不存在", 404)
 
     memory_ids: list[str] = []
+    new_memories: list[ProfileMemory] = []
     if profile_id is not None:
         # 锁住画像行并在锁内重新读取，避免并发复盘写入重复记忆
         locked = (
@@ -243,6 +235,7 @@ async def generate_postmortem(
                 )
                 session.add(memory)
                 await session.flush()
+                new_memories.append(memory)
                 memory_ids.append(str(memory.id))
                 if len(memory_ids) >= MAX_MEMORIES_PER_RUN:
                     break
@@ -253,6 +246,10 @@ async def generate_postmortem(
     meta["postmortem_run_id"] = result.run_id
     content.meta = meta
     await session.commit()
+
+    # 先释放画像/内容行锁，再调用嵌入服务；失败时记忆仍保留，可后续回填
+    if await embed_memories(session, tenant_id, new_memories):
+        await session.commit()
 
     return {
         "report": report,
