@@ -12,6 +12,7 @@ from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID, Base
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.seed import ensure_admin
 from app.skills.registry import get_registry
@@ -79,6 +80,11 @@ async def client(db_session):
         email="tester@local",
         password_hash="x",
         display_name="Tester",
+        role="owner",
+        is_active=True,
+        must_change_password=False,
+        is_platform_admin=False,
+        token_version=0,
     )
     app.dependency_overrides[get_session] = lambda: db_session
     app.dependency_overrides[get_current_user] = lambda: fake
@@ -100,3 +106,19 @@ def skills_env(tmp_path, monkeypatch):
     yield tmp_path
     get_settings.cache_clear()
     get_registry.cache_clear()
+
+
+@pytest_asyncio.fixture
+async def tenant_factory(db_session):
+    async def create(*, name="测试租户", slug=None, status="active"):
+        tenant = Tenant(
+            id=str(uuid.uuid4()),
+            name=name,
+            slug=slug or f"t-{uuid.uuid4().hex[:8]}",
+            status=status,
+        )
+        db_session.add(tenant)
+        await db_session.commit()
+        return tenant
+
+    return create
