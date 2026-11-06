@@ -43,6 +43,44 @@ async def test_ensure_admin_is_idempotent(db_session):
     assert len(platform_admins) == 1
 
 
+async def test_ensure_admin_promotes_existing_user(db_session):
+    email = get_settings().admin_email.strip().lower()
+    db_session.add(
+        Tenant(
+            id=DEFAULT_TENANT_ID,
+            name="默认租户",
+            slug="default",
+            status="active",
+        )
+    )
+    existing = User(
+        tenant_id=DEFAULT_TENANT_ID,
+        email=email,
+        password_hash="existing-hash",
+        display_name="既有管理员",
+        role="editor",
+        is_active=True,
+        is_platform_admin=False,
+        token_version=0,
+    )
+    db_session.add(existing)
+    await db_session.commit()
+    existing_id = existing.id
+
+    await ensure_admin(db_session)
+
+    rows = (
+        await db_session.execute(
+            select(User.id, User.is_platform_admin, User.password_hash)
+        )
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].id == existing_id
+    assert rows[0].is_platform_admin is True
+    # 已存在的账号不应被重置密码
+    assert rows[0].password_hash == "existing-hash"
+
+
 async def test_audit_log_persists_json_detail(db_session):
     db_session.add(
         AuditLog(
