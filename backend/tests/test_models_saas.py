@@ -1,5 +1,10 @@
-from sqlalchemy import select
+import logging
 
+import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
+from app import seed as seed_module
 from app.config import DEFAULT_TENANT_ID, get_settings
 from app.models.audit import AuditLog
 from app.models.tenant import Tenant
@@ -79,6 +84,67 @@ async def test_ensure_admin_promotes_existing_user(db_session):
     assert rows[0].is_platform_admin is True
     # 已存在的账号不应被重置密码
     assert rows[0].password_hash == "existing-hash"
+
+
+async def test_ensure_admin_retries_once_after_integrity_error(
+    db_session, monkeypatch, caplog
+):
+    real_seed = seed_module._seed
+    calls = []
+
+    async def flaky_seed(session, *, email, password):
+        calls.append((email, password))
+        if len(calls) == 1:
+            raise IntegrityError("INSERT ...", {}, Exception("conflict"))
+        await real_seed(session, email=email, password=password)
+
+    monkeypatch.setattr(seed_module, "_seed", flaky_seed)
+
+    with caplog.at_level(logging.WARNING, logger="app.seed"):
+        await seed_module.ensure_admin(db_session)
+
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+    tenants = (await db_session.execute(select(Tenant))).scalars().all()
+    assert len(tenants) == 1
+
+    admin_email = get_settings().admin_email.strip().lower()
+    users = (await db_session.execute(select(User))).scalars().all()
+    assert len(users) == 1
+    assert users[0].email == admin_email
+    assert users[0].is_platform_admin is True
+    assert users[0].role == "owner"
+
+    assert any(
+        record.levelno == logging.WARNING and "重试一次" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_ensure_admin_reraises_when_retry_also_conflicts(
+    db_session, monkeypatch, caplog
+):
+    calls = []
+
+    async def conflicting_seed(session, *, email, password):
+        calls.append(email)
+        raise IntegrityError("INSERT ...", {}, Exception("conflict"))
+
+    monkeypatch.setattr(seed_module, "_seed", conflicting_seed)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="app.seed"),
+        pytest.raises(IntegrityError),
+    ):
+        await seed_module.ensure_admin(db_session)
+
+    assert len(calls) == 2
+    assert any(
+        record.name == "app.seed" and record.levelno == logging.ERROR
+        for record in caplog.records
+    )
+    assert get_settings().admin_password not in caplog.text
 
 
 async def test_audit_log_persists_json_detail(db_session):
