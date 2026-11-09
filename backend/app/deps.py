@@ -37,6 +37,6 @@ async def get_current_user(
         raise AppError("account_disabled", "账号已停用，请联系租户管理员", 403)
     if tenant is None or tenant.status != "active":
         raise AppError("tenant_suspended", "租户已停用，请联系平台管理员", 403)
-    if int(payload["ver"]) != user.token_version:
+    if payload["ver"] != user.token_version:
         raise AppError("token_revoked", "登录状态已失效，请重新登录", 401)
     return user

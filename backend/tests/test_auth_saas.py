@@ -62,6 +62,27 @@ async def test_token_version_mismatch_is_revoked(
     assert resp.json()["code"] == "token_revoked"
 
 
+async def test_token_with_non_integer_version_is_revoked(auth_client, db_session):
+    admin = await _admin(db_session)
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": admin.email,
+            "tid": admin.tenant_id,
+            "ver": "abc",
+            "iat": now,
+            "exp": now + timedelta(minutes=30),
+        },
+        get_settings().jwt_secret,
+        algorithm="HS256",
+    )
+    resp = await auth_client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "token_revoked"
+
+
 async def test_disabled_user_is_forbidden(auth_client, auth_headers, db_session):
     admin = await _admin(db_session)
     admin.is_active = False
