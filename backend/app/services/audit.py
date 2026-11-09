@@ -127,13 +127,7 @@ async def record_best_effort(
     detail: dict | None = None,
     request: Request | None = None,
 ) -> None:
-    """用于已经提交或独立事件的审计；失败只记日志，不影响主流程。
-
-    审计写入放在 SAVEPOINT 中执行，失败时只回滚审计行，不会 rollback 外层
-    事务，因此调用方已加载的对象与未提交的业务写入都保持可用。仅在
-    SAVEPOINT 成功后提交外层事务，所以本函数只适用于独立事件（如登录）；
-    事务中途的业务写入请使用 ``record`` 加入调用方事务。
-    """
+    """用于已提交或独立事件的审计；失败只记录日志，不影响主流程。"""
     try:
         async with session.begin_nested():
             await record(
