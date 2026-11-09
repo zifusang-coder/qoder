@@ -1,6 +1,8 @@
+import logging
 import uuid
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select
 
 from app.config import DEFAULT_TENANT_ID
@@ -20,6 +22,10 @@ def test_sanitize_drops_sensitive_keys_and_truncates():
         "credential": {"app_secret": "x"},
         "authorization": "Bearer x",
         "cookie": "sid",
+        "x-api-key": "xak",
+        "apiKey": "camel",
+        "private_key": "pk",
+        "passwd": "pw",
         "safe": "ok",
         "long": "x" * 300,
         "nested": {"role": "editor", "password": "p", "objects": object()},
@@ -38,6 +44,10 @@ def test_sanitize_drops_sensitive_keys_and_truncates():
     assert "credential" not in cleaned
     assert "authorization" not in cleaned
     assert "cookie" not in cleaned
+    assert "x-api-key" not in cleaned
+    assert "apiKey" not in cleaned
+    assert "private_key" not in cleaned
+    assert "passwd" not in cleaned
     assert cleaned["safe"] == "ok"
     assert cleaned["long"] == "x" * 200
     assert cleaned["nested"] == {"role": "editor"}
@@ -112,3 +122,72 @@ async def test_record_best_effort_swallows_commit_errors(db_session, monkeypatch
         action="auth.login",
         actor="tester@local",
     )
+
+
+async def test_record_best_effort_keeps_caller_session_usable_on_audit_failure(
+    db_session, monkeypatch, caplog
+):
+    user = User(
+        id=uuid.uuid4(),
+        tenant_id=DEFAULT_TENANT_ID,
+        email="keep@local",
+        password_hash="x",
+        role="owner",
+    )
+    db_session.add(user)
+    await db_session.commit()
+    loaded = await db_session.get(User, user.id)
+    assert loaded is not None
+
+    # 调用方还有未提交的业务写入：审计失败不得回滚它，也不得 expire 已加载对象
+    pending = User(
+        id=uuid.uuid4(),
+        tenant_id=DEFAULT_TENANT_ID,
+        email="pending@local",
+        password_hash="x",
+        role="editor",
+    )
+    db_session.add(pending)
+    await db_session.flush()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("audit down")
+
+    monkeypatch.setattr("app.services.audit.record", boom)
+
+    with caplog.at_level(logging.ERROR, logger="app.services.audit"):
+        await record_best_effort(
+            db_session,
+            tenant_id=DEFAULT_TENANT_ID,
+            action="auth.login",
+            actor=loaded,
+        )
+
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    # 未提交的业务写入仍在事务中
+    assert await db_session.get(User, pending.id) is not None
+    # 审计失败不得触发外层 rollback：否则已加载对象被 expire，异步访问会抛 MissingGreenlet
+    assert loaded.email == "keep@local"
+
+
+async def test_record_best_effort_rejects_bad_kwargs(db_session):
+    with pytest.raises(TypeError):
+        await record_best_effort(
+            db_session,
+            tenant_id=DEFAULT_TENANT_ID,
+            action="auth.login",
+            actor_email="x@local",
+        )
+
+
+async def test_record_writes_without_committing(db_session):
+    await record(
+        db_session,
+        tenant_id=DEFAULT_TENANT_ID,
+        action="auth.login",
+        actor="tester@local",
+    )
+    await db_session.rollback()
+
+    rows = (await db_session.execute(select(AuditLog))).scalars().all()
+    assert rows == []

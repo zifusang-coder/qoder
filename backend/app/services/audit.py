@@ -13,17 +13,25 @@ BLOCKED_KEY_PARTS = {
     "password",
     "token",
     "secret",
-    "api_key",
+    "apikey",
     "credential",
     "authorization",
     "cookie",
+    "privatekey",
+    "passwd",
+    "pwd",
+    "sessionid",
 }
 _UNSUPPORTED = object()
 
 
+def _normalize_key(key: str) -> str:
+    return "".join(char for char in key.lower() if char.isalnum())
+
+
 def _is_blocked_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(part in lowered for part in BLOCKED_KEY_PARTS)
+    normalized = _normalize_key(key)
+    return any(part in normalized for part in BLOCKED_KEY_PARTS)
 
 
 def _clean_scalar(value: Any) -> Any:
@@ -109,12 +117,45 @@ async def record(
 
 async def record_best_effort(
     session: AsyncSession,
-    **kwargs: Any,
+    *,
+    tenant_id: str,
+    action: str,
+    actor: User | str,
+    resource_type: str = "",
+    resource_id: str = "",
+    status: str = "success",
+    detail: dict | None = None,
+    request: Request | None = None,
 ) -> None:
-    """用于已经提交或独立事件的审计；失败只记日志，不影响主流程。"""
+    """用于已经提交或独立事件的审计；失败只记日志，不影响主流程。
+
+    审计写入放在 SAVEPOINT 中执行，失败时只回滚审计行，不会 rollback 外层
+    事务，因此调用方已加载的对象与未提交的业务写入都保持可用。仅在
+    SAVEPOINT 成功后提交外层事务，所以本函数只适用于独立事件（如登录）；
+    事务中途的业务写入请使用 ``record`` 加入调用方事务。
+    """
     try:
-        await record(session, **kwargs)
-        await session.commit()
+        async with session.begin_nested():
+            await record(
+                session,
+                tenant_id=tenant_id,
+                action=action,
+                actor=actor,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                status=status,
+                detail=detail,
+                request=request,
+            )
     except Exception:  # 审计失败不能改变业务响应
-        logger.exception("审计写入失败 action=%s", kwargs.get("action"))
-        await session.rollback()
+        logger.exception("审计写入失败 action=%s", action)
+        return
+
+    try:
+        await session.commit()
+    except Exception:  # 提交失败时清理事务，但清理本身不能再抛出
+        logger.exception("审计提交失败 action=%s", action)
+        try:
+            await session.rollback()
+        except Exception:
+            logger.exception("审计回滚失败 action=%s", action)
