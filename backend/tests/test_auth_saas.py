@@ -125,3 +125,121 @@ async def test_missing_tenant_is_forbidden(auth_client, db_session):
     )
     assert resp.status_code == 403
     assert resp.json()["code"] == "tenant_suspended"
+
+
+async def _audit_rows(session, action):
+    from app.models.audit import AuditLog
+
+    return (
+        await session.execute(
+            select(AuditLog).where(AuditLog.action == action)
+        )
+    ).scalars().all()
+
+
+async def test_login_writes_success_audit(auth_client, db_session):
+    settings = get_settings()
+    resp = await auth_client.post(
+        "/api/auth/login",
+        json={"email": settings.admin_email, "password": settings.admin_password},
+    )
+    assert resp.status_code == 200
+    rows = await _audit_rows(db_session, "auth.login")
+    assert len(rows) == 1
+    assert rows[0].tenant_id == DEFAULT_TENANT_ID
+    assert rows[0].actor_email == settings.admin_email
+
+
+async def test_bad_password_writes_failure_audit(auth_client, db_session):
+    settings = get_settings()
+    resp = await auth_client.post(
+        "/api/auth/login",
+        json={"email": settings.admin_email, "password": "wrong-password"},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "invalid_credentials"
+    rows = await _audit_rows(db_session, "auth.login_failed")
+    assert len(rows) == 1
+    assert rows[0].status == "failure"
+    assert rows[0].detail == {"reason": "bad_password"}
+
+
+async def test_disabled_user_cannot_login(auth_client, db_session):
+    settings = get_settings()
+    admin = await _admin(db_session)
+    admin.is_active = False
+    await db_session.commit()
+    resp = await auth_client.post(
+        "/api/auth/login",
+        json={"email": settings.admin_email, "password": settings.admin_password},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "account_disabled"
+
+
+async def test_suspended_tenant_cannot_login(auth_client, db_session):
+    settings = get_settings()
+    tenant = await db_session.get(Tenant, DEFAULT_TENANT_ID)
+    tenant.status = "suspended"
+    await db_session.commit()
+    resp = await auth_client.post(
+        "/api/auth/login",
+        json={"email": settings.admin_email, "password": settings.admin_password},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "tenant_suspended"
+
+
+async def test_change_password_rotates_token(auth_client, auth_headers, db_session):
+    resp = await auth_client.post(
+        "/api/auth/change-password",
+        headers=auth_headers,
+        json={
+            "current_password": get_settings().admin_password,
+            "new_password": "new-password-123",
+        },
+    )
+    assert resp.status_code == 200
+    new_token = resp.json()["access_token"]
+    old = await auth_client.get("/api/auth/me", headers=auth_headers)
+    assert old.status_code == 401
+    assert old.json()["code"] == "token_revoked"
+    fresh = await auth_client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {new_token}"},
+    )
+    assert fresh.status_code == 200
+    assert fresh.json()["must_change_password"] is False
+    rows = await _audit_rows(db_session, "auth.change_password")
+    assert len(rows) == 1
+
+
+async def test_change_password_rejects_wrong_current(auth_client, auth_headers):
+    resp = await auth_client.post(
+        "/api/auth/change-password",
+        headers=auth_headers,
+        json={"current_password": "wrong", "new_password": "new-password-123"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "invalid_password"
+
+
+async def test_change_password_rejects_short_and_same(auth_client, auth_headers):
+    short = await auth_client.post(
+        "/api/auth/change-password",
+        headers=auth_headers,
+        json={
+            "current_password": get_settings().admin_password,
+            "new_password": "short",
+        },
+    )
+    assert short.status_code == 422
+    same = await auth_client.post(
+        "/api/auth/change-password",
+        headers=auth_headers,
+        json={
+            "current_password": get_settings().admin_password,
+            "new_password": get_settings().admin_password,
+        },
+    )
+    assert same.status_code == 422
