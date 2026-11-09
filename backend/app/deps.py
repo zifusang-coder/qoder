@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.errors import AppError
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.security import decode_token
 
@@ -22,11 +23,20 @@ async def get_current_user(
     tenant_id = payload.get("tid")
     if not subject or not tenant_id:
         raise AppError("unauthorized", "登录已失效，请重新登录", 401)
-    user = (
+    row = (
         await session.execute(
-            select(User).where(User.email == subject, User.tenant_id == tenant_id)
+            select(User, Tenant)
+            .outerjoin(Tenant, Tenant.id == User.tenant_id)
+            .where(User.email == subject, User.tenant_id == tenant_id)
         )
-    ).scalar_one_or_none()
-    if user is None:
+    ).first()
+    if row is None:
         raise AppError("unauthorized", "用户不存在", 401)
+    user, tenant = row
+    if not user.is_active:
+        raise AppError("account_disabled", "账号已停用，请联系租户管理员", 403)
+    if tenant is None or tenant.status != "active":
+        raise AppError("tenant_suspended", "租户已停用，请联系平台管理员", 403)
+    if int(payload["ver"]) != user.token_version:
+        raise AppError("token_revoked", "登录状态已失效，请重新登录", 401)
     return user

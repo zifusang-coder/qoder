@@ -23,12 +23,13 @@ def verify_password(raw: str, hashed: str) -> bool:
         return False
 
 
-def create_token(subject: str, tenant_id: str) -> str:
+def create_token(subject: str, tenant_id: str, token_version: int) -> str:
     settings = get_settings()
     now = datetime.now(UTC)
     payload = {
         "sub": subject,
         "tid": tenant_id,
+        "ver": token_version,
         "iat": now,
         "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
@@ -40,7 +41,7 @@ def decode_token(token: str) -> dict:
         token,
         get_settings().jwt_secret,
         algorithms=["HS256"],
-        options={"require": ["sub", "tid", "iat", "exp"]},
+        options={"require": ["sub", "tid", "ver", "iat", "exp"]},
     )
 
 

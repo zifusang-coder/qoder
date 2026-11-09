@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps import get_current_user
 from app.errors import AppError
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.security import create_token, hash_password, verify_password
 
@@ -32,8 +33,14 @@ class TokenOut(BaseModel):
 
 
 class MeOut(BaseModel):
+    id: str
     email: str
     display_name: str
+    role: str
+    tenant_id: str
+    tenant_name: str
+    is_platform_admin: bool
+    must_change_password: bool
 
 
 @router.post("/login", response_model=TokenOut)
@@ -49,11 +56,28 @@ async def login(
     if not verify_password(payload.password, user.password_hash):
         raise AppError("invalid_credentials", "邮箱或密码错误", 401)
     return TokenOut(
-        access_token=create_token(user.email, user.tenant_id),
+        access_token=create_token(
+            user.email, user.tenant_id, user.token_version
+        ),
         display_name=user.display_name,
     )
 
 
 @router.get("/me", response_model=MeOut)
-async def me(user: User = Depends(get_current_user)) -> MeOut:  # noqa: B008
-    return MeOut(email=user.email, display_name=user.display_name)
+async def me(
+    user: User = Depends(get_current_user),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> MeOut:
+    tenant = await session.get(Tenant, user.tenant_id)
+    if tenant is None or tenant.status != "active":
+        raise AppError("tenant_suspended", "租户已停用，请联系平台管理员", 403)
+    return MeOut(
+        id=str(user.id),
+        email=user.email,
+        display_name=user.display_name,
+        role=user.role,
+        tenant_id=user.tenant_id,
+        tenant_name=tenant.name,
+        is_platform_admin=user.is_platform_admin,
+        must_change_password=user.must_change_password,
+    )
