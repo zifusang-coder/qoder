@@ -9,12 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
+from app.permissions import admin_access, editor_access, viewer_access
 from app.publish.base import Platform, PublishConfigError, PublishError
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.state import InvalidTransition
@@ -234,7 +234,7 @@ async def list_jobs(
     status: str | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobList:
     base = select(PublishJob).where(PublishJob.tenant_id == user.tenant_id)
@@ -256,7 +256,7 @@ async def list_jobs(
 async def create_job(
     payload: JobIn,
     response: Response,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
     content = (
@@ -352,7 +352,7 @@ async def create_job(
 @router.get("/jobs/{job_id}", response_model=JobOut)
 async def get_job(
     job_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
     return _out(await _owned_job(session, job_id, user))
@@ -361,7 +361,7 @@ async def get_job(
 @router.post("/jobs/{job_id}/precheck", response_model=PrecheckOut)
 async def precheck_job(
     job_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> PrecheckOut:
     job = await _owned_job(session, job_id, user)
@@ -447,7 +447,7 @@ async def precheck_job(
 @router.post("/jobs/{job_id}/execute", response_model=JobOut)
 async def execute_publish(
     job_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
     job = await _owned_job(session, job_id, user)
@@ -478,7 +478,7 @@ async def execute_publish(
 @router.post("/jobs/{job_id}/export", response_model=JobOut)
 async def export_publish(
     job_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> JobOut:
@@ -507,7 +507,7 @@ async def export_publish(
 async def schedule_job(
     job_id: str,
     payload: ScheduleIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
     parsed = _job_id(job_id)
@@ -526,7 +526,7 @@ async def schedule_job(
 async def act_on_job(
     job_id: str,
     payload: ActionIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
     if payload.action not in USER_ACTIONS | SYSTEM_ACTIONS | INTERNAL_ACTIONS:

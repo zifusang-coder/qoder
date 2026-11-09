@@ -10,10 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.settings import LLMProvider
 from app.models.user import User
+from app.permissions import admin_access
 from app.security import decrypt_secret, encrypt_secret
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -87,7 +87,7 @@ def _to_out(provider: LLMProvider) -> ProviderOut:
 
 @router.get("/providers", response_model=list[ProviderOut])
 async def list_providers(
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[ProviderOut]:
     rows = (
@@ -103,7 +103,7 @@ async def list_providers(
 @router.post("/providers", response_model=ProviderOut, status_code=201)
 async def create_provider(
     payload: ProviderIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProviderOut:
     if payload.is_default:
@@ -137,7 +137,7 @@ async def create_provider(
 @router.delete("/providers/{provider_id}", status_code=204)
 async def delete_provider(
     provider_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
     try:

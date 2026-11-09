@@ -7,11 +7,11 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.project import Content, Project
 from app.models.publish import PlatformAccount, PublishJob
 from app.models.user import User
+from app.permissions import viewer_access
 
 router = APIRouter(tags=["calendar"])
 
@@ -53,7 +53,7 @@ def _utc(value: datetime | None) -> datetime | None:
 async def get_calendar(
     start: Annotated[datetime, Query()],
     end: Annotated[datetime, Query()],
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> CalendarOut:
     start_utc = _require_tz(start, "start")

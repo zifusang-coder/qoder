@@ -7,10 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.profile import Profile, ProfileMemory
 from app.models.user import User
+from app.permissions import editor_access, viewer_access
 from app.services.embeddings import embed_memories
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -144,7 +144,7 @@ async def _owned_profile(
 
 @router.get("", response_model=ProfileList)
 async def list_profiles(
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProfileList:
     rows = (
@@ -160,7 +160,7 @@ async def list_profiles(
 @router.post("", response_model=ProfileOut, status_code=201)
 async def create_profile(
     payload: ProfileIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProfileOut:
     profile = Profile(
@@ -183,7 +183,7 @@ async def create_profile(
 @router.get("/{profile_id}", response_model=ProfileOut)
 async def get_profile(
     profile_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProfileOut:
     return _out(await _owned_profile(session, profile_id, user))
@@ -193,7 +193,7 @@ async def get_profile(
 async def update_profile(
     profile_id: str,
     payload: ProfileUpdate,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProfileOut:
     profile = await _owned_profile(session, profile_id, user)
@@ -213,7 +213,7 @@ async def update_profile(
 @router.delete("/{profile_id}", status_code=204)
 async def delete_profile(
     profile_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
     profile = await _owned_profile(session, profile_id, user)
@@ -225,7 +225,7 @@ async def delete_profile(
 @router.get("/{profile_id}/memories", response_model=list[MemoryOut])
 async def list_memories(
     profile_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[MemoryOut]:
     profile = await _owned_profile(session, profile_id, user)
@@ -254,7 +254,7 @@ async def list_memories(
 async def create_memory(
     profile_id: str,
     payload: MemoryIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> MemoryOut:
     profile = await _owned_profile(session, profile_id, user)
@@ -279,7 +279,7 @@ async def create_memory(
 async def delete_memory(
     profile_id: str,
     memory_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
     profile = await _owned_profile(session, profile_id, user)

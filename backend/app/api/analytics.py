@@ -9,10 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.project import Content, Project
 from app.models.user import User
+from app.permissions import editor_access, viewer_access
 from app.services.analytics import import_csv, latest_snapshots
 from app.services.postmortem import generate_postmortem
 from app.skills.manifest import ManifestError
@@ -78,7 +78,7 @@ class PostmortemOut(BaseModel):
 async def import_analytics(
     request: Request,
     file: Annotated[UploadFile, File()],
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ImportResult:
     declared = request.headers.get("content-length")
@@ -104,7 +104,7 @@ async def import_analytics(
 @router.get("/overview", response_model=OverviewOut)
 async def get_overview(
     project_id: uuid.UUID,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> OverviewOut:
     project = (
@@ -174,7 +174,7 @@ async def get_overview(
 async def postmortem(
     content_id: uuid.UUID,
     payload: PostmortemIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> PostmortemOut:

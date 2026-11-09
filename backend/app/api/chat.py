@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import load_gateway_default
 from app.models.user import User
+from app.permissions import editor_access
 from app.services.outputs import (
     adhoc_output_dir,
     prepare_inputs,
@@ -130,7 +130,7 @@ def _summarize(data: dict) -> str:
 @router.post("", response_model=ChatOut)
 async def chat(
     payload: ChatIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> ChatOut:

@@ -13,11 +13,11 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.skill import SkillSetting
 from app.models.user import User
+from app.permissions import admin_access, editor_access, viewer_access
 from app.services.outputs import prepare_inputs, public_output_data
 from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
@@ -107,7 +107,7 @@ def _validate_inputs(skill: LoadedSkill, inputs: dict) -> None:
 
 @router.get("", response_model=SkillList)
 async def list_skills(
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> SkillList:
@@ -124,7 +124,7 @@ async def list_skills(
 @router.get("/{skill_id}", response_model=SkillOut)
 async def get_skill(
     skill_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> SkillOut:
@@ -137,7 +137,7 @@ async def get_skill(
 async def toggle_skill(
     skill_id: str,
     payload: ToggleIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> SkillOut:
@@ -185,7 +185,7 @@ async def toggle_skill(
 async def run_skill(
     skill_id: str,
     payload: RunIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> RunOut:
@@ -246,7 +246,7 @@ async def run_skill(
 async def stream_skill(
     skill_id: str,
     payload: RunIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> EventSourceResponse:

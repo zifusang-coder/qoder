@@ -20,12 +20,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.media import MediaJob
 from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
+from app.permissions import editor_access, viewer_access
 from app.queue import get_queue
 from app.services.media import (
     create_media_job,
@@ -354,7 +354,7 @@ def _safe_upload_name(name: str | None) -> str:
 
 @router.get("/projects", response_model=ProjectList)
 async def list_projects(
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProjectList:
     rows = (
@@ -370,7 +370,7 @@ async def list_projects(
 @router.post("/projects", response_model=ProjectOut, status_code=201)
 async def create_project(
     payload: ProjectIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProjectOut:
     data = payload.model_dump()
@@ -398,7 +398,7 @@ async def create_project(
 @router.get("/projects/{project_id}", response_model=ProjectOut)
 async def get_project(
     project_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProjectOut:
     return _project_out(await _owned_project(session, project_id, user))
@@ -407,7 +407,7 @@ async def get_project(
 @router.get("/projects/{project_id}/contents", response_model=list[ContentOut])
 async def list_contents(
     project_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[ContentOut]:
     project = await _owned_project(session, project_id, user)
@@ -425,7 +425,7 @@ async def list_contents(
 async def create_content(
     project_id: str,
     payload: ContentIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ContentOut:
     project = await _owned_project(session, project_id, user)
@@ -458,7 +458,7 @@ async def create_content(
 @router.get("/contents/{content_id}/versions", response_model=VersionList)
 async def list_versions(
     content_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> VersionList:
     content = await _owned_content(session, content_id, user)
@@ -476,7 +476,7 @@ async def list_versions(
 async def create_version(
     content_id: str,
     payload: VersionIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> VersionOut:
     content = await _owned_content(session, content_id, user)
@@ -505,7 +505,7 @@ async def create_version(
 @router.get("/projects/{project_id}/files")
 async def list_project_files(
     project_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> dict:
@@ -517,7 +517,7 @@ async def list_project_files(
 async def download_project_file(
     project_id: str,
     path: Annotated[str, Query(min_length=1, max_length=500)],
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> Response:
@@ -542,7 +542,7 @@ async def download_project_file(
 async def preview_project_file(
     project_id: str,
     path: Annotated[str, Query(min_length=1, max_length=500)],
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> Response:
@@ -573,7 +573,7 @@ async def preview_project_file(
 async def upload_project_file(
     project_id: str,
     file: Annotated[UploadFile, File()],
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> dict:
@@ -595,7 +595,7 @@ async def upload_project_file(
 @router.get("/projects/{project_id}/media", response_model=MediaListOut)
 async def list_project_media(
     project_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> MediaListOut:
     project = await _owned_project(session, project_id, user)
@@ -663,7 +663,7 @@ async def create_project_media(
     project_id: str,
     skill_id: str,
     payload: MediaIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
     queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
@@ -689,7 +689,7 @@ async def create_project_media(
 async def get_project_media_job(
     project_id: str,
     job_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> MediaJobOut:
     project = await _owned_project(session, project_id, user)
@@ -705,7 +705,7 @@ async def get_project_media_job(
 async def retry_project_media_job(
     project_id: str,
     job_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
 ) -> MediaJobOut:
@@ -726,7 +726,7 @@ async def retry_project_media_job(
 async def repurpose(
     project_id: str,
     payload: RepurposeIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
 ) -> RepurposeOut:

@@ -16,10 +16,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps import get_current_user
 from app.errors import AppError
 from app.models.publish import PlatformAccount
 from app.models.user import User
+from app.permissions import admin_access, editor_access
 from app.publish.base import Platform
 from app.security import decrypt_secret, encrypt_secret
 
@@ -178,7 +178,7 @@ async def _owned_account(
 
 @router.get("", response_model=list[AccountOut])
 async def list_accounts(
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[AccountOut]:
     rows = (
@@ -196,7 +196,7 @@ async def list_accounts(
 @router.post("", response_model=AccountOut, status_code=201)
 async def create_account(
     payload: AccountIn,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> AccountOut:
     account = PlatformAccount(
@@ -223,7 +223,7 @@ async def create_account(
 async def update_account(
     account_id: str,
     payload: AccountUpdate,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> AccountOut:
     account = await _owned_account(session, account_id, user)
@@ -263,7 +263,7 @@ async def update_account(
 @router.delete("/{account_id}", status_code=204)
 async def revoke_account(
     account_id: str,
-    user: User = Depends(get_current_user),  # noqa: B008
+    user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
     account = await _owned_account(session, account_id, user)
