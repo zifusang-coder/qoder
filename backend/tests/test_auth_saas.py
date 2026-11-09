@@ -191,6 +191,10 @@ async def test_suspended_tenant_cannot_login(auth_client, db_session):
 
 
 async def test_change_password_rotates_token(auth_client, auth_headers, db_session):
+    # 先置为待改密码，证明改密确实清除了该标记（token_version 不变，登录令牌仍有效）
+    admin = await _admin(db_session)
+    admin.must_change_password = True
+    await db_session.commit()
     resp = await auth_client.post(
         "/api/auth/change-password",
         headers=auth_headers,
@@ -222,6 +226,31 @@ async def test_change_password_rejects_wrong_current(auth_client, auth_headers):
     )
     assert resp.status_code == 400
     assert resp.json()["code"] == "invalid_password"
+
+
+async def test_change_password_rejects_oversized_current(auth_client, auth_headers):
+    resp = await auth_client.post(
+        "/api/auth/change-password",
+        headers=auth_headers,
+        json={"current_password": "x" * 200, "new_password": "new-password-123"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_unknown_email_login_logs_without_audit(auth_client, db_session, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        resp = await auth_client.post(
+            "/api/auth/login",
+            json={"email": "ghost@local", "password": "whatever-123"},
+        )
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "invalid_credentials"
+    rows = await _audit_rows(db_session, "auth.login_failed")
+    assert rows == []
+    assert any("ghost@local" in record.message for record in caplog.records)
+    assert not any("whatever-123" in record.message for record in caplog.records)
 
 
 async def test_change_password_rejects_short_and_same(auth_client, auth_headers):

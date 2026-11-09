@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -12,6 +13,8 @@ from app.models.tenant import Tenant
 from app.models.user import User
 from app.security import create_token, hash_password, verify_password
 from app.services.audit import record, record_best_effort
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -36,7 +39,7 @@ class TokenOut(BaseModel):
 
 
 class ChangePasswordIn(BaseModel):
-    current_password: str
+    current_password: Annotated[str, StringConstraints(max_length=128)]
     new_password: Annotated[
         str, StringConstraints(min_length=8, max_length=128)
     ]
@@ -70,6 +73,8 @@ async def login(
     ).scalar_one_or_none()
     if user is None:
         verify_password(payload.password, _DUMMY_HASH)
+        # 未知邮箱不写审计（避免伪造邮箱污染租户审计），但留服务端日志便于排查
+        logger.warning("登录失败：邮箱不存在 email=%s", payload.email)
         raise AppError("invalid_credentials", "邮箱或密码错误", 401)
     if not verify_password(payload.password, user.password_hash):
         await record_best_effort(
