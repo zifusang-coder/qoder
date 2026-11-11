@@ -67,6 +67,13 @@ class MemberUpdateIn(BaseModel):
             raise ValueError("至少需要提供一个要更新的字段")
         return self
 
+    @model_validator(mode="after")
+    def _reject_explicit_nulls(self) -> "MemberUpdateIn":
+        for name in self.model_fields_set:
+            if getattr(self, name) is None:
+                raise ValueError(f"{name} 不能为空")
+        return self
+
 
 def _out(member: User) -> MemberOut:
     return MemberOut(

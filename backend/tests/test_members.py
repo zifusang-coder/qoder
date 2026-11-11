@@ -1,5 +1,3 @@
-import secrets
-
 import pytest
 from sqlalchemy import select
 
@@ -36,7 +34,15 @@ async def test_create_member_returns_one_time_password(auth_client, auth_headers
     assert body["role"] == "editor"
     assert body["is_active"] is True
     assert len(body["initial_password"]) >= 12
-    assert "password" not in {key for key in body if key != "initial_password"}
+    assert set(body) == {
+        "id",
+        "email",
+        "display_name",
+        "role",
+        "is_active",
+        "created_at",
+        "initial_password",
+    }
 
     login = await auth_client.post(
         "/api/auth/login",
@@ -184,8 +190,34 @@ async def test_list_members_returns_tenant_members_only(
     assert "other-member@local" not in emails
 
 
-def test_password_generator_is_random():
-    first = secrets.token_urlsafe(12)
-    second = secrets.token_urlsafe(12)
+async def test_initial_passwords_are_random(auth_client, auth_headers):
+    first = (
+        await _create_member(auth_client, auth_headers, email="first@local")
+    ).json()["initial_password"]
+    second = (
+        await _create_member(auth_client, auth_headers, email="second@local")
+    ).json()["initial_password"]
     assert first != second
     assert len(first) >= 12
+
+
+async def test_member_update_requires_a_field(auth_client, auth_headers):
+    member = (await _create_member(auth_client, auth_headers)).json()
+    resp = await auth_client.patch(
+        f"/api/members/{member['id']}", headers=auth_headers, json={}
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"display_name": None}, {"role": None}, {"is_active": None}],
+)
+async def test_member_update_rejects_explicit_nulls(
+    auth_client, auth_headers, payload
+):
+    member = (await _create_member(auth_client, auth_headers)).json()
+    resp = await auth_client.patch(
+        f"/api/members/{member['id']}", headers=auth_headers, json=payload
+    )
+    assert resp.status_code == 422
