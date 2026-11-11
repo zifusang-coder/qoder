@@ -158,6 +158,20 @@ async def test_editor_cannot_reschedule_approved_job_via_replay(db_session):
         assert unchanged.scheduled_at is None
 
 
+async def test_member_management_permissions(db_session):
+    async with _role_client(db_session, "admin") as client:
+        assert (await client.get("/api/members")).status_code == 200
+        created = await client.post(
+            "/api/members",
+            json={"email": "by-admin@local", "display_name": "管理员创建"},
+        )
+        assert created.status_code == 403
+        assert created.json()["code"] == "forbidden"
+
+    async with _role_client(db_session, "editor") as client:
+        assert (await client.get("/api/members")).status_code == 403
+
+
 async def test_platform_admin_dependency():
     from app.errors import AppError
     from app.permissions import require_platform_admin

@@ -221,3 +221,57 @@ async def test_member_update_rejects_explicit_nulls(
         f"/api/members/{member['id']}", headers=auth_headers, json=payload
     )
     assert resp.status_code == 422
+
+
+async def test_audit_failure_is_not_reported_as_email_exists(
+    auth_client, auth_headers, monkeypatch
+):
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy.exc import IntegrityError
+
+    from app.api import members as members_module
+    from app.main import app
+
+    async def _boom(*args, **kwargs):
+        raise IntegrityError("INSERT audit_logs", {}, Exception("boom"))
+
+    monkeypatch.setattr(members_module, "record", _boom)
+    # ASGITransport 默认把未处理异常重新抛给调用方；关闭后由全局异常
+    # 处理器返回 500 信封，断言才与真实客户端看到的响应一致。
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            "/api/members",
+            headers=auth_headers,
+            json={"email": "audit-boom@local", "display_name": "成员"},
+        )
+    assert resp.status_code == 500
+    assert resp.json()["code"] == "internal_error"
+
+
+async def test_enabling_member_revokes_old_token(auth_client, auth_headers):
+    created = (await _create_member(auth_client, auth_headers)).json()
+    login = await auth_client.post(
+        "/api/auth/login",
+        json={"email": "member@local", "password": created["initial_password"]},
+    )
+    token = login.json()["access_token"]
+    assert (
+        await auth_client.delete(
+            f"/api/members/{created['id']}", headers=auth_headers
+        )
+    ).status_code == 204
+    enabled = await auth_client.patch(
+        f"/api/members/{created['id']}",
+        headers=auth_headers,
+        json={"is_active": True},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["is_active"] is True
+    old = await auth_client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert old.status_code == 401
+    assert old.json()["code"] == "token_revoked"

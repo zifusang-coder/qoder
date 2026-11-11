@@ -148,20 +148,20 @@ async def create_member(
     session.add(member)
     try:
         await session.flush()
-        await record(
-            session,
-            tenant_id=user.tenant_id,
-            action="member.create",
-            actor=user,
-            resource_type="user",
-            resource_id=str(member.id),
-            detail={"role": member.role},
-            request=request,
-        )
-        await session.commit()
     except IntegrityError:
         await session.rollback()
         raise AppError("email_exists", "该邮箱已被使用", 409) from None
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="member.create",
+        actor=user,
+        resource_type="user",
+        resource_id=str(member.id),
+        detail={"role": member.role},
+        request=request,
+    )
+    await session.commit()
     await session.refresh(member)
     return MemberCreatedOut(
         **_out(member).model_dump(), initial_password=initial_password
