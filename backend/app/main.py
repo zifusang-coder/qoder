@@ -12,6 +12,7 @@ from app.api import (
     auth,
     calendar,
     chat,
+    members,
     profiles,
     projects,
     publish,
@@ -85,6 +86,7 @@ app.include_router(projects.router, prefix="/api")
 app.include_router(publish.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+app.include_router(members.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 
 
