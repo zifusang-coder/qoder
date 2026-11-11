@@ -14,7 +14,7 @@ from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
-from app.permissions import admin_access, editor_access, viewer_access
+from app.permissions import admin_access, editor_access, has_role, viewer_access
 from app.publish.base import Platform, PublishConfigError, PublishError
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.state import InvalidTransition
@@ -188,10 +188,13 @@ async def _replay_existing(
 ) -> JobOut:
     tenant_id = user.tenant_id
     actor = user.email
+    can_manage_schedule = has_role(user, "admin")
     for attempt in range(2):
         key = existing.idempotency_key
         try:
             if existing.status == "cancelled":
+                if not can_manage_schedule:
+                    raise AppError("forbidden", "权限不足", 403)
                 job = await reopen(
                     session,
                     existing.id,
@@ -202,6 +205,8 @@ async def _replay_existing(
             elif payload.scheduled_at is not None and _utc(
                 payload.scheduled_at
             ) != _utc(existing.scheduled_at):
+                if not can_manage_schedule:
+                    raise AppError("forbidden", "权限不足", 403)
                 job = await reschedule(
                     session,
                     existing.id,

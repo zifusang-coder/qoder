@@ -19,9 +19,13 @@ ROLE_RANK: dict[str, int] = {
 UserDep = Annotated[User, Depends(get_current_user)]
 
 
+def has_role(user: User, min_role: Role) -> bool:
+    return user.role in ROLE_RANK and ROLE_RANK[user.role] >= ROLE_RANK[min_role]
+
+
 def require_role(min_role: Role) -> Callable[..., Awaitable[User]]:
     async def dependency(user: UserDep) -> User:
-        if user.role not in ROLE_RANK or ROLE_RANK[user.role] < ROLE_RANK[min_role]:
+        if not has_role(user, min_role):
             raise AppError("forbidden", "权限不足", 403)
         return user
 

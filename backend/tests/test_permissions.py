@@ -1,12 +1,15 @@
 import uuid
 from contextlib import asynccontextmanager
 
+import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
+from app.models.publish import PublishJob
 from app.models.user import User
 
 
@@ -83,3 +86,108 @@ async def test_viewer_cannot_use_chat(db_session):
     async with _role_client(db_session, "viewer") as client:
         resp = await client.post("/api/chat", json={"message": "你好"})
         assert resp.status_code == 403
+
+
+async def test_editor_cannot_execute_schedule_or_act_on_jobs(db_session):
+    async with _role_client(db_session, "editor") as client:
+        job_id = uuid.uuid4()
+        execute = await client.post(f"/api/publish/jobs/{job_id}/execute")
+        assert execute.status_code == 403
+        assert execute.json()["code"] == "forbidden"
+        schedule = await client.patch(
+            f"/api/publish/jobs/{job_id}/schedule",
+            json={"scheduled_at": "2026-11-09T00:00:00Z"},
+        )
+        assert schedule.status_code == 403
+        assert schedule.json()["code"] == "forbidden"
+        act = await client.post(
+            f"/api/publish/jobs/{job_id}/actions", json={"action": "approve"}
+        )
+        assert act.status_code == 403
+        assert act.json()["code"] == "forbidden"
+
+
+async def test_viewer_cannot_list_accounts(db_session):
+    async with _role_client(db_session, "viewer") as client:
+        resp = await client.get("/api/accounts")
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "forbidden"
+
+
+async def test_editor_cannot_reschedule_approved_job_via_replay(db_session):
+    from app.models.base import DEFAULT_TENANT_ID
+    from app.services.publish import apply_action
+
+    async with _role_client(db_session, "editor") as client:
+        project = await client.post("/api/projects", json={"title": "重放提权测试"})
+        assert project.status_code == 201
+        content = await client.post(
+            f"/api/projects/{project.json()['id']}/contents",
+            json={"platform": "wechat", "title": "标题", "body": "正文"},
+        )
+        assert content.status_code == 201
+        created = await client.post(
+            "/api/publish/jobs",
+            json={"content_id": content.json()["id"], "platform": "wechat"},
+        )
+        assert created.status_code == 201
+        job_id = uuid.UUID(created.json()["id"])
+        for action in ("submit", "pass", "approve"):
+            await apply_action(
+                db_session,
+                job_id,
+                action,
+                tenant_id=DEFAULT_TENANT_ID,
+                actor="system",
+            )
+        replay = await client.post(
+            "/api/publish/jobs",
+            json={
+                "content_id": content.json()["id"],
+                "platform": "wechat",
+                "scheduled_at": "2026-11-09T00:00:00Z",
+            },
+        )
+        assert replay.status_code == 403
+        assert replay.json()["code"] == "forbidden"
+        unchanged = (
+            await db_session.execute(
+                select(PublishJob).where(PublishJob.id == job_id)
+            )
+        ).scalar_one()
+        assert unchanged.scheduled_at is None
+
+
+async def test_platform_admin_dependency():
+    from app.errors import AppError
+    from app.permissions import require_platform_admin
+
+    tenant_admin = User(
+        id=uuid.uuid4(),
+        tenant_id=DEFAULT_TENANT_ID,
+        email="admin-unit@local",
+        password_hash="x",
+        display_name="admin",
+        role="admin",
+        is_active=True,
+        must_change_password=False,
+        is_platform_admin=False,
+        token_version=0,
+    )
+    with pytest.raises(AppError) as exc:
+        await require_platform_admin(tenant_admin)
+    assert exc.value.code == "platform_admin_required"
+
+    platform_admin = tenant_admin.__class__(
+        id=uuid.uuid4(),
+        tenant_id=DEFAULT_TENANT_ID,
+        email="root@local",
+        password_hash="x",
+        display_name="root",
+        role="owner",
+        is_active=True,
+        must_change_password=False,
+        is_platform_admin=True,
+        token_version=0,
+    )
+    assert await require_platform_admin(platform_admin) is platform_admin
