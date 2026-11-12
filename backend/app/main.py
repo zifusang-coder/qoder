@@ -17,6 +17,7 @@ from app.api import (
     projects,
     publish,
     skills,
+    tenants,
 )
 from app.api import settings as settings_api
 from app.config import get_settings
@@ -87,6 +88,7 @@ app.include_router(publish.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(members.router, prefix="/api")
+app.include_router(tenants.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 
 
