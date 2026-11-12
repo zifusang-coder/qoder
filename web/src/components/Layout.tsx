@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { visibleNavItems } from "../auth";
 import { useAuth } from "../auth-context";
 import { setToken } from "../client";
@@ -42,6 +42,12 @@ export default function Layout() {
               </NavLink>
             ))}
           </nav>
+          <Link
+            className="text-sm text-slate-400 hover:text-slate-200"
+            to="/change-password"
+          >
+            修改密码
+          </Link>
           <button
             type="button"
             className="text-sm text-slate-400 hover:text-slate-200"

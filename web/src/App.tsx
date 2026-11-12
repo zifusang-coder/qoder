@@ -6,6 +6,7 @@ import Layout from "./components/Layout";
 import Accounts from "./pages/Accounts";
 import Analytics from "./pages/Analytics";
 import Calendar from "./pages/Calendar";
+import ChangePassword from "./pages/ChangePassword";
 import Chat from "./pages/Chat";
 import Login from "./pages/Login";
 import Profiles from "./pages/Profiles";
@@ -25,6 +26,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route element={<ProtectedLayout />}>
+        <Route path="/change-password" element={<ChangePassword />} />
         <Route element={<Layout />}>
           <Route index element={<HomeRedirect />} />
           <Route
