@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api import (
     accounts,
     analytics,
+    audit,
     auth,
     calendar,
     chat,
@@ -89,6 +90,7 @@ app.include_router(skills.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(members.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
+app.include_router(audit.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 
 
