@@ -1,6 +1,6 @@
 # 新媒体运营系统
 
-原生 AI 新媒体运营系统（Phase 0/1 MVP，已开始 Phase 2 工程基础）。设计见 [设计文档](docs/原生AI新媒体运营系统-开发文档.md)。
+原生 AI 新媒体运营系统（Phase 0–3：创作发布闭环 + 多租户 SaaS 基础）。设计见 [设计文档](docs/原生AI新媒体运营系统-开发文档.md)。
 
 ## 本地启动
 
@@ -137,6 +137,30 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 - pgvector 记忆检索已完成：数据库镜像切换到 `pgvector/pgvector:pg16`，新增 1024 维向量列与 HNSW 余弦索引；写入时生成向量，检索失败回退权重排序，并提供 `make embed-backfill` 回填命令。
 - 媒体技能已完成：`short-video` 与 `tts-voiceover` 产出 MP4/MP3/SRT，项目媒体接口导入存储并生成内容版本，前端提供生成表单与鉴权预览；生成改为 arq 后台任务 + 轮询，失败可重试，配音在 LLM 限流时降级为原始稿合成。
 - 真实 LLM（千问）与公众号草稿创建已在本地完成冒烟；真实短视频链路（千问分镜 + edge-tts + ffmpeg + 存储 + 预览）已通过验收。COS 等其他 S3 兼容存储尚未逐家联调，生产部署前需按环境复核。
+
+## Phase 3 多租户 SaaS 基础
+
+- **租户生命周期**：新增 `tenants` 表与平台管理员权限位；平台管理员可创建/改名/停用/启用租户，创建时同步开通 owner 账号并返回一次性临时密码。不提供公开注册与租户删除。
+- **四级角色**：`viewer < editor < admin < owner`。viewer 只读；editor 可创作、跑技能、生成媒体、导入数据、导出与创建发布任务；admin 可管理发布账号、审核/执行/排期发布、管理模型设置；owner 可管理成员与租户信息。平台管理员与业务角色解耦，即使角色为 viewer 仍可管理租户。
+- **成员管理**：owner 可创建成员、改角色、停用/启用；临时密码只返回一次，首次登录强制改密；最后一名 owner 不可被降级或停用，不能修改自己的角色或停用自己。
+- **会话失效**：JWT 增加 `ver` 声明并与 `users.token_version` 比对；改密、改角色、停用用户、停用租户都会使旧 token 立即失效。
+- **审计**：新增 `audit_logs` 表，记录登录、改密、成员、租户、发布账号、模型提供商、技能启停、发布与媒体事件；审计按租户隔离、只追加，`password`/`token`/`secret`/`api_key` 等字段写库前脱敏。
+- **前端**：新增 `/change-password`、`/team`、`/audit`、`/tenants`；导航按角色过滤，只读角色的写入表单与按钮隐藏。
+
+升级现有数据库执行 `make migrate`。迁移会插入默认租户、把原管理员回填为 `owner` 并删除 `users.is_admin`；首次启动时 `ensure_admin` 将首位管理员提升为平台管理员。所有旧 token 均失效，升级后需要重新登录。
+
+新增接口：
+
+```text
+GET/POST         /api/members
+PATCH/DELETE     /api/members/{id}
+GET/POST         /api/tenants
+PATCH            /api/tenants/{id}
+GET              /api/audit-logs
+POST             /api/auth/change-password
+```
+
+Phase 3 已知限制：一人一租户；无公开注册、租户删除与计费；审计不自动归档；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）。
 
 ## Phase 1 已知限制
 
