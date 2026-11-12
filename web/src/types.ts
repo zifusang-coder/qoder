@@ -244,6 +244,24 @@ export interface MediaJob {
   updated_at: string;
 }
 
+export interface AuditLog {
+  id: string;
+  actor_email: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  status: string;
+  ip: string;
+  user_agent: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AuditLogList {
+  items: AuditLog[];
+  total: number;
+}
+
 export const PLATFORMS = [
   ["wechat", "公众号"],
   ["xiaohongshu", "小红书"],
