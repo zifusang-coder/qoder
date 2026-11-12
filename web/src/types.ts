@@ -186,6 +186,19 @@ export interface MemberCreated extends Member {
   initial_password: string;
 }
 
+export interface Tenant {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  members_count: number;
+  created_at: string;
+}
+
+export interface TenantCreated extends Tenant {
+  owner: MemberCreated;
+}
+
 export interface ChatOut {
   reply: string;
   intent: string;

@@ -16,6 +16,7 @@ import Projects from "./pages/Projects";
 import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
 import Team from "./pages/Team";
+import Tenants from "./pages/Tenants";
 
 function HomeRedirect() {
   const { user } = useAuth();
@@ -67,6 +68,14 @@ export default function App() {
             element={
               <RequireRole minRole="admin">
                 <Audit />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/tenants"
+            element={
+              <RequireRole platformAdmin>
+                <Tenants />
               </RequireRole>
             }
           />
