@@ -4,7 +4,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import jsonschema
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +18,7 @@ from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.skill import SkillSetting
 from app.models.user import User
 from app.permissions import admin_access, editor_access, viewer_access
+from app.services.audit import record
 from app.services.outputs import prepare_inputs, public_output_data
 from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import enabled_map, require_enabled as _require_enabled
@@ -137,6 +138,7 @@ async def get_skill(
 async def toggle_skill(
     skill_id: str,
     payload: ToggleIn,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
@@ -161,6 +163,16 @@ async def toggle_skill(
     else:
         setting.enabled = payload.enabled
     try:
+        await record(
+            session,
+            tenant_id=user.tenant_id,
+            action="skill.toggle",
+            actor=user,
+            resource_type="skill",
+            resource_id=skill_id,
+            detail={"enabled": payload.enabled},
+            request=request,
+        )
         await session.commit()
     except IntegrityError:
         # Concurrent first-time toggles can both INSERT; adopt the winner's row.
@@ -177,6 +189,16 @@ async def toggle_skill(
         if setting is None:
             raise
         setting.enabled = payload.enabled
+        await record(
+            session,
+            tenant_id=user.tenant_id,
+            action="skill.toggle",
+            actor=user,
+            resource_type="skill",
+            resource_id=skill_id,
+            detail={"enabled": payload.enabled},
+            request=request,
+        )
         await session.commit()
     return _skill_out(skill, payload.enabled)
 

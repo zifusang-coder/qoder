@@ -309,6 +309,8 @@ async def test_toggle_recovers_from_concurrent_insert(
 
 
 async def test_toggle_reraises_integrity_error_without_winner(db_session, monkeypatch):
+    from types import SimpleNamespace
+
     from sqlalchemy.exc import IntegrityError
 
     from app.api.skills import ToggleIn, toggle_skill
@@ -341,6 +343,7 @@ async def test_toggle_reraises_integrity_error_without_winner(db_session, monkey
         await toggle_skill(
             "demo-skill",
             ToggleIn(enabled=False),
+            SimpleNamespace(client=None, headers={}),
             user=user,
             session=db_session,
             registry=SkillRegistry(FIXTURE),

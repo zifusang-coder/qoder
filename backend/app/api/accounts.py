@@ -3,7 +3,7 @@ import uuid
 from typing import Annotated
 
 from cryptography.fernet import InvalidToken
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -22,6 +22,7 @@ from app.models.user import User
 from app.permissions import admin_access, editor_access
 from app.publish.base import Platform
 from app.security import decrypt_secret, encrypt_secret
+from app.services.audit import record
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -196,6 +197,7 @@ async def list_accounts(
 @router.post("", response_model=AccountOut, status_code=201)
 async def create_account(
     payload: AccountIn,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> AccountOut:
@@ -211,10 +213,21 @@ async def create_account(
     )
     session.add(account)
     try:
-        await session.commit()
+        await session.flush()
     except IntegrityError:
         await session.rollback()
         raise AppError("account_exists", "该平台下已存在同名账号", 409) from None
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="account.create",
+        actor=user,
+        resource_type="account",
+        resource_id=str(account.id),
+        detail={"platform": account.platform},
+        request=request,
+    )
+    await session.commit()
     await session.refresh(account)
     return _out(account)
 
@@ -223,6 +236,7 @@ async def create_account(
 async def update_account(
     account_id: str,
     payload: AccountUpdate,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> AccountOut:
@@ -252,10 +266,20 @@ async def update_account(
     if meta is not None:
         account.meta = meta
     try:
-        await session.commit()
+        await session.flush()
     except IntegrityError:
         await session.rollback()
         raise AppError("account_exists", "该平台下已存在同名账号", 409) from None
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="account.update",
+        actor=user,
+        resource_type="account",
+        resource_id=str(account.id),
+        request=request,
+    )
+    await session.commit()
     await session.refresh(account)
     return _out(account)
 
@@ -263,6 +287,7 @@ async def update_account(
 @router.delete("/{account_id}", status_code=204)
 async def revoke_account(
     account_id: str,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
@@ -272,5 +297,14 @@ async def revoke_account(
         # 停用即销毁密钥与 meta，撤销后的账号不再保留任何可用凭据
         account.credential_enc = encrypt_secret("{}")
         account.meta = {}
+        await record(
+            session,
+            tenant_id=user.tenant_id,
+            action="account.revoke",
+            actor=user,
+            resource_type="account",
+            resource_id=str(account.id),
+            request=request,
+        )
         await session.commit()
     return Response(status_code=204)

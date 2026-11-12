@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import jsonschema
 from arq.connections import ArqRedis
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -27,6 +27,7 @@ from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
 from app.permissions import editor_access, viewer_access
 from app.queue import get_queue
+from app.services.audit import record_best_effort
 from app.services.media import (
     create_media_job,
     mark_queue_failed,
@@ -663,6 +664,7 @@ async def create_project_media(
     project_id: str,
     skill_id: str,
     payload: MediaIn,
+    request: Request,
     user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     registry: SkillRegistry = Depends(get_registry),  # noqa: B008
@@ -679,6 +681,16 @@ async def create_project_media(
         created_by=user.id,
     )
     await _enqueue_media_job(queue, session, job)
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="media.create",
+        actor=user,
+        resource_type="media_job",
+        resource_id=str(job.id),
+        detail={"skill_id": skill_id},
+        request=request,
+    )
     return _media_job_out(job)
 
 
@@ -705,6 +717,7 @@ async def get_project_media_job(
 async def retry_project_media_job(
     project_id: str,
     job_id: str,
+    request: Request,
     user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
@@ -715,6 +728,15 @@ async def retry_project_media_job(
         session=session, job_id=job_id, tenant_id=user.tenant_id
     )
     await _enqueue_media_job(queue, session, job)
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="media.retry",
+        actor=user,
+        resource_type="media_job",
+        resource_id=str(job.id),
+        request=request,
+    )
     return _media_job_out(job)
 
 

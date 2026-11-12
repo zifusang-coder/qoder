@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,7 @@ from app.publish.base import Platform, PublishConfigError, PublishError
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
+from app.services.audit import record, record_best_effort
 from app.services.precheck import run_precheck
 from app.services.publish import (
     ContentChanged,
@@ -261,6 +262,7 @@ async def list_jobs(
 async def create_job(
     payload: JobIn,
     response: Response,
+    request: Request,
     user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
@@ -342,6 +344,16 @@ async def create_job(
                 action="create",
                 actor=user.email,
             )
+        )
+        await record(
+            session,
+            tenant_id=user.tenant_id,
+            action="publish.create",
+            actor=user,
+            resource_type="publish_job",
+            resource_id=str(job.id),
+            detail={"platform": job.platform},
+            request=request,
         )
         await session.commit()
     except IntegrityError:
@@ -452,6 +464,7 @@ async def precheck_job(
 @router.post("/jobs/{job_id}/execute", response_model=JobOut)
 async def execute_publish(
     job_id: str,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
@@ -477,12 +490,22 @@ async def execute_publish(
         raise AppError("account_misconfigured", str(exc), 409) from exc
     except PublishError as exc:
         raise AppError("publish_failed", str(exc), 502) from exc
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="publish.execute",
+        actor=user,
+        resource_type="publish_job",
+        resource_id=str(job.id),
+        request=request,
+    )
     return _out(job)
 
 
 @router.post("/jobs/{job_id}/export", response_model=JobOut)
 async def export_publish(
     job_id: str,
+    request: Request,
     user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
@@ -505,6 +528,16 @@ async def export_publish(
         raise AppError(
             "invalid_state", "发布任务状态已变化，请刷新后重试", 409
         ) from exc
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="publish.export",
+        actor=user,
+        resource_type="publish_job",
+        resource_id=str(job.id),
+        detail={"platform": job.platform},
+        request=request,
+    )
     return _out(job)
 
 
@@ -512,6 +545,7 @@ async def export_publish(
 async def schedule_job(
     job_id: str,
     payload: ScheduleIn,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
@@ -524,6 +558,22 @@ async def schedule_job(
         raise AppError("not_found", str(exc), 404) from exc
     except JobNotReschedulable as exc:
         raise AppError("job_not_reschedulable", str(exc), 409) from exc
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="publish.schedule",
+        actor=user,
+        resource_type="publish_job",
+        resource_id=str(job.id),
+        detail={
+            "scheduled_at": (
+                payload.scheduled_at.isoformat()
+                if payload.scheduled_at is not None
+                else ""
+            )
+        },
+        request=request,
+    )
     return _out(job)
 
 
@@ -531,6 +581,7 @@ async def schedule_job(
 async def act_on_job(
     job_id: str,
     payload: ActionIn,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
@@ -556,4 +607,14 @@ async def act_on_job(
         raise AppError("invalid_transition", str(exc), 409) from exc
     except ContentChanged as exc:
         raise AppError("content_changed", str(exc), 409) from exc
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="publish.action",
+        actor=user,
+        resource_type="publish_job",
+        resource_id=str(job.id),
+        detail={"action": payload.action},
+        request=request,
+    )
     return _out(job)

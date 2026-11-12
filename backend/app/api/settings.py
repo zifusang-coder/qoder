@@ -3,7 +3,7 @@ import uuid
 from typing import Annotated, Literal
 
 from cryptography.fernet import InvalidToken
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +15,7 @@ from app.models.settings import LLMProvider
 from app.models.user import User
 from app.permissions import admin_access
 from app.security import decrypt_secret, encrypt_secret
+from app.services.audit import record
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -103,6 +104,7 @@ async def list_providers(
 @router.post("/providers", response_model=ProviderOut, status_code=201)
 async def create_provider(
     payload: ProviderIn,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> ProviderOut:
@@ -126,10 +128,21 @@ async def create_provider(
     )
     session.add(provider)
     try:
-        await session.commit()
+        await session.flush()
     except IntegrityError:
         await session.rollback()
         raise AppError("default_conflict", "默认提供商冲突，请重试", 409) from None
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="provider.create",
+        actor=user,
+        resource_type="provider",
+        resource_id=str(provider.id),
+        detail={"name": provider.name},
+        request=request,
+    )
+    await session.commit()
     await session.refresh(provider)
     return _to_out(provider)
 
@@ -137,6 +150,7 @@ async def create_provider(
 @router.delete("/providers/{provider_id}", status_code=204)
 async def delete_provider(
     provider_id: str,
+    request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
@@ -154,6 +168,15 @@ async def delete_provider(
     ).scalar_one_or_none()
     if provider is None:
         raise AppError("not_found", "提供商不存在", 404)
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="provider.delete",
+        actor=user,
+        resource_type="provider",
+        resource_id=str(provider.id),
+        request=request,
+    )
     await session.delete(provider)
     await session.commit()
     return Response(status_code=204)
