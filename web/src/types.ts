@@ -1,3 +1,5 @@
+export type { Me } from "./auth";
+
 export interface Profile {
   id: string;
   name: string;

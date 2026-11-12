@@ -1,21 +1,14 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { visibleNavItems } from "../auth";
+import { useAuth } from "../auth-context";
 import { setToken } from "../client";
-
-const NAV_ITEMS = [
-  { to: "/chat", label: "助手" },
-  { to: "/profiles", label: "账号画像" },
-  { to: "/projects", label: "项目" },
-  { to: "/accounts", label: "发布账号" },
-  { to: "/calendar", label: "日历" },
-  { to: "/publish", label: "发布" },
-  { to: "/analytics", label: "数据" },
-  { to: "/settings", label: "设置" },
-];
 
 export default function Layout() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const navItems = user ? visibleNavItems(user) : [];
 
   function logout() {
     // Drop cached data from the previous session so the next login starts clean.
@@ -31,8 +24,9 @@ export default function Layout() {
           <span className="text-sm font-semibold tracking-wide text-indigo-400">
             新媒体运营
           </span>
+          <span className="text-xs text-slate-500">{user?.tenant_name}</span>
           <nav className="flex flex-1 flex-wrap gap-1 text-sm">
-            {NAV_ITEMS.map((item) => (
+            {navItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

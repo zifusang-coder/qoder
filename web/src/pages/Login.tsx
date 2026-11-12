@@ -19,7 +19,7 @@ export default function Login() {
         body: JSON.stringify({ email, password }),
       });
       setToken(data.access_token);
-      navigate("/chat");
+      navigate("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");
     } finally {
