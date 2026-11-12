@@ -173,6 +173,19 @@ export interface CalendarOut {
   items: CalendarItem[];
 }
 
+export interface Member {
+  id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface MemberCreated extends Member {
+  initial_password: string;
+}
+
 export interface ChatOut {
   reply: string;
   intent: string;

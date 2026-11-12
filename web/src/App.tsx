@@ -14,6 +14,7 @@ import ProjectDetail from "./pages/ProjectDetail";
 import Projects from "./pages/Projects";
 import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
+import Team from "./pages/Team";
 
 function HomeRedirect() {
   const { user } = useAuth();
@@ -49,6 +50,14 @@ export default function App() {
             element={
               <RequireRole minRole="admin">
                 <Settings />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/team"
+            element={
+              <RequireRole minRole="admin">
+                <Team />
               </RequireRole>
             }
           />
