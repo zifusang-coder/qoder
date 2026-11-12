@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChangeEvent, useState } from "react";
 import { Link } from "react-router-dom";
+import { useAuth } from "../auth-context";
 import { api } from "../client";
 import {
   errorText,
@@ -22,6 +23,7 @@ type PostmortemFeedback = {
 
 export default function Analytics() {
   const qc = useQueryClient();
+  const { canWrite } = useAuth();
   const [projectId, setProjectId] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [importNotice, setImportNotice] = useState<ImportNotice | null>(null);
@@ -153,12 +155,13 @@ export default function Analytics() {
               type="file"
               accept=".csv"
               aria-label="导入 CSV 文件"
+              disabled={!canWrite}
               onChange={chooseFile}
             />
             <button
               type="button"
               className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
-              disabled={!file || importCsv.isPending}
+              disabled={!canWrite || !file || importCsv.isPending}
               onClick={submitImport}
             >
               {importCsv.isPending ? "导入中…" : "导入"}
@@ -295,11 +298,15 @@ export default function Analytics() {
                         <button
                           type="button"
                           className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
-                          disabled={!item.has_data || postmortem.isPending}
+                          disabled={
+                            !canWrite || !item.has_data || postmortem.isPending
+                          }
                           title={
-                            item.has_data
-                              ? undefined
-                              : "请先导入该内容的发布数据"
+                            !canWrite
+                              ? "只读成员不能生成复盘"
+                              : item.has_data
+                                ? undefined
+                                : "请先导入该内容的发布数据"
                           }
                           onClick={() => {
                             setPostmortemFeedback(null);

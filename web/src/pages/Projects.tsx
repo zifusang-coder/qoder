@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
+import { useAuth } from "../auth-context";
 import { api } from "../client";
 import {
   errorText,
@@ -12,6 +13,7 @@ import {
 
 export default function Projects() {
   const qc = useQueryClient();
+  const { canWrite } = useAuth();
   const [title, setTitle] = useState("");
   const [topic, setTopic] = useState("");
   const [profileId, setProfileId] = useState("");
@@ -82,10 +84,11 @@ export default function Projects() {
         </p>
       </div>
 
-      <form
-        className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6 md:grid-cols-[1fr_1fr_180px_auto]"
-        onSubmit={submit}
-      >
+      {canWrite && (
+        <form
+          className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6 md:grid-cols-[1fr_1fr_180px_auto]"
+          onSubmit={submit}
+        >
         <label className="space-y-1 text-sm text-slate-400">
           <span>标题 *</span>
           <input
@@ -133,6 +136,7 @@ export default function Projects() {
           </button>
         </div>
       </form>
+      )}
 
       {(createProject.isError || message) && (
         <p

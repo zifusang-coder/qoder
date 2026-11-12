@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useAuth } from "../auth-context";
 import { api } from "../client";
 import { formatTime, toDatetimeLocal, toScheduledAt } from "../schedule";
 import {
@@ -61,6 +62,7 @@ function issueLevelLabel(level: string): string {
 
 export default function Publish() {
   const qc = useQueryClient();
+  const { canWrite, isAdmin } = useAuth();
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [scheduleOpen, setScheduleOpen] = useState("");
@@ -210,9 +212,11 @@ export default function Publish() {
           </p>
         </div>
         <div className="flex items-center gap-3 text-xs text-slate-500">
-          <Link className="text-indigo-400" to="/accounts">
-            管理发布账号
-          </Link>
+          {canWrite && (
+            <Link className="text-indigo-400" to="/accounts">
+              管理发布账号
+            </Link>
+          )}
           <span>共 {jobs.data?.total ?? 0} 个任务</span>
         </div>
       </div>
@@ -230,6 +234,13 @@ export default function Publish() {
       <div className="space-y-3">
         {jobs.data?.items.map((job) => {
           const action = actionFor(job);
+          const actionNeedsAdmin =
+            action?.action === "approve" ||
+            action?.action === "execute" ||
+            action?.action === "retry" ||
+            action?.action === "retry_export";
+          const canAct =
+            action !== null && (actionNeedsAdmin ? isAdmin : canWrite);
           const pending = act.isPending && act.variables?.job.id === job.id;
           const schedulePending =
             reschedule.isPending && reschedule.variables?.job.id === job.id;
@@ -273,7 +284,7 @@ export default function Publish() {
                   )}
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
-                  {canReject(job) && (
+                  {canReject(job) && isAdmin && (
                     <button
                       type="button"
                       className="rounded border border-amber-900 px-4 py-2 text-sm text-amber-400 hover:border-amber-800 disabled:opacity-50"
@@ -291,6 +302,7 @@ export default function Publish() {
                     </button>
                   )}
                   {canCancel(job) &&
+                    isAdmin &&
                     (cancelingId === job.id ? (
                       <span className="flex flex-wrap items-center gap-2 rounded border border-red-900 px-3 py-1.5 text-sm text-red-300">
                         取消后需重新创建任务
@@ -323,7 +335,7 @@ export default function Publish() {
                         取消任务
                       </button>
                     ))}
-                  {canReschedule(job) && (
+                  {canReschedule(job) && isAdmin && (
                     <button
                       type="button"
                       className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:border-slate-600 disabled:opacity-50"
@@ -333,7 +345,7 @@ export default function Publish() {
                       {scheduleOpen === job.id ? "收起定时" : "定时"}
                     </button>
                   )}
-                  {action ? (
+                  {canAct && action ? (
                     <button
                       type="button"
                       className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
@@ -357,7 +369,7 @@ export default function Publish() {
                     >
                       {pending ? "处理中…" : action.label}
                     </button>
-                  ) : job.status === "approved" ? (
+                  ) : job.status === "approved" && action === null ? (
                     <span className="text-sm text-slate-500">
                       {platformLabel(job.platform)}暂不支持自动发布或导出
                     </span>
@@ -371,7 +383,7 @@ export default function Publish() {
                 </p>
               )}
 
-              {canReject(job) && (
+              {canReject(job) && isAdmin && (
                 <input
                   className="mt-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
                   maxLength={500}
@@ -383,7 +395,7 @@ export default function Publish() {
                 />
               )}
 
-              {scheduleOpen === job.id && (
+              {scheduleOpen === job.id && isAdmin && (
                 <div className="mt-3 space-y-2 rounded border border-slate-800 bg-slate-950 p-3">
                   <div className="flex flex-wrap items-end gap-2">
                     <label className="min-w-56 flex-1 space-y-1 text-sm text-slate-400">

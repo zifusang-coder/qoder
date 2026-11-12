@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
+import { useAuth } from "../auth-context";
 import { api } from "../client";
 import {
   errorText,
@@ -58,6 +59,7 @@ function formMatchesPayload(
 
 export default function Profiles() {
   const qc = useQueryClient();
+  const { canWrite } = useAuth();
   const [form, setForm] = useState(EMPTY_FORM);
   const [formMessage, setFormMessage] = useState("");
   const [selectedId, setSelectedId] = useState("");
@@ -186,10 +188,11 @@ export default function Profiles() {
 
       <div className="grid gap-6 lg:grid-cols-[340px_1fr]">
         <div className="space-y-6">
-          <form
-            className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
-            onSubmit={submitProfile}
-          >
+          {canWrite && (
+            <form
+              className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
+              onSubmit={submitProfile}
+            >
             <h2 className="font-medium">新建画像</h2>
             <label className="block space-y-1 text-sm text-slate-400">
               <span>名称 *</span>
@@ -292,6 +295,7 @@ export default function Profiles() {
               {createProfile.isPending ? "创建中…" : "创建画像"}
             </button>
           </form>
+          )}
 
           <section className="space-y-2">
             <h2 className="font-medium">画像列表</h2>
@@ -363,10 +367,11 @@ export default function Profiles() {
 
               <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-6">
                 <h2 className="font-medium">画像记忆</h2>
-                <form
-                  className="flex flex-wrap items-end gap-2"
-                  onSubmit={submitMemory}
-                >
+                {canWrite && (
+                  <form
+                    className="flex flex-wrap items-end gap-2"
+                    onSubmit={submitMemory}
+                  >
                   <label className="min-w-40 flex-1 space-y-1 text-sm text-slate-400">
                     <span>新增记忆</span>
                     <input
@@ -405,6 +410,7 @@ export default function Profiles() {
                     {addMemory.isPending ? "添加中…" : "添加"}
                   </button>
                 </form>
+                )}
                 {(memoryMessage || addMemory.isError) && (
                   <p className="text-sm text-red-400">
                     {memoryMessage || errorText(addMemory.error)}

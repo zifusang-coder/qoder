@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
+import { useAuth } from "../auth-context";
 import { api } from "../client";
 import { errorText, platformLabel, type Account } from "../types";
 
@@ -28,6 +29,7 @@ function statusLabel(status: string): string {
 
 export default function Accounts() {
   const qc = useQueryClient();
+  const { isAdmin } = useAuth();
   const [form, setForm] = useState(EMPTY_FORM);
   const [message, setMessage] = useState<Feedback | null>(null);
   const [rowFeedback, setRowFeedback] = useState<RowFeedback | null>(null);
@@ -250,10 +252,11 @@ export default function Accounts() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
-        <form
-          className="space-y-3 self-start rounded-xl border border-slate-800 bg-slate-900 p-5"
-          onSubmit={submitCreate}
-        >
+        {isAdmin && (
+          <form
+            className="space-y-3 self-start rounded-xl border border-slate-800 bg-slate-900 p-5"
+            onSubmit={submitCreate}
+          >
           <h2 className="font-medium">授权公众号</h2>
           <label className="block space-y-1 text-sm text-slate-400">
             <span>账号名称 *</span>
@@ -354,6 +357,7 @@ export default function Accounts() {
             {create.isPending ? "保存中…" : "保存授权"}
           </button>
         </form>
+        )}
 
         <section className="space-y-3">
           <h2 className="font-medium">已授权账号</h2>
@@ -403,7 +407,7 @@ export default function Accounts() {
                   </span>
                 </p>
 
-                {active && (
+                {active && isAdmin && (
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"

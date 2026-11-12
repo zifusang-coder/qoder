@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { useAuth } from "../auth-context";
 import { api } from "../client";
 import MediaPreview from "../components/MediaPreview";
 import {
@@ -46,6 +47,7 @@ export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
   const projectId = id ?? "";
   const qc = useQueryClient();
+  const { canWrite } = useAuth();
 
   const [platform, setPlatform] = useState("wechat");
   const [title, setTitle] = useState("");
@@ -317,6 +319,7 @@ export default function ProjectDetail() {
 
       <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
+          {canWrite && (
           <form
             className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
             onSubmit={submitContent}
@@ -369,7 +372,9 @@ export default function ProjectDetail() {
               {createContent.isPending ? "创建中…" : "创建内容"}
             </button>
           </form>
+          )}
 
+          {canWrite && (
           <form
             className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
             onSubmit={submitRepurpose}
@@ -430,7 +435,9 @@ export default function ProjectDetail() {
               </p>
             )}
           </form>
+          )}
 
+          {canWrite && (
           <form
             className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
             onSubmit={submitMedia}
@@ -616,7 +623,7 @@ export default function ProjectDetail() {
                     <button
                       type="button"
                       className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-600 disabled:opacity-50"
-                      disabled={retryMedia.isPending}
+                      disabled={!canWrite || retryMedia.isPending}
                       onClick={() => retryMedia.mutate(activeMediaJob.id)}
                     >
                       {retryMedia.isPending ? "提交中…" : "重试"}
@@ -631,6 +638,7 @@ export default function ProjectDetail() {
               </p>
             )}
           </form>
+          )}
         </div>
 
         <section className="space-y-3">
@@ -795,18 +803,21 @@ export default function ProjectDetail() {
                       type="button"
                       className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium disabled:opacity-50"
                       disabled={
+                        !canWrite ||
                         createJob.isPending ||
                         content.current_version < 1 ||
                         accountBlocked
                       }
                       title={
-                        content.current_version < 1
-                          ? "内容还没有版本，无法发布"
-                          : accountBlocked
-                            ? accounts.isSuccess
-                              ? "请先授权公众号账号"
-                              : "正在加载发布账号"
-                            : undefined
+                        !canWrite
+                          ? "只读成员不能创建发布任务"
+                          : content.current_version < 1
+                            ? "内容还没有版本，无法发布"
+                            : accountBlocked
+                              ? accounts.isSuccess
+                                ? "请先授权公众号账号"
+                                : "正在加载发布账号"
+                              : undefined
                       }
                       onClick={() => {
                         setJobNotice(null);
