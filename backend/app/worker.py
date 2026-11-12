@@ -21,9 +21,11 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
 from app.models.publish import PublishJob
+from app.models.tenant import Tenant
 from app.publish.base import PublisherAdapter, PublishError
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
+from app.services.audit import record_best_effort
 from app.services.media import run_media_job
 from app.services.publish import (
     ContentChanged,
@@ -58,7 +60,9 @@ async def list_due_jobs(
     rows = (
         await session.execute(
             select(PublishJob)
+            .join(Tenant, Tenant.id == PublishJob.tenant_id)
             .where(
+                Tenant.status == "active",
                 PublishJob.status == "approved",
                 PublishJob.platform == "wechat",
                 PublishJob.scheduled_at.is_not(None),
@@ -100,6 +104,15 @@ async def reconcile_stale_publishing(
                 fields={"error": STALE_PUBLISH_MESSAGE},
             )
             reconciled += 1
+            await record_best_effort(
+                session,
+                tenant_id=tenant_id,
+                action="publish.auto_fail",
+                actor="scheduler",
+                resource_type="publish_job",
+                resource_id=str(job_id),
+                detail={"reason": "stale_publish"},
+            )
         except (InvalidTransition, JobNotFound):
             # 任务在 SELECT 与 fail 之间被其他执行者推进，属于正常竞态
             await session.rollback()
@@ -135,6 +148,15 @@ async def _fail_blocked_job(
         logger.warning("定时发布阻塞任务状态写入失败 job=%s", job_id)
         await session.rollback()
         return
+    await record_best_effort(
+        session,
+        tenant_id=tenant_id,
+        action="publish.auto_fail",
+        actor="scheduler",
+        resource_type="publish_job",
+        resource_id=str(job_id),
+        detail={"reason": message[:200]},
+    )
     logger.warning("定时发布任务无法执行，已标记失败 job=%s: %s", job_id, message)
 
 
@@ -179,6 +201,14 @@ async def publish_due_jobs(
                     require_due=current,
                 )
                 executed += 1
+                await record_best_effort(
+                    session,
+                    tenant_id=tenant_id,
+                    action="publish.auto_execute",
+                    actor="scheduler",
+                    resource_type="publish_job",
+                    resource_id=str(job_id),
+                )
             except ContentChanged as exc:
                 await _fail_blocked_job(
                     session, job_id, tenant_id=tenant_id, message=str(exc)

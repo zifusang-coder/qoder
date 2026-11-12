@@ -13,6 +13,7 @@ from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.media import MediaJob
 from app.models.project import Content, ContentVersion, Project
+from app.models.tenant import Tenant
 from app.services.outputs import prepare_inputs
 from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import require_enabled
@@ -319,6 +320,15 @@ async def run_media_job(
 ) -> MediaJob:
     job = await _load_job(session, job_id)
     if job.status == "succeeded":
+        return job
+
+    tenant = await session.get(Tenant, job.tenant_id)
+    if tenant is None or tenant.status != "active":
+        job.status = "failed"
+        job.error_code = "tenant_suspended"
+        job.error_message = "租户已停用，任务未执行"
+        job.finished_at = datetime.now(UTC)
+        await session.commit()
         return job
 
     job.status = "running"

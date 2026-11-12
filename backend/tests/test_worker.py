@@ -10,12 +10,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import app.main  # noqa: F401  # 先注册全部模型，create_all 才能建全表
 from app.config import DEFAULT_TENANT_ID
 from app.errors import AppError
+from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.media import MediaJob
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
+from app.models.tenant import Tenant
 from app.publish.base import PublishError, PublishResult
 from app.publish.state import InvalidTransition
+from app.services.media import run_media_job
 from app.services.publish import MAX_PUBLISH_ATTEMPTS, execute_job
+from app.skills.registry import get_registry
+from app.storage import get_storage
 from app.worker import (
     MAX_BATCH_SIZE,
     STALE_PUBLISH_MESSAGE,
@@ -37,6 +43,24 @@ async def worker_factory(tmp_path):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        session.add_all(
+            [
+                Tenant(
+                    id=DEFAULT_TENANT_ID,
+                    name="默认租户",
+                    slug="default",
+                    status="active",
+                ),
+                Tenant(
+                    id=OTHER_TENANT,
+                    name="其他租户",
+                    slug="other",
+                    status="active",
+                ),
+            ]
+        )
+        await session.commit()
     try:
         yield factory
     finally:
@@ -449,6 +473,19 @@ async def test_publish_due_jobs_executes_once(worker_factory):
         ("succeed", "publishing", "published", "scheduler", DEFAULT_TENANT_ID),
     ]
 
+    async with worker_factory() as session:
+        audits = (
+            await session.execute(
+                select(AuditLog).where(
+                    AuditLog.action == "publish.auto_execute"
+                )
+            )
+        ).scalars().all()
+    assert len(audits) == 1
+    assert audits[0].actor_email == "scheduler"
+    assert audits[0].tenant_id == DEFAULT_TENANT_ID
+    assert audits[0].resource_id == str(job_id)
+
 
 @pytest.mark.parametrize("offset", [timedelta(hours=1), None])
 async def test_publish_due_jobs_rechecks_schedule_after_selection(
@@ -779,3 +816,56 @@ def test_worker_settings_wire_cron():
     assert cron_job.second == 0
     assert cron_job.keep_result_s == 0
     assert WorkerSettings.job_timeout == 600
+
+
+async def test_list_due_jobs_skips_suspended_tenant(worker_factory):
+    now = datetime.now(UTC)
+    async with worker_factory() as session:
+        content = await _seed_content(session)
+        session.add(
+            _job(
+                content,
+                key="suspended",
+                status="approved",
+                scheduled_at=now - timedelta(minutes=1),
+            )
+        )
+        tenant = await session.get(Tenant, DEFAULT_TENANT_ID)
+        tenant.status = "suspended"
+        await session.commit()
+
+        due = await list_due_jobs(session, now)
+    assert due == []
+
+
+async def test_media_job_fails_when_tenant_suspended(worker_factory):
+    async with worker_factory() as session:
+        project = Project(tenant_id=DEFAULT_TENANT_ID, title="媒体项目")
+        session.add(project)
+        await session.flush()
+        job = MediaJob(
+            tenant_id=DEFAULT_TENANT_ID,
+            project_id=project.id,
+            skill_id="short-video",
+            status="queued",
+            payload={"topic": "测试"},
+        )
+        session.add(job)
+        await session.commit()
+
+        tenant = await session.get(Tenant, DEFAULT_TENANT_ID)
+        tenant.status = "suspended"
+        await session.commit()
+
+        result = await run_media_job(
+            session=session,
+            job_id=str(job.id),
+            registry=get_registry(),
+            storage=get_storage(),
+        )
+
+    assert result is not None
+    assert result.status == "failed"
+    assert result.error_code == "tenant_suspended"
+    assert result.error_message == "租户已停用，任务未执行"
+    assert result.attempts == 0

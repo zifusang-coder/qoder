@@ -1,9 +1,13 @@
 import uuid
 from pathlib import Path
 
+import pytest_asyncio
+
 from app.config import get_settings
 from app.errors import AppError
 from app.llm.types import Usage
+from app.models.base import DEFAULT_TENANT_ID
+from app.models.tenant import Tenant
 from app.queue import get_queue
 from app.services import media as media_module
 from app.services.media import run_media_job
@@ -11,6 +15,20 @@ from app.skills.registry import SkillRegistry
 from app.storage import Storage
 
 FIXTURE = Path(__file__).parent / "fixtures" / "media-skills"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _default_tenant(db_session):
+    db_session.add(
+        Tenant(
+            id=DEFAULT_TENANT_ID,
+            name="默认租户",
+            slug="default",
+            status="active",
+        )
+    )
+    await db_session.commit()
+    yield
 
 
 class FakeGateway:
