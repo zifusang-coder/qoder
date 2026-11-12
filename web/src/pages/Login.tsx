@@ -1,9 +1,7 @@
 import { FormEvent, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { api, setToken } from "../client";
 
 export default function Login() {
-  const navigate = useNavigate();
   const [email, setEmail] = useState("admin@local");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -19,7 +17,9 @@ export default function Login() {
         body: JSON.stringify({ email, password }),
       });
       setToken(data.access_token);
-      navigate("/");
+      // AuthProvider snapshots the token on mount; a full reload guarantees it
+      // picks up the fresh session before routing to the protected layout.
+      window.location.assign("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");
     } finally {
