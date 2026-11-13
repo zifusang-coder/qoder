@@ -34,3 +34,8 @@ def test_prod_rejects_env_example_placeholder():
             admin_password="a-real-password",
             _env_file=None,
         )
+
+
+def test_app_name_is_branded():
+    settings = Settings(env="dev", _env_file=None)
+    assert settings.app_name == "云AI新媒体运营系统"

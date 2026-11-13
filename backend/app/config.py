@@ -20,7 +20,7 @@ ROOT_DIR = BACKEND_DIR.parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", extra="ignore")
 
-    app_name: str = "新媒体运营系统"
+    app_name: str = "云AI新媒体运营系统"
     env: str = "dev"
     database_url: str = "postgresql+asyncpg://app:app@localhost:5432/newmedia"
     redis_url: str = "redis://localhost:6379/0"

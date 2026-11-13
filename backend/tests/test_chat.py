@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 
 from app.api import chat as chat_module
-from app.api.chat import _summarize
+from app.api.chat import SYSTEM_CHAT, _summarize
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.profile import Profile
@@ -390,3 +390,8 @@ def test_adhoc_output_dir_is_tenant_scoped(tmp_path, monkeypatch):
     assert first.parent == tmp_path / "adhoc" / DEFAULT_TENANT_ID
     assert second.parent == tmp_path / "adhoc" / DEFAULT_TENANT_ID
     assert len(first.name) == 32
+
+
+def test_chat_prompt_uses_brand_name():
+    assert "云AI新媒体运营系统" in SYSTEM_CHAT
+    assert "你是新媒体运营系统的助理" not in SYSTEM_CHAT
