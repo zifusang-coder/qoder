@@ -100,19 +100,19 @@ export default function Settings() {
     <section className="mx-auto max-w-3xl space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">系统设置</h1>
-        <Link className="text-sm text-indigo-400" to="/chat">
+        <Link className="text-sm text-sage-700" to="/chat">
           返回对话
         </Link>
       </div>
-      <form className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-6" onSubmit={submit}>
+      <form className="space-y-3 card p-6" onSubmit={submit}>
         <h2 className="font-medium">添加 LLM 提供商</h2>
         <div className="space-y-1">
-          <label className="block text-sm text-slate-400" htmlFor="name">
+          <label className="block text-sm text-ink-500" htmlFor="name">
             名称
           </label>
           <input
             id="name"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            className="input"
             maxLength={100}
             required
             value={form.name}
@@ -121,12 +121,12 @@ export default function Settings() {
           />
         </div>
         <div className="space-y-1">
-          <label className="block text-sm text-slate-400" htmlFor="kind">
+          <label className="block text-sm text-ink-500" htmlFor="kind">
             类型
           </label>
           <select
             id="kind"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            className="input"
             value={form.kind}
             onChange={(e) => setForm({ ...form, kind: e.target.value })}
           >
@@ -135,12 +135,12 @@ export default function Settings() {
           </select>
         </div>
         <div className="space-y-1">
-          <label className="block text-sm text-slate-400" htmlFor="base_url">
+          <label className="block text-sm text-ink-500" htmlFor="base_url">
             Base URL
           </label>
           <input
             id="base_url"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            className="input"
             maxLength={500}
             required
             value={form.base_url}
@@ -149,12 +149,12 @@ export default function Settings() {
           />
         </div>
         <div className="space-y-1">
-          <label className="block text-sm text-slate-400" htmlFor="api_key">
+          <label className="block text-sm text-ink-500" htmlFor="api_key">
             API Key
           </label>
           <input
             id="api_key"
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+            className="input"
             type="password"
             minLength={8}
             maxLength={512}
@@ -166,24 +166,24 @@ export default function Settings() {
         </div>
         <div className="grid grid-cols-3 gap-2">
           <div className="space-y-1">
-            <label className="block text-sm text-slate-400" htmlFor="fast">
+            <label className="block text-sm text-ink-500" htmlFor="fast">
               fast 模型
             </label>
             <input
               id="fast"
-              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+              className="input"
               value={form.fast}
               onChange={(e) => setForm({ ...form, fast: e.target.value })}
               placeholder="fast 模型"
             />
           </div>
           <div className="space-y-1">
-            <label className="block text-sm text-slate-400" htmlFor="standard">
+            <label className="block text-sm text-ink-500" htmlFor="standard">
               standard 模型
             </label>
             <input
               id="standard"
-              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+              className="input"
               required
               value={form.standard}
               onChange={(e) => setForm({ ...form, standard: e.target.value })}
@@ -191,19 +191,19 @@ export default function Settings() {
             />
           </div>
           <div className="space-y-1">
-            <label className="block text-sm text-slate-400" htmlFor="premium">
+            <label className="block text-sm text-ink-500" htmlFor="premium">
               premium 模型
             </label>
             <input
               id="premium"
-              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+              className="input"
               value={form.premium}
               onChange={(e) => setForm({ ...form, premium: e.target.value })}
               placeholder="premium 模型"
             />
           </div>
         </div>
-        <label className="flex items-center gap-2 text-sm text-slate-300" htmlFor="is_default">
+        <label className="flex items-center gap-2 text-sm text-ink-700" htmlFor="is_default">
           <input
             id="is_default"
             type="checkbox"
@@ -213,12 +213,12 @@ export default function Settings() {
           设为默认提供商
         </label>
         {message && (
-          <p className={messageKind === "ok" ? "text-sm text-emerald-400" : "text-sm text-red-400"}>
+          <p className={messageKind === "ok" ? "text-sm text-sage-600" : "text-sm text-wine-600"}>
             {message}
           </p>
         )}
         <button
-          className="rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+          className="btn-primary"
           disabled={create.isPending}
         >
           {create.isPending ? "保存中…" : "保存"}
@@ -226,19 +226,19 @@ export default function Settings() {
       </form>
       <section className="space-y-2">
         <h2 className="font-medium">已配置</h2>
-        {providers.isLoading && <p className="text-sm text-slate-400">加载中…</p>}
+        {providers.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
         {providers.isError && (
-          <p className="text-sm text-red-400">
+          <p className="text-sm text-wine-600">
             {providers.error instanceof Error ? providers.error.message : "加载失败"}
           </p>
         )}
-        {providers.data?.length === 0 && <p className="text-sm text-slate-400">暂无</p>}
+        {providers.data?.length === 0 && <p className="text-sm text-ink-500">暂无</p>}
         {providers.data?.map((p) => (
-          <div key={p.id} className="rounded border border-slate-800 bg-slate-900 p-3 text-sm">
+          <div key={p.id} className="rounded border border-line bg-surface p-3 text-sm">
             <span className="font-medium">{p.name}</span>
-            <span className="ml-2 text-slate-400">{p.base_url}</span>
-            <span className="ml-2 font-mono text-slate-500">{p.api_key_masked}</span>
-            {p.is_default && <span className="ml-2 text-emerald-400">默认</span>}
+            <span className="ml-2 text-ink-500">{p.base_url}</span>
+            <span className="ml-2 font-mono text-ink-500">{p.api_key_masked}</span>
+            {p.is_default && <span className="ml-2 text-sage-600">默认</span>}
           </div>
         ))}
       </section>

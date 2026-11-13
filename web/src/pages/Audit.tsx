@@ -53,19 +53,19 @@ export default function Audit() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">审计</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           查看当前租户的安全与业务关键事件。审计只追加，不提供修改或删除。
         </p>
       </div>
 
       <form
-        className="grid gap-3 rounded-xl border border-slate-800 bg-slate-900 p-5 md:grid-cols-3"
+        className="grid gap-3 card p-5 md:grid-cols-3"
         onSubmit={apply}
       >
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>动作</span>
           <select
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             value={filters.action}
             onChange={(e) => setFilters({ ...filters, action: e.target.value })}
           >
@@ -77,10 +77,10 @@ export default function Audit() {
             ))}
           </select>
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>状态</span>
           <select
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             value={filters.status}
             onChange={(e) => setFilters({ ...filters, status: e.target.value })}
           >
@@ -89,10 +89,10 @@ export default function Audit() {
             <option value="failure">失败</option>
           </select>
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>操作人邮箱</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             value={filters.actor_email}
             onChange={(e) =>
               setFilters({ ...filters, actor_email: e.target.value })
@@ -100,31 +100,31 @@ export default function Audit() {
             placeholder="精确匹配"
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>开始时间</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             type="datetime-local"
             value={filters.from}
             onChange={(e) => setFilters({ ...filters, from: e.target.value })}
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>结束时间</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             type="datetime-local"
             value={filters.to}
             onChange={(e) => setFilters({ ...filters, to: e.target.value })}
           />
         </label>
         <div className="flex items-end gap-2">
-          <button className="rounded bg-indigo-600 px-4 py-2 font-medium">
+          <button className="btn-primary">
             查询
           </button>
           <button
             type="button"
-            className="rounded border border-slate-700 px-4 py-2 text-slate-300"
+            className="rounded border border-line px-4 py-2 text-ink-700"
             onClick={reset}
           >
             重置
@@ -132,18 +132,18 @@ export default function Audit() {
         </div>
       </form>
 
-      {logs.isLoading && <p className="text-sm text-slate-400">加载中…</p>}
+      {logs.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {logs.isError && (
-        <p className="text-sm text-red-400">{errorText(logs.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(logs.error)}</p>
       )}
       {logs.isSuccess && logs.data.items.length === 0 && (
-        <p className="text-sm text-slate-400">没有匹配的审计记录。</p>
+        <p className="text-sm text-ink-500">没有匹配的审计记录。</p>
       )}
 
       {logs.data && logs.data.items.length > 0 && (
-        <section className="overflow-x-auto rounded-xl border border-slate-800">
+        <section className="overflow-x-auto rounded-xl border border-line">
           <table className="min-w-full text-left text-sm">
-            <thead className="bg-slate-900 text-xs text-slate-500">
+            <thead className="bg-surface text-xs text-ink-500">
               <tr>
                 <th className="px-4 py-3">时间</th>
                 <th className="px-4 py-3">操作人</th>
@@ -153,47 +153,47 @@ export default function Audit() {
                 <th className="px-4 py-3">详情</th>
               </tr>
             </thead>
-            <tbody className="bg-slate-950">
+            <tbody className="bg-white">
               {logs.data.items.map((row) => (
-                <tr key={row.id} className="border-t border-slate-800">
-                  <td className="whitespace-nowrap px-4 py-3 text-slate-400">
+                <tr key={row.id} className="border-t border-line">
+                  <td className="whitespace-nowrap px-4 py-3 text-ink-500">
                     {new Date(row.created_at).toLocaleString()}
                   </td>
-                  <td className="px-4 py-3 text-slate-300">
+                  <td className="px-4 py-3 text-ink-700">
                     {row.actor_email}
                   </td>
                   <td className="px-4 py-3">
-                    <span className="text-slate-200">
+                    <span className="text-ink-700">
                       {auditActionLabel(row.action)}
                     </span>
-                    <span className="mt-1 block font-mono text-xs text-slate-500">
+                    <span className="mt-1 block font-mono text-xs text-ink-500">
                       {row.action}
                     </span>
                   </td>
                   <td
                     className={`px-4 py-3 ${
                       row.status === "success"
-                        ? "text-emerald-400"
-                        : "text-red-400"
+                        ? "text-sage-600"
+                        : "text-wine-600"
                     }`}
                   >
                     {auditStatusLabel(row.status)}
                   </td>
-                  <td className="px-4 py-3 text-slate-400">
+                  <td className="px-4 py-3 text-ink-500">
                     {row.resource_type}
-                    <span className="mt-1 block font-mono text-xs text-slate-500">
+                    <span className="mt-1 block font-mono text-xs text-ink-500">
                       {row.resource_id || "—"}
                     </span>
                   </td>
                   <td className="px-4 py-3">
                     {Object.keys(row.detail).length === 0 ? (
-                      <span className="text-slate-500">—</span>
+                      <span className="text-ink-500">—</span>
                     ) : (
                       <details>
-                        <summary className="cursor-pointer text-indigo-400">
+                        <summary className="cursor-pointer text-sage-700">
                           查看
                         </summary>
-                        <pre className="mt-2 max-w-md overflow-x-auto rounded bg-slate-900 p-2 text-xs text-slate-300">
+                        <pre className="mt-2 max-w-md overflow-x-auto rounded bg-paper p-2 text-xs text-ink-700">
                           {JSON.stringify(row.detail, null, 2)}
                         </pre>
                       </details>
@@ -207,10 +207,10 @@ export default function Audit() {
       )}
 
       {logs.data && (
-        <div className="flex items-center gap-3 text-sm text-slate-400">
+        <div className="flex items-center gap-3 text-sm text-ink-500">
           <button
             type="button"
-            className="rounded border border-slate-700 px-3 py-1.5 disabled:opacity-50"
+            className="rounded border border-line px-3 py-1.5 disabled:opacity-50"
             disabled={!hasPrev}
             onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
           >
@@ -222,7 +222,7 @@ export default function Audit() {
           </span>
           <button
             type="button"
-            className="rounded border border-slate-700 px-3 py-1.5 disabled:opacity-50"
+            className="rounded border border-line px-3 py-1.5 disabled:opacity-50"
             disabled={!hasNext}
             onClick={() => setOffset(offset + PAGE_SIZE)}
           >

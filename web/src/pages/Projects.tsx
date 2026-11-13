@@ -79,20 +79,20 @@ export default function Projects() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">项目</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           一个项目对应一个选题，管理多平台内容与版本。
         </p>
       </div>
 
       {canWrite && (
         <form
-          className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6 md:grid-cols-[1fr_1fr_180px_auto]"
+          className="grid gap-4 card p-6 md:grid-cols-[1fr_1fr_180px_auto]"
           onSubmit={submit}
         >
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>标题 *</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             maxLength={200}
             required
             value={title}
@@ -100,19 +100,19 @@ export default function Projects() {
             placeholder="例如：AI 写作工作流"
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>选题</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
             placeholder="核心角度或选题说明"
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>绑定画像</span>
           <select
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             value={profileId}
             onChange={(e) => setProfileId(e.target.value)}
           >
@@ -125,11 +125,11 @@ export default function Projects() {
           </select>
         </label>
         {profiles.isError && (
-          <p className="text-xs text-red-400">{errorText(profiles.error)}</p>
+          <p className="text-xs text-wine-600">{errorText(profiles.error)}</p>
         )}
         <div className="flex items-end">
           <button
-            className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+            className="btn-primary w-full"
             disabled={createProject.isPending}
           >
             {createProject.isPending ? "创建中…" : "创建项目"}
@@ -142,15 +142,15 @@ export default function Projects() {
         <p
           className={
             createProject.isError || message?.kind === "error"
-              ? "text-sm text-red-400"
-              : "text-sm text-emerald-400"
+              ? "text-sm text-wine-600"
+              : "text-sm text-sage-600"
           }
         >
           {createProject.isError
             ? errorText(createProject.error)
             : message?.text}
           {createdId && !createProject.isError && message?.kind === "ok" && (
-            <Link className="ml-2 text-indigo-400" to={`/projects/${createdId}`}>
+            <Link className="ml-2 text-sage-700" to={`/projects/${createdId}`}>
               打开项目
             </Link>
           )}
@@ -160,32 +160,32 @@ export default function Projects() {
       <section className="space-y-2">
         <h2 className="font-medium">全部项目</h2>
         {projects.isLoading && (
-          <p className="text-sm text-slate-400">加载中…</p>
+          <p className="text-sm text-ink-500">加载中…</p>
         )}
         {projects.isError && (
-          <p className="text-sm text-red-400">
+          <p className="text-sm text-wine-600">
             {errorText(projects.error)}
           </p>
         )}
         {projects.isSuccess && projects.data.items.length === 0 && (
-          <p className="text-sm text-slate-400">还没有项目。</p>
+          <p className="text-sm text-ink-500">还没有项目。</p>
         )}
         {projects.data?.items.map((project) => (
           <Link
             key={project.id}
             to={`/projects/${project.id}`}
-            className="block rounded-xl border border-slate-800 bg-slate-900 p-4 transition-colors hover:border-slate-700"
+            className="block card p-4 transition-colors hover:border-ink-300"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-medium">{project.title}</span>
-              <span className="text-xs text-slate-500">
+              <span className="text-xs text-ink-500">
                 {projectStatusLabel(project.status)}
               </span>
             </div>
-            <p className="mt-1 text-sm text-slate-400">
+            <p className="mt-1 text-sm text-ink-500">
               {project.topic || "未填写选题"}
             </p>
-            <p className="mt-2 text-xs text-slate-500">
+            <p className="mt-2 text-xs text-ink-500">
               画像：
               {project.profile_id
                 ? profileNames.get(project.profile_id) ?? "未知画像"

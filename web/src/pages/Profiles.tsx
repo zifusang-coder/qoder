@@ -181,7 +181,7 @@ export default function Profiles() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">账号画像</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           维护账号定位与长期记忆，创作技能会自动注入这些信息。
         </p>
       </div>
@@ -190,14 +190,14 @@ export default function Profiles() {
         <div className="space-y-6">
           {canWrite && (
             <form
-              className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
+              className="space-y-3 card p-5"
               onSubmit={submitProfile}
             >
             <h2 className="font-medium">新建画像</h2>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>名称 *</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 maxLength={100}
                 required
                 value={form.name}
@@ -205,10 +205,10 @@ export default function Profiles() {
                 placeholder="例如：产品经理小林"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>账号名</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 maxLength={100}
                 value={form.account_name}
                 onChange={(e) =>
@@ -217,10 +217,10 @@ export default function Profiles() {
                 placeholder="平台昵称"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>定位</span>
               <textarea
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 rows={2}
                 maxLength={5000}
                 value={form.positioning}
@@ -230,10 +230,10 @@ export default function Profiles() {
                 placeholder="账号提供什么价值"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>受众</span>
               <textarea
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 rows={2}
                 maxLength={5000}
                 value={form.audience}
@@ -243,10 +243,10 @@ export default function Profiles() {
                 placeholder="目标读者是谁"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>语气</span>
               <textarea
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 rows={2}
                 maxLength={5000}
                 value={form.tone}
@@ -254,28 +254,28 @@ export default function Profiles() {
                 placeholder="例如：专业、克制、有案例"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>禁区（逗号分隔）</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={form.taboos}
                 onChange={(e) => setForm({ ...form, taboos: e.target.value })}
                 placeholder="绝对化用语，竞品名"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>目标（逗号分隔）</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={form.goals}
                 onChange={(e) => setForm({ ...form, goals: e.target.value })}
                 placeholder="涨粉，建立专业形象"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>重点平台（逗号分隔）</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={form.platform_focus}
                 onChange={(e) =>
                   setForm({ ...form, platform_focus: e.target.value })
@@ -284,12 +284,12 @@ export default function Profiles() {
               />
             </label>
             {(formMessage || createProfile.isError) && (
-              <p className="text-sm text-red-400">
+              <p className="text-sm text-wine-600">
                 {formMessage || errorText(createProfile.error)}
               </p>
             )}
             <button
-              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+              className="btn-primary w-full"
               disabled={createProfile.isPending}
             >
               {createProfile.isPending ? "创建中…" : "创建画像"}
@@ -300,15 +300,15 @@ export default function Profiles() {
           <section className="space-y-2">
             <h2 className="font-medium">画像列表</h2>
             {profiles.isLoading && (
-              <p className="text-sm text-slate-400">加载中…</p>
+              <p className="text-sm text-ink-500">加载中…</p>
             )}
             {profiles.isError && (
-              <p className="text-sm text-red-400">
+              <p className="text-sm text-wine-600">
                 {errorText(profiles.error)}
               </p>
             )}
             {profiles.isSuccess && items.length === 0 && (
-              <p className="text-sm text-slate-400">还没有画像，先创建一个。</p>
+              <p className="text-sm text-ink-500">还没有画像，先创建一个。</p>
             )}
             {items.map((profile) => {
               const active = profile.id === selected?.id;
@@ -318,8 +318,8 @@ export default function Profiles() {
                   type="button"
                   className={`w-full rounded border p-3 text-left text-sm ${
                     active
-                      ? "border-indigo-500 bg-slate-800"
-                      : "border-slate-800 bg-slate-900 hover:border-slate-700"
+                      ? "border-sage-500 bg-sage-50"
+                      : "border-line bg-surface hover:border-ink-300"
                   }`}
                   onClick={() => {
                     if (profile.id === selected?.id) return;
@@ -330,10 +330,10 @@ export default function Profiles() {
                   <span className="flex items-center justify-between gap-2">
                     <span className="font-medium">{profile.name}</span>
                     {!profile.is_active && (
-                      <span className="text-xs text-slate-500">已停用</span>
+                      <span className="text-xs text-ink-500">已停用</span>
                     )}
                   </span>
-                  <span className="mt-1 block text-xs text-slate-400">
+                  <span className="mt-1 block text-xs text-ink-500">
                     {profile.account_name || "未填写账号名"}
                   </span>
                 </button>
@@ -345,10 +345,10 @@ export default function Profiles() {
         <div className="space-y-6">
           {selected ? (
             <>
-              <section className="space-y-4 rounded-xl border border-slate-800 bg-slate-900 p-6">
+              <section className="space-y-4 card p-6">
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-medium">{selected.name}</h2>
-                  <span className="text-xs text-slate-500">
+                  <span className="text-xs text-ink-500">
                     {selected.account_name || "未填写账号名"}
                   </span>
                 </div>
@@ -365,36 +365,36 @@ export default function Profiles() {
                 />
               </section>
 
-              <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-6">
+              <section className="space-y-3 card p-6">
                 <h2 className="font-medium">画像记忆</h2>
                 {canWrite && (
                   <form
                     className="flex flex-wrap items-end gap-2"
                     onSubmit={submitMemory}
                   >
-                  <label className="min-w-40 flex-1 space-y-1 text-sm text-slate-400">
+                  <label className="min-w-40 flex-1 space-y-1 text-sm text-ink-500">
                     <span>新增记忆</span>
                     <input
-                      className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      className="input text-ink-900"
                       maxLength={5000}
                       value={memoryContent}
                       onChange={(e) => setMemoryContent(e.target.value)}
                       placeholder="例如：读者更喜欢带数据的长文"
                     />
                   </label>
-                  <label className="space-y-1 text-sm text-slate-400">
+                  <label className="space-y-1 text-sm text-ink-500">
                     <span>类型</span>
                     <input
-                      className="w-28 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      className="w-28 rounded border border-line bg-white px-3 py-2 text-ink-900"
                       maxLength={32}
                       value={memoryKind}
                       onChange={(e) => setMemoryKind(e.target.value)}
                     />
                   </label>
-                  <label className="space-y-1 text-sm text-slate-400">
+                  <label className="space-y-1 text-sm text-ink-500">
                     <span>权重</span>
                     <input
-                      className="w-24 rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      className="w-24 rounded border border-line bg-white px-3 py-2 text-ink-900"
                       type="number"
                       min={0}
                       max={100}
@@ -404,7 +404,7 @@ export default function Profiles() {
                     />
                   </label>
                   <button
-                    className="rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+                    className="btn-primary"
                     disabled={addMemory.isPending}
                   >
                     {addMemory.isPending ? "添加中…" : "添加"}
@@ -412,20 +412,20 @@ export default function Profiles() {
                 </form>
                 )}
                 {(memoryMessage || addMemory.isError) && (
-                  <p className="text-sm text-red-400">
+                  <p className="text-sm text-wine-600">
                     {memoryMessage || errorText(addMemory.error)}
                   </p>
                 )}
                 {memories.isLoading && (
-                  <p className="text-sm text-slate-400">加载中…</p>
+                  <p className="text-sm text-ink-500">加载中…</p>
                 )}
                 {memories.isError && (
-                  <p className="text-sm text-red-400">
+                  <p className="text-sm text-wine-600">
                     {errorText(memories.error)}
                   </p>
                 )}
                 {memories.isSuccess && memories.data.length === 0 && (
-                  <p className="text-sm text-slate-400">
+                  <p className="text-sm text-ink-500">
                     还没有记忆，添加一条试试。
                   </p>
                 )}
@@ -433,10 +433,10 @@ export default function Profiles() {
                   {memories.data?.map((memory) => (
                     <li
                       key={memory.id}
-                      className="rounded border border-slate-800 bg-slate-950 p-3 text-sm"
+                      className="rounded border border-line bg-white p-3 text-sm"
                     >
                       <p className="whitespace-pre-wrap">{memory.content}</p>
-                      <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
+                      <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-500">
                         <span>类型：{memory.kind}</span>
                         <span>权重：{memory.weight}</span>
                         <span>来源：{memory.source}</span>
@@ -450,7 +450,7 @@ export default function Profiles() {
               </section>
             </>
           ) : (
-            <p className="rounded-xl border border-slate-800 bg-slate-900 p-6 text-sm text-slate-400">
+            <p className="card p-6 text-sm text-ink-500">
               选择左侧画像查看详情与记忆。
             </p>
           )}
@@ -463,8 +463,8 @@ export default function Profiles() {
 function Info({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <dt className="text-xs text-slate-500">{label}</dt>
-      <dd className="mt-1 whitespace-pre-wrap text-slate-200">
+      <dt className="text-xs text-ink-500">{label}</dt>
+      <dd className="mt-1 whitespace-pre-wrap text-ink-700">
         {value || "—"}
       </dd>
     </div>
@@ -475,12 +475,12 @@ function Chips({ label, values }: { label: string; values: string[] }) {
   if (values.length === 0) return null;
   return (
     <div className="text-sm">
-      <p className="text-xs text-slate-500">{label}</p>
+      <p className="text-xs text-ink-500">{label}</p>
       <div className="mt-1 flex flex-wrap gap-1">
         {values.map((value, index) => (
           <span
             key={`${value}-${index}`}
-            className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-300"
+            className="rounded bg-sage-50 px-2 py-0.5 text-xs text-ink-700"
           >
             {value}
           </span>

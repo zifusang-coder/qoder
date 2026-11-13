@@ -21,22 +21,22 @@ const MAX_VISIBLE = 3;
 
 function itemTone(status: string): string {
   if (status === "published") {
-    return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+    return "border-sage-100 bg-sage-50 text-sage-600";
   }
   if (
     status === "precheck_failed" ||
     status === "export_failed" ||
     status === "publish_failed"
   ) {
-    return "border-red-500/30 bg-red-500/10 text-red-300";
+    return "border-wine-100 bg-wine-50 text-wine-600";
   }
   if (status === "awaiting_review" || status === "approved") {
-    return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+    return "border-wine-100 bg-wine-50 text-warm-600";
   }
   if (status === "exported") {
-    return "border-sky-500/30 bg-sky-500/10 text-sky-300";
+    return "border-sage-100 bg-sage-50 text-sage-700";
   }
-  return "border-indigo-500/30 bg-indigo-500/10 text-indigo-300";
+  return "border-sage-100 bg-sage-50 text-sage-700";
 }
 
 function itemTime(item: CalendarItem): string {
@@ -97,14 +97,14 @@ export default function Calendar() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">内容日历</h1>
-          <p className="mt-1 text-sm text-slate-400">
+          <p className="mt-1 text-sm text-ink-500">
             按发布时间查看定时任务与已发布内容
           </p>
         </div>
         <div className="flex items-center gap-2 text-sm">
           <button
             type="button"
-            className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800"
+            className="rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
             onClick={() => shift(-1)}
           >
             上个月
@@ -114,14 +114,14 @@ export default function Calendar() {
           </span>
           <button
             type="button"
-            className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:bg-slate-800"
+            className="rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
             onClick={() => shift(1)}
           >
             下个月
           </button>
           <button
             type="button"
-            className="rounded px-2 py-1.5 text-indigo-400 hover:text-indigo-300"
+            className="rounded px-2 py-1.5 text-sage-700 hover:text-sage-700"
             onClick={() =>
               setCursor({
                 year: now.getFullYear(),
@@ -134,39 +134,39 @@ export default function Calendar() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-4 text-xs text-slate-400">
+      <div className="flex flex-wrap gap-4 text-xs text-ink-500">
         <span>
-          本月定时 <strong className="text-slate-200">{scheduledCount}</strong>{" "}
+          本月定时 <strong className="text-ink-700">{scheduledCount}</strong>{" "}
           项
         </span>
         <span>
-          已发布 <strong className="text-slate-200">{publishedCount}</strong> 项
+          已发布 <strong className="text-ink-700">{publishedCount}</strong> 项
         </span>
         <span className="flex items-center gap-1">
-          <i className="h-2 w-2 rounded-full bg-emerald-400" /> 已发布
+          <i className="h-2 w-2 rounded-full bg-sage-600" /> 已发布
         </span>
         <span className="flex items-center gap-1">
-          <i className="h-2 w-2 rounded-full bg-amber-400" /> 待审核/已通过
+          <i className="h-2 w-2 rounded-full bg-warm-600" /> 待审核/已通过
         </span>
         <span className="flex items-center gap-1">
-          <i className="h-2 w-2 rounded-full bg-red-400" /> 失败
+          <i className="h-2 w-2 rounded-full bg-wine-500" /> 失败
         </span>
       </div>
 
       {calendar.isError && (
-        <p className="rounded border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+        <p className="rounded border border-wine-100 bg-wine-50 px-3 py-2 text-sm text-wine-600">
           {errorText(calendar.error)}
         </p>
       )}
       {calendar.isLoading && (
-        <p className="text-sm text-slate-400">加载中…</p>
+        <p className="text-sm text-ink-500">加载中…</p>
       )}
 
-      <div className="hidden overflow-hidden rounded-xl border border-slate-800 md:grid md:grid-cols-7">
+      <div className="hidden overflow-hidden rounded-xl border border-line md:grid md:grid-cols-7">
         {WEEKDAYS.map((day) => (
           <div
             key={day}
-            className="border-b border-r border-slate-800 bg-slate-900 px-2 py-2 text-center text-xs text-slate-400"
+            className="border-b border-r border-line bg-surface px-2 py-2 text-center text-xs text-ink-500"
           >
             {day}
           </div>
@@ -174,22 +174,22 @@ export default function Calendar() {
         {cells.map((cell) => (
           <div
             key={cell.key}
-            className={`min-h-28 border-b border-r border-slate-800 p-2 ${
-              cell.inMonth ? "" : "bg-slate-950/50 text-slate-600"
+            className={`min-h-28 border-b border-r border-line p-2 ${
+              cell.inMonth ? "" : "bg-ink-900/30 text-ink-500"
             }`}
           >
             <div className="mb-2 flex items-center justify-between text-xs">
               <span
                 className={
                   cell.isToday
-                    ? "rounded-full bg-indigo-500 px-1.5 py-0.5 font-semibold text-white"
+                    ? "rounded-full bg-sage-600 px-1.5 py-0.5 font-semibold text-white"
                     : ""
                 }
               >
                 {cell.date.getDate()}
               </span>
               {cell.isToday && (
-                <span className="text-[10px] text-indigo-400">今天</span>
+                <span className="text-[10px] text-sage-700">今天</span>
               )}
             </div>
             <div className="space-y-1">
@@ -197,7 +197,7 @@ export default function Calendar() {
                 <CalendarChip key={item.job_id} item={item} />
               ))}
               {cell.items.length > MAX_VISIBLE && (
-                <p className="px-1 text-[11px] text-slate-500">
+                <p className="px-1 text-[11px] text-ink-500">
                   另有 {cell.items.length - MAX_VISIBLE} 项
                 </p>
               )}
@@ -212,11 +212,11 @@ export default function Calendar() {
           .map((cell) => (
             <div
               key={cell.key}
-              className="rounded-xl border border-slate-800 p-3"
+              className="rounded-xl border border-line p-3"
             >
               <p
                 className={`mb-2 text-xs ${
-                  cell.isToday ? "text-indigo-400" : "text-slate-400"
+                  cell.isToday ? "text-sage-700" : "text-ink-500"
                 }`}
               >
                 {cell.date.getMonth() + 1} 月 {cell.date.getDate()} 日
@@ -234,7 +234,7 @@ export default function Calendar() {
           cells
             .filter((cell) => cell.inMonth)
             .every((cell) => cell.items.length === 0) && (
-            <p className="rounded-xl border border-dashed border-slate-800 p-6 text-center text-sm text-slate-500">
+            <p className="rounded-xl border border-dashed border-line p-6 text-center text-sm text-ink-500">
               本月暂无定时或已发布内容
             </p>
           )}

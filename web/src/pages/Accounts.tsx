@@ -39,12 +39,12 @@ function statusLabel(status: string): string {
 
 function capabilityClass(capability: string): string {
   if (capability === "auto_publish") {
-    return "bg-indigo-900 text-indigo-300";
+    return "bg-sage-50 text-sage-700";
   }
   if (capability === "manual_export") {
-    return "bg-slate-800 text-slate-300";
+    return "bg-sage-50 text-ink-700";
   }
-  return "bg-slate-800 text-slate-400";
+  return "bg-sage-50 text-ink-500";
 }
 
 function credentialPayload(
@@ -292,7 +292,7 @@ export default function Accounts() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">发布账号</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           同一平台可添加多个账号；凭据加密存储，响应只返回掩码。
         </p>
       </div>
@@ -300,14 +300,14 @@ export default function Accounts() {
       <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
         {isAdmin && (
           <form
-            className="space-y-3 self-start rounded-xl border border-slate-800 bg-slate-900 p-5"
+            className="space-y-3 self-start card p-5"
             onSubmit={submitCreate}
           >
             <h2 className="font-medium">添加账号</h2>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>平台</span>
               <select
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={platform}
                 onChange={(e) => selectPlatform(e.target.value)}
               >
@@ -318,7 +318,7 @@ export default function Accounts() {
                 ))}
               </select>
             </label>
-            <p className="flex items-center gap-2 text-xs text-slate-500">
+            <p className="flex items-center gap-2 text-xs text-ink-500">
               <span
                 className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${capabilityClass(spec.capability)}`}
               >
@@ -327,10 +327,10 @@ export default function Accounts() {
               {spec.note}
             </p>
 
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>账号名称 *</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 maxLength={100}
                 required
                 value={name}
@@ -342,14 +342,14 @@ export default function Accounts() {
             {spec.credential_fields.map((field) => (
               <label
                 key={field.key}
-                className="block space-y-1 text-sm text-slate-400"
+                className="block space-y-1 text-sm text-ink-500"
               >
                 <span>
                   {field.label}
                   {field.required ? " *" : ""}
                 </span>
                 <input
-                  className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  className="input text-ink-900"
                   type={field.secret ? "password" : "text"}
                   required={field.required}
                   value={credentials[field.key] ?? ""}
@@ -366,10 +366,10 @@ export default function Accounts() {
 
             {platform === "wechat" && (
               <>
-                <label className="block space-y-1 text-sm text-slate-400">
+                <label className="block space-y-1 text-sm text-ink-500">
                   <span>封面素材 ID *</span>
                   <input
-                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    className="input text-ink-900"
                     maxLength={200}
                     required
                     value={String(meta.thumb_media_id ?? "")}
@@ -379,10 +379,10 @@ export default function Accounts() {
                     placeholder="thumb_media_id"
                   />
                 </label>
-                <label className="block space-y-1 text-sm text-slate-400">
+                <label className="block space-y-1 text-sm text-ink-500">
                   <span>作者（可选）</span>
                   <input
-                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    className="input text-ink-900"
                     maxLength={64}
                     value={String(meta.author ?? "")}
                     onChange={(e) =>
@@ -390,7 +390,7 @@ export default function Accounts() {
                     }
                   />
                 </label>
-                <label className="flex items-center gap-2 text-sm text-slate-300">
+                <label className="flex items-center gap-2 text-sm text-ink-700">
                   <input
                     type="checkbox"
                     checked={Boolean(meta.need_open_comment)}
@@ -403,7 +403,7 @@ export default function Accounts() {
                   />
                   允许读者评论
                 </label>
-                <label className="flex items-center gap-2 text-sm text-slate-300">
+                <label className="flex items-center gap-2 text-sm text-ink-700">
                   <input
                     type="checkbox"
                     checked={Boolean(meta.only_fans_can_comment)}
@@ -420,10 +420,10 @@ export default function Accounts() {
             )}
 
             {platform === "toutiao" && (
-              <label className="block space-y-1 text-sm text-slate-400">
+              <label className="block space-y-1 text-sm text-ink-500">
                 <span>作者（可选）</span>
                 <input
-                  className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  className="input text-ink-900"
                   maxLength={64}
                   value={String(meta.author ?? "")}
                   onChange={(e) =>
@@ -434,7 +434,7 @@ export default function Accounts() {
             )}
 
             {spec.credential_fields.length === 0 && (
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-ink-500">
                 {spec.capability === "manual_export"
                   ? "该平台使用素材包导出，无需填写凭据。"
                   : "该平台接口待接入，可先保存账号。"}
@@ -445,15 +445,15 @@ export default function Accounts() {
               <p
                 className={
                   message.kind === "ok"
-                    ? "text-sm text-emerald-400"
-                    : "text-sm text-red-400"
+                    ? "text-sm text-sage-600"
+                    : "text-sm text-wine-600"
                 }
               >
                 {message.text}
               </p>
             )}
             <button
-              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+              className="btn-primary w-full"
               disabled={create.isPending}
             >
               {create.isPending ? "保存中…" : "保存账号"}
@@ -464,23 +464,23 @@ export default function Accounts() {
         <section className="space-y-5">
           <h2 className="font-medium">已保存账号</h2>
           {accounts.isLoading && (
-            <p className="text-sm text-slate-400">加载中…</p>
+            <p className="text-sm text-ink-500">加载中…</p>
           )}
           {accounts.isError && (
-            <p className="text-sm text-red-400">
+            <p className="text-sm text-wine-600">
               {errorText(accounts.error)}
             </p>
           )}
           {accounts.isSuccess && groups.length === 0 && (
-            <p className="rounded-xl border border-slate-800 bg-slate-900 p-6 text-sm text-slate-400">
+            <p className="card p-6 text-sm text-ink-500">
               还没有账号，先在左侧添加。
             </p>
           )}
           {groups.map((group) => (
             <div key={group.spec.key} className="space-y-2">
-              <h3 className="flex items-center gap-2 text-sm text-slate-400">
+              <h3 className="flex items-center gap-2 text-sm text-ink-500">
                 {group.spec.label}
-                <span className="text-xs text-slate-500">
+                <span className="text-xs text-ink-500">
                   {group.items.length} 个
                 </span>
               </h3>
@@ -493,12 +493,12 @@ export default function Accounts() {
                 return (
                   <article
                     key={account.id}
-                    className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+                    className="card p-4"
                   >
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <div>
                         <h4 className="font-medium">{account.name}</h4>
-                        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-500">
                           <span>{group.spec.label}</span>
                           <span
                             className={`inline-flex rounded-full px-2 py-0.5 font-medium ${capabilityClass(account.capability)}`}
@@ -513,14 +513,14 @@ export default function Accounts() {
                       <span
                         className={
                           active
-                            ? "text-xs text-emerald-400"
-                            : "text-xs text-slate-500"
+                            ? "text-xs text-sage-600"
+                            : "text-xs text-ink-500"
                         }
                       >
                         {statusLabel(account.status)}
                       </span>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">
+                    <p className="mt-2 text-xs text-ink-500">
                       凭据：
                       <span className="ml-1 font-mono">
                         {account.credential_masked === "{}"
@@ -533,7 +533,7 @@ export default function Accounts() {
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button
                           type="button"
-                          className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
+                          className="rounded border border-line px-3 py-1.5 text-sm text-ink-700 hover:border-ink-300"
                           onClick={() => {
                             setEditing({
                               id: account.id,
@@ -548,7 +548,7 @@ export default function Accounts() {
                         {accountSpec.credential_fields.length > 0 && (
                           <button
                             type="button"
-                            className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
+                            className="rounded border border-line px-3 py-1.5 text-sm text-ink-700 hover:border-ink-300"
                             onClick={() => {
                               setCredentialFor(account.id);
                               setCredentialForm({});
@@ -560,11 +560,11 @@ export default function Accounts() {
                           </button>
                         )}
                         {revokingId === account.id ? (
-                          <span className="flex flex-wrap items-center gap-2 rounded border border-red-900 px-3 py-1.5 text-sm text-red-300">
+                          <span className="flex flex-wrap items-center gap-2 rounded border border-wine-100 px-3 py-1.5 text-sm text-wine-600">
                             停用后凭据销毁且无法恢复
                             <button
                               type="button"
-                              className="rounded bg-red-700 px-2 py-1 text-xs font-medium text-white hover:bg-red-600 disabled:opacity-50"
+                              className="rounded bg-wine-600 px-2 py-1 text-xs font-medium text-white hover:bg-wine-700 disabled:opacity-50"
                               disabled={revoke.isPending}
                               onClick={() => revokeAccount(account)}
                             >
@@ -572,7 +572,7 @@ export default function Accounts() {
                             </button>
                             <button
                               type="button"
-                              className="rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200"
+                              className="rounded px-2 py-1 text-xs text-ink-500 hover:text-ink-900"
                               onClick={() => setRevokingId("")}
                             >
                               取消
@@ -581,7 +581,7 @@ export default function Accounts() {
                         ) : (
                           <button
                             type="button"
-                            className="rounded border border-red-900 px-3 py-1.5 text-sm text-red-400 hover:border-red-800 disabled:opacity-50"
+                            className="rounded border border-wine-100 px-3 py-1.5 text-sm text-wine-600 hover:border-wine-100 disabled:opacity-50"
                             onClick={() => {
                               setRevokingId(account.id);
                               setEditing(null);
@@ -597,13 +597,13 @@ export default function Accounts() {
 
                     {editing?.id === account.id && (
                       <form
-                        className="mt-3 flex flex-wrap items-end gap-2 border-t border-slate-800 pt-3"
+                        className="mt-3 flex flex-wrap items-end gap-2 border-t border-line pt-3"
                         onSubmit={submitRename}
                       >
-                        <label className="min-w-48 flex-1 space-y-1 text-sm text-slate-400">
+                        <label className="min-w-48 flex-1 space-y-1 text-sm text-ink-500">
                           <span>新名称</span>
                           <input
-                            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                            className="input text-ink-900"
                             maxLength={100}
                             required
                             value={editing.name}
@@ -616,14 +616,14 @@ export default function Accounts() {
                           />
                         </label>
                         <button
-                          className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
+                          className="btn-primary"
                           disabled={rename.isPending}
                         >
                           {rename.isPending ? "保存中…" : "保存"}
                         </button>
                         <button
                           type="button"
-                          className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300"
+                          className="rounded border border-line px-4 py-2 text-sm text-ink-700"
                           onClick={() => setEditing(null)}
                         >
                           取消
@@ -633,23 +633,23 @@ export default function Accounts() {
 
                     {credentialFor === account.id && (
                       <form
-                        className="mt-3 space-y-2 border-t border-slate-800 pt-3"
+                        className="mt-3 space-y-2 border-t border-line pt-3"
                         onSubmit={(event) =>
                           submitCredential(event, accountSpec)
                         }
                       >
-                        <p className="text-xs text-slate-500">
+                        <p className="text-xs text-ink-500">
                           更新凭据需填写该平台的全部凭据字段。
                         </p>
                         <div className="flex flex-wrap items-end gap-2">
                           {accountSpec.credential_fields.map((field) => (
                             <label
                               key={field.key}
-                              className="min-w-48 flex-1 space-y-1 text-sm text-slate-400"
+                              className="min-w-48 flex-1 space-y-1 text-sm text-ink-500"
                             >
                               <span>{field.label}</span>
                               <input
-                                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                                className="input text-ink-900"
                                 type={field.secret ? "password" : "text"}
                                 required={field.required}
                                 value={credentialForm[field.key] ?? ""}
@@ -663,14 +663,14 @@ export default function Accounts() {
                             </label>
                           ))}
                           <button
-                            className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
+                            className="btn-primary"
                             disabled={updateCredential.isPending}
                           >
                             {updateCredential.isPending ? "保存中…" : "保存"}
                           </button>
                           <button
                             type="button"
-                            className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300"
+                            className="rounded border border-line px-4 py-2 text-sm text-ink-700"
                             onClick={() => {
                               setCredentialFor("");
                               setCredentialForm({});
@@ -686,8 +686,8 @@ export default function Accounts() {
                       <p
                         className={
                           feedback.kind === "ok"
-                            ? "mt-3 text-sm text-emerald-400"
-                            : "mt-3 text-sm text-red-400"
+                            ? "mt-3 text-sm text-sage-600"
+                            : "mt-3 text-sm text-wine-600"
                         }
                       >
                         {feedback.text}

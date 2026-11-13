@@ -92,19 +92,19 @@ export default function Tenants() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">租户</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           平台级租户管理。创建租户会同时开通所有者账号，并生成一次性临时密码。
         </p>
       </div>
 
       <form
-        className="grid gap-3 rounded-xl border border-slate-800 bg-slate-900 p-5 md:grid-cols-2 lg:grid-cols-4"
+        className="grid gap-3 card p-5 md:grid-cols-2 lg:grid-cols-4"
         onSubmit={submit}
       >
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>租户名称 *</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             maxLength={100}
             required
             value={form.name}
@@ -112,10 +112,10 @@ export default function Tenants() {
             placeholder="例如：客户 A"
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>租户标识 *</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             minLength={2}
             maxLength={50}
             pattern="[a-z0-9][a-z0-9-]{1,49}"
@@ -125,10 +125,10 @@ export default function Tenants() {
             placeholder="customer-a"
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>所有者邮箱 *</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             maxLength={255}
             required
             type="email"
@@ -139,10 +139,10 @@ export default function Tenants() {
             placeholder="owner@example.com"
           />
         </label>
-        <label className="space-y-1 text-sm text-slate-400">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>所有者显示名 *</span>
           <input
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             maxLength={100}
             required
             value={form.owner_display_name}
@@ -154,7 +154,7 @@ export default function Tenants() {
         </label>
         <div className="md:col-span-2 lg:col-span-4">
           <button
-            className="rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+            className="btn-primary"
             disabled={create.isPending}
           >
             {create.isPending ? "创建中…" : "创建租户"}
@@ -166,34 +166,34 @@ export default function Tenants() {
         <p
           className={
             message.kind === "error"
-              ? "text-sm text-red-400"
-              : "text-sm text-emerald-400"
+              ? "text-sm text-wine-600"
+              : "text-sm text-sage-600"
           }
         >
           {message.text}
         </p>
       )}
       {create.isError && (
-        <p className="text-sm text-red-400">{errorText(create.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(create.error)}</p>
       )}
 
       {created && (
-        <div className="rounded-xl border border-emerald-900 bg-slate-900 p-4 text-sm">
-          <p className="text-emerald-400">
+        <div className="rounded-xl border border-sage-100 bg-surface p-4 text-sm">
+          <p className="text-sage-600">
             已创建租户「{created.name}」，所有者 {created.owner.email}
           </p>
-          <code className="mt-2 block break-all rounded bg-slate-950 px-3 py-2 font-mono text-slate-100">
+          <code className="mt-2 block break-all rounded bg-paper px-3 py-2 font-mono text-ink-900">
             {created.owner.initial_password}
           </code>
           <div className="mt-2 flex items-center gap-3">
             <button
               type="button"
-              className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300"
+              className="rounded border border-line px-3 py-1.5 text-xs text-ink-700"
               onClick={copyPassword}
             >
               复制临时密码
             </button>
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-ink-500">
               只显示一次；所有者首次登录后必须修改密码。
             </span>
           </div>
@@ -203,13 +203,13 @@ export default function Tenants() {
       <section className="space-y-2">
         <h2 className="font-medium">全部租户</h2>
         {tenants.isLoading && (
-          <p className="text-sm text-slate-400">加载中…</p>
+          <p className="text-sm text-ink-500">加载中…</p>
         )}
         {tenants.isError && (
-          <p className="text-sm text-red-400">{errorText(tenants.error)}</p>
+          <p className="text-sm text-wine-600">{errorText(tenants.error)}</p>
         )}
         {tenants.data?.length === 0 && (
-          <p className="text-sm text-slate-400">还没有租户。</p>
+          <p className="text-sm text-ink-500">还没有租户。</p>
         )}
         {tenants.data?.map((tenant) => {
           const pending =
@@ -217,16 +217,16 @@ export default function Tenants() {
           return (
             <article
               key={tenant.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 p-4"
+              className="flex flex-wrap items-center justify-between gap-3 card p-4"
             >
               <div>
                 <h3 className="font-medium">
                   {tenant.name}
                   {tenant.id === currentTenantId && (
-                    <span className="ml-2 text-xs text-slate-500">（当前）</span>
+                    <span className="ml-2 text-xs text-ink-500">（当前）</span>
                   )}
                 </h3>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-ink-500">
                   {tenant.slug} · {tenant.members_count} 名成员 · 创建于{" "}
                   {tenant.created_at.slice(0, 10)}
                 </p>
@@ -235,8 +235,8 @@ export default function Tenants() {
                 <span
                   className={
                     tenant.status === "active"
-                      ? "text-xs text-emerald-400"
-                      : "text-xs text-slate-500"
+                      ? "text-xs text-sage-600"
+                      : "text-xs text-ink-500"
                   }
                 >
                   {tenantStatusLabel(tenant.status)}
@@ -244,7 +244,7 @@ export default function Tenants() {
                 {canSuspendTenant(tenant, currentTenantId) && (
                   <button
                     type="button"
-                    className="rounded border border-red-900 px-3 py-1.5 text-red-400 hover:border-red-800 disabled:opacity-50"
+                    className="rounded border border-wine-100 px-3 py-1.5 text-wine-600 hover:border-wine-100 disabled:opacity-50"
                     disabled={pending}
                     onClick={() =>
                       update.mutate({ id: tenant.id, status: "suspended" })
@@ -256,7 +256,7 @@ export default function Tenants() {
                 {canEnableTenant(tenant) && (
                   <button
                     type="button"
-                    className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                    className="rounded border border-line px-3 py-1.5 text-ink-700 hover:border-ink-300 disabled:opacity-50"
                     disabled={pending}
                     onClick={() =>
                       update.mutate({ id: tenant.id, status: "active" })

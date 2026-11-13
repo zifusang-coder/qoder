@@ -73,3 +73,15 @@ describe("application shell", () => {
     expect(login).not.toMatch(/slate-|indigo-/);
   });
 });
+
+describe("legacy palette", () => {
+  it("has no old dark-theme color utilities", () => {
+    const legacy =
+      /(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}/;
+    const offenders = Object.entries(sources)
+      .filter(([, text]) => legacy.test(text))
+      .map(([path]) => path)
+      .sort();
+    expect(offenders).toEqual([]);
+  });
+});

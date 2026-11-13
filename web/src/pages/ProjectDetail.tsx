@@ -317,37 +317,37 @@ export default function ProjectDetail() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <Link className="text-sm text-indigo-400" to="/projects">
+          <Link className="text-sm text-sage-700" to="/projects">
             ← 返回项目
           </Link>
           <h1 className="mt-2 text-xl font-semibold">
             {project.data?.title ?? "项目详情"}
           </h1>
           {project.data?.topic && (
-            <p className="mt-1 text-sm text-slate-400">{project.data.topic}</p>
+            <p className="mt-1 text-sm text-ink-500">{project.data.topic}</p>
           )}
         </div>
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-ink-500">
           {project.data ? `状态：${projectStatusLabel(project.data.status)}` : ""}
         </span>
       </div>
 
       {project.isError && (
-        <p className="text-sm text-red-400">{errorText(project.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(project.error)}</p>
       )}
 
       <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
           {canWrite && (
           <form
-            className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
+            className="space-y-3 card p-5"
             onSubmit={submitContent}
           >
             <h2 className="font-medium">新建内容</h2>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>平台</span>
               <select
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={platform}
                 onChange={(e) => selectContentPlatform(e.target.value)}
               >
@@ -358,10 +358,10 @@ export default function ProjectDetail() {
                 ))}
               </select>
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>内容类型</span>
               <select
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={kind}
                 onChange={(e) => setKind(e.target.value)}
               >
@@ -372,10 +372,10 @@ export default function ProjectDetail() {
                 ))}
               </select>
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>标题</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 maxLength={300}
                 required
                 value={title}
@@ -383,10 +383,10 @@ export default function ProjectDetail() {
                 placeholder="内容标题"
               />
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>正文</span>
               <textarea
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 rows={10}
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
@@ -394,12 +394,12 @@ export default function ProjectDetail() {
               />
             </label>
             {createContent.isError && (
-              <p className="text-sm text-red-400">
+              <p className="text-sm text-wine-600">
                 {errorText(createContent.error)}
               </p>
             )}
             <button
-              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+              className="btn-primary w-full"
               disabled={createContent.isPending}
             >
               {createContent.isPending ? "创建中…" : "创建内容"}
@@ -409,14 +409,14 @@ export default function ProjectDetail() {
 
           {canWrite && (
           <form
-            className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
+            className="space-y-3 card p-5"
             onSubmit={submitRepurpose}
           >
             <h2 className="font-medium">一稿多改</h2>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>源内容</span>
               <select
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={effectiveSource}
                 onChange={(e) => setSourceId(e.target.value)}
                 disabled={!contents.data || contents.data.length === 0}
@@ -429,10 +429,10 @@ export default function ProjectDetail() {
                 ))}
               </select>
             </label>
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>目标平台</span>
               <select
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 value={targetPlatform}
                 onChange={(e) => setTargetPlatform(e.target.value)}
               >
@@ -443,11 +443,11 @@ export default function ProjectDetail() {
                 ))}
               </select>
             </label>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-ink-500">
               将调用 content-repurposing 技能生成目标平台版本。
             </p>
             <button
-              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+              className="btn-primary w-full"
               disabled={
                 repurpose.isPending ||
                 !contents.data ||
@@ -460,8 +460,8 @@ export default function ProjectDetail() {
               <p
                 className={
                   repurposeNotice.kind === "ok"
-                    ? "text-sm text-emerald-400"
-                    : "text-sm text-red-400"
+                    ? "text-sm text-sage-600"
+                    : "text-sm text-wine-600"
                 }
               >
                 {repurposeNotice.text}
@@ -472,7 +472,7 @@ export default function ProjectDetail() {
 
           {canWrite && (
           <form
-            className="space-y-3 rounded-xl border border-slate-800 bg-slate-900 p-5"
+            className="space-y-3 card p-5"
             onSubmit={submitMedia}
           >
             <h2 className="font-medium">AI 媒体生成</h2>
@@ -488,8 +488,8 @@ export default function ProjectDetail() {
                   type="button"
                   className={
                     mediaMode === value
-                      ? "rounded bg-indigo-600 px-3 py-2 text-sm font-medium"
-                      : "rounded border border-slate-700 px-3 py-2 text-sm text-slate-300"
+                      ? "btn-primary px-3"
+                      : "rounded border border-line px-3 py-2 text-sm text-ink-700"
                   }
                   onClick={() => setMediaMode(value)}
                 >
@@ -499,10 +499,10 @@ export default function ProjectDetail() {
             </div>
             {mediaMode === "short-video" ? (
               <>
-                <label className="block space-y-1 text-sm text-slate-400">
+                <label className="block space-y-1 text-sm text-ink-500">
                   <span>视频主题</span>
                   <input
-                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    className="input text-ink-900"
                     maxLength={500}
                     required
                     value={mediaTopic}
@@ -511,10 +511,10 @@ export default function ProjectDetail() {
                   />
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  <label className="block space-y-1 text-sm text-slate-400">
+                  <label className="block space-y-1 text-sm text-ink-500">
                     <span>时长（秒）</span>
                     <input
-                      className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      className="input text-ink-900"
                       type="number"
                       min={8}
                       max={180}
@@ -524,10 +524,10 @@ export default function ProjectDetail() {
                       }
                     />
                   </label>
-                  <label className="block space-y-1 text-sm text-slate-400">
+                  <label className="block space-y-1 text-sm text-ink-500">
                     <span>视觉主题</span>
                     <select
-                      className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                      className="input text-ink-900"
                       value={mediaTheme}
                       onChange={(e) =>
                         setMediaTheme(
@@ -541,7 +541,7 @@ export default function ProjectDetail() {
                     </select>
                   </label>
                 </div>
-                <label className="flex items-center gap-2 text-sm text-slate-400">
+                <label className="flex items-center gap-2 text-sm text-ink-500">
                   <input
                     type="checkbox"
                     checked={mediaVoice}
@@ -552,10 +552,10 @@ export default function ProjectDetail() {
               </>
             ) : (
               <>
-                <label className="block space-y-1 text-sm text-slate-400">
+                <label className="block space-y-1 text-sm text-ink-500">
                   <span>口播稿</span>
                   <textarea
-                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    className="input text-ink-900"
                     rows={6}
                     maxLength={2000}
                     required
@@ -564,10 +564,10 @@ export default function ProjectDetail() {
                     placeholder="粘贴口播稿，最多 2000 字"
                   />
                 </label>
-                <label className="block space-y-1 text-sm text-slate-400">
+                <label className="block space-y-1 text-sm text-ink-500">
                   <span>语速</span>
                   <select
-                    className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                    className="input text-ink-900"
                     value={mediaRate}
                     onChange={(e) => setMediaRate(e.target.value)}
                   >
@@ -579,10 +579,10 @@ export default function ProjectDetail() {
                 </label>
               </>
             )}
-            <label className="block space-y-1 text-sm text-slate-400">
+            <label className="block space-y-1 text-sm text-ink-500">
               <span>标题（可选）</span>
               <input
-                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                className="input text-ink-900"
                 maxLength={120}
                 value={mediaTitle}
                 onChange={(e) => setMediaTitle(e.target.value)}
@@ -590,10 +590,10 @@ export default function ProjectDetail() {
               />
             </label>
             <div className="grid grid-cols-2 gap-2">
-              <label className="block space-y-1 text-sm text-slate-400">
+              <label className="block space-y-1 text-sm text-ink-500">
                 <span>归属平台</span>
                 <select
-                  className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  className="input text-ink-900"
                   value={mediaPlatform}
                   onChange={(e) => setMediaPlatform(e.target.value)}
                 >
@@ -604,10 +604,10 @@ export default function ProjectDetail() {
                   ))}
                 </select>
               </label>
-              <label className="block space-y-1 text-sm text-slate-400">
+              <label className="block space-y-1 text-sm text-ink-500">
                 <span>音色</span>
                 <select
-                  className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                  className="input text-ink-900"
                   value={mediaVoiceName}
                   onChange={(e) => setMediaVoiceName(e.target.value)}
                 >
@@ -619,12 +619,12 @@ export default function ProjectDetail() {
                 </select>
               </label>
             </div>
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-ink-500">
               生成任务会进入后台队列（需要运行 make worker），完成后自动刷新；
               配音还需访问 edge-tts 网络。
             </p>
             <button
-              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50"
+              className="btn-primary w-full"
               disabled={mediaJobBusy}
             >
               {mediaJobBusy ? "生成中…" : "生成媒体"}
@@ -633,16 +633,16 @@ export default function ProjectDetail() {
               <p
                 className={
                   mediaNotice.kind === "ok"
-                    ? "text-sm text-emerald-400"
-                    : "text-sm text-red-400"
+                    ? "text-sm text-sage-600"
+                    : "text-sm text-wine-600"
                 }
               >
                 {mediaNotice.text}
               </p>
             )}
             {activeMediaJob && activeMediaJob.status !== "succeeded" && (
-              <div className="rounded border border-slate-800 bg-slate-950 p-3 text-sm">
-                <p className="text-slate-300">
+              <div className="rounded border border-line bg-white p-3 text-sm">
+                <p className="text-ink-700">
                   媒体任务：{mediaJobStatusLabel(activeMediaJob.status)}
                   {activeMediaJob.attempts > 1
                     ? `（第 ${activeMediaJob.attempts} 次尝试）`
@@ -650,12 +650,12 @@ export default function ProjectDetail() {
                 </p>
                 {activeMediaJob.status === "failed" && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <span className="text-red-400">
+                    <span className="text-wine-600">
                       {activeMediaJob.error_message || "生成失败"}
                     </span>
                     <button
                       type="button"
-                      className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                      className="rounded border border-line px-3 py-1 text-xs text-ink-700 hover:border-ink-300 disabled:opacity-50"
                       disabled={!canWrite || retryMedia.isPending}
                       onClick={() => retryMedia.mutate(activeMediaJob.id)}
                     >
@@ -666,7 +666,7 @@ export default function ProjectDetail() {
               </div>
             )}
             {mediaJob.isError && (
-              <p className="text-sm text-red-400">
+              <p className="text-sm text-wine-600">
                 任务状态查询失败：{errorText(mediaJob.error)}
               </p>
             )}
@@ -677,25 +677,25 @@ export default function ProjectDetail() {
         <section className="space-y-3">
           <h2 className="font-medium">媒体产物</h2>
           {media.isLoading && (
-            <p className="text-sm text-slate-400">加载中…</p>
+            <p className="text-sm text-ink-500">加载中…</p>
           )}
           {media.isError && (
-            <p className="text-sm text-red-400">{errorText(media.error)}</p>
+            <p className="text-sm text-wine-600">{errorText(media.error)}</p>
           )}
           {media.isSuccess && media.data.items.length === 0 && (
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-ink-500">
               还没有媒体产物，先在左侧生成短视频或配音。
             </p>
           )}
           {media.data?.items.map((item) => (
             <article
               key={item.content_id}
-              className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+              className="card p-4"
             >
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <h3 className="font-medium">{item.title || "未命名媒体"}</h3>
-                  <p className="mt-1 text-xs text-slate-500">
+                  <p className="mt-1 text-xs text-ink-500">
                     {platformLabel(item.platform)} ·{" "}
                     {contentKindLabel(item.kind)}
                     {item.duration_seconds > 0
@@ -707,7 +707,7 @@ export default function ProjectDetail() {
                 {item.preview && (
                   <button
                     type="button"
-                    className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
+                    className="rounded border border-line px-3 py-1.5 text-sm text-ink-700 hover:border-ink-300"
                     onClick={() =>
                       setOpenMedia(
                         openMedia === item.content_id ? "" : item.content_id,
@@ -719,22 +719,22 @@ export default function ProjectDetail() {
                 )}
               </div>
               {item.audio.status === "failed" && (
-                <p className="mt-2 text-xs text-amber-400">
+                <p className="mt-2 text-xs text-warm-600">
                   配音生成失败，已输出静音视频。
                 </p>
               )}
               {item.audio.llm_fallback && (
-                <p className="mt-2 text-xs text-amber-400">
+                <p className="mt-2 text-xs text-warm-600">
                   LLM 调用失败（{item.audio.llm_fallback}
                   ），已直接使用原始口播稿完成配音。
                 </p>
               )}
-              <p className="mt-2 text-xs text-slate-500">
+              <p className="mt-2 text-xs text-ink-500">
                 文件：
                 {item.files.map((file) => mediaFileName(file.path)).join("、")}
               </p>
               {openMedia === item.content_id && item.preview && (
-                <div className="mt-3 space-y-3 border-t border-slate-800 pt-3">
+                <div className="mt-3 space-y-3 border-t border-line pt-3">
                   <MediaPreview
                     projectId={projectId}
                     path={item.preview}
@@ -742,7 +742,7 @@ export default function ProjectDetail() {
                   />
                   {item.subtitles && (
                     <details>
-                      <summary className="cursor-pointer text-xs text-indigo-400">
+                      <summary className="cursor-pointer text-xs text-sage-700">
                         查看字幕
                       </summary>
                       <div className="mt-2">
@@ -762,18 +762,18 @@ export default function ProjectDetail() {
         <section className="space-y-3">
           <h2 className="font-medium">内容列表</h2>
           {contents.isLoading && (
-            <p className="text-sm text-slate-400">加载中…</p>
+            <p className="text-sm text-ink-500">加载中…</p>
           )}
           {contents.isError && (
-            <p className="text-sm text-red-400">
+            <p className="text-sm text-wine-600">
               {errorText(contents.error)}
             </p>
           )}
           {accounts.isError && (
-            <p className="text-sm text-red-400">{errorText(accounts.error)}</p>
+            <p className="text-sm text-wine-600">{errorText(accounts.error)}</p>
           )}
           {contents.isSuccess && contents.data.length === 0 && (
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-ink-500">
               还没有内容，先在左侧创建。
             </p>
           )}
@@ -781,13 +781,13 @@ export default function ProjectDetail() {
             <p
               className={
                 jobNotice.kind === "ok"
-                  ? "text-sm text-emerald-400"
-                  : "text-sm text-red-400"
+                  ? "text-sm text-sage-600"
+                  : "text-sm text-wine-600"
               }
             >
               {jobNotice.text}
               {jobNotice.kind === "ok" && (
-                <Link className="ml-2 text-indigo-400" to="/publish">
+                <Link className="ml-2 text-sage-700" to="/publish">
                   前往发布
                 </Link>
               )}
@@ -815,14 +815,14 @@ export default function ProjectDetail() {
             return (
               <article
                 key={content.id}
-                className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+                className="card p-4"
               >
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <h3 className="font-medium">
                       {content.title || "未命名内容"}
                     </h3>
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-1 text-xs text-ink-500">
                       {platformLabel(content.platform)} ·{" "}
                       {contentKindLabel(content.kind)} ·{" "}
                       {contentStatusLabel(content.status)} · v{content.current_version}
@@ -831,7 +831,7 @@ export default function ProjectDetail() {
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
-                      className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:border-slate-600"
+                      className="rounded border border-line px-3 py-1.5 text-sm text-ink-700 hover:border-ink-300"
                       onClick={() =>
                         setOpenVersions(
                           openVersions === content.id ? "" : content.id,
@@ -842,7 +842,7 @@ export default function ProjectDetail() {
                     </button>
                     <button
                       type="button"
-                      className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                      className="btn-primary px-3 py-1.5"
                       disabled={
                         !canWrite ||
                         createJob.isPending ||
@@ -875,10 +875,10 @@ export default function ProjectDetail() {
 
                 {needsAccount && (
                   <div className="mt-3 space-y-1">
-                    <label className="block text-xs text-slate-500">
+                    <label className="block text-xs text-ink-500">
                       发布账号
                       <select
-                        className="mt-1 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 disabled:opacity-50"
+                        className="mt-1 input text-sm text-ink-900 disabled:opacity-50"
                         value={selectedAccountId}
                         onChange={(e) =>
                           setAccountSelections((prev) => ({
@@ -906,9 +906,9 @@ export default function ProjectDetail() {
                       </select>
                     </label>
                     {missingAccount && (
-                      <p className="text-xs text-amber-400">
+                      <p className="text-xs text-warm-600">
                         还没有可用的{contentSpec?.label ?? "平台"}账号，请先
-                        <a className="ml-1 text-indigo-400" href="/accounts">
+                        <a className="ml-1 text-sage-700" href="/accounts">
                           添加账号
                         </a>
                       </p>
@@ -917,40 +917,40 @@ export default function ProjectDetail() {
                 )}
 
                 {capability === "pending" && (
-                  <p className="mt-2 text-xs text-amber-400">
+                  <p className="mt-2 text-xs text-warm-600">
                     {contentSpec?.note ?? "该平台暂不支持自动发布或导出"}
                   </p>
                 )}
 
                 {openVersions === content.id && (
-                  <div className="mt-4 space-y-2 border-t border-slate-800 pt-3">
+                  <div className="mt-4 space-y-2 border-t border-line pt-3">
                     {versions.isLoading && (
-                      <p className="text-sm text-slate-400">版本加载中…</p>
+                      <p className="text-sm text-ink-500">版本加载中…</p>
                     )}
                     {versions.isError && (
-                      <p className="text-sm text-red-400">
+                      <p className="text-sm text-wine-600">
                         {errorText(versions.error)}
                       </p>
                     )}
                     {versions.data?.items.map((version) => (
                       <div
                         key={version.id}
-                        className="rounded border border-slate-800 bg-slate-950 p-3 text-sm"
+                        className="rounded border border-line bg-white p-3 text-sm"
                       >
-                        <p className="flex flex-wrap gap-x-3 text-xs text-slate-500">
+                        <p className="flex flex-wrap gap-x-3 text-xs text-ink-500">
                           <span>v{version.version}</span>
                           <span>来源：{version.source}</span>
                         </p>
                         <p className="mt-1 font-medium">
                           {version.title || "无标题"}
                         </p>
-                        <p className="mt-1 whitespace-pre-wrap text-slate-300">
+                        <p className="mt-1 whitespace-pre-wrap text-ink-700">
                           {version.body || "（空正文）"}
                         </p>
                       </div>
                     ))}
                     {versions.isSuccess && versions.data.items.length === 0 && (
-                      <p className="text-sm text-slate-400">暂无版本。</p>
+                      <p className="text-sm text-ink-500">暂无版本。</p>
                     )}
                   </div>
                 )}

@@ -99,26 +99,26 @@ export default function Team() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">团队</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           管理当前租户的成员与角色。管理员可查看，所有者可创建与调整。
         </p>
       </div>
 
       {!canManage && (
-        <p className="rounded-xl border border-slate-800 bg-slate-900 p-4 text-sm text-slate-400">
+        <p className="card p-4 text-sm text-ink-500">
           只有租户所有者可以创建成员或调整角色。
         </p>
       )}
 
       {canManage && (
         <form
-          className="grid gap-3 rounded-xl border border-slate-800 bg-slate-900 p-5 md:grid-cols-[1fr_1fr_140px_auto]"
+          className="grid gap-3 card p-5 md:grid-cols-[1fr_1fr_140px_auto]"
           onSubmit={submit}
         >
-          <label className="space-y-1 text-sm text-slate-400">
+          <label className="space-y-1 text-sm text-ink-500">
             <span>邮箱 *</span>
             <input
-              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+              className="input text-ink-900"
               maxLength={255}
               required
               type="email"
@@ -127,10 +127,10 @@ export default function Team() {
               placeholder="member@example.com"
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-400">
+          <label className="space-y-1 text-sm text-ink-500">
             <span>显示名 *</span>
             <input
-              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+              className="input text-ink-900"
               maxLength={100}
               required
               value={form.display_name}
@@ -140,10 +140,10 @@ export default function Team() {
               placeholder="例如：运营小林"
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-400">
+          <label className="space-y-1 text-sm text-ink-500">
             <span>角色</span>
             <select
-              className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+              className="input text-ink-900"
               value={form.role}
               onChange={(e) =>
                 setForm({ ...form, role: e.target.value as Role })
@@ -158,7 +158,7 @@ export default function Team() {
           </label>
           <div className="flex items-end">
             <button
-              className="w-full rounded bg-indigo-600 px-4 py-2 font-medium disabled:opacity-50 md:w-auto"
+              className="btn-primary w-full md:w-auto"
               disabled={create.isPending}
             >
               {create.isPending ? "创建中…" : "创建成员"}
@@ -168,14 +168,14 @@ export default function Team() {
       )}
 
       {created && (
-        <div className="rounded-xl border border-emerald-900 bg-slate-900 p-4 text-sm">
-          <p className="text-emerald-400">
+        <div className="rounded-xl border border-sage-100 bg-surface p-4 text-sm">
+          <p className="text-sage-600">
             已创建 {created.email}，请立即把一次性临时密码交给成员：
           </p>
-          <code className="mt-2 block break-all rounded bg-slate-950 px-3 py-2 font-mono text-slate-100">
+          <code className="mt-2 block break-all rounded bg-paper px-3 py-2 font-mono text-ink-900">
             {created.initial_password}
           </code>
-          <p className="mt-2 text-xs text-slate-500">
+          <p className="mt-2 text-xs text-ink-500">
             临时密码只显示一次；成员首次登录后必须修改密码。
           </p>
         </div>
@@ -185,27 +185,27 @@ export default function Team() {
         <p
           className={
             message.kind === "error"
-              ? "text-sm text-red-400"
-              : "text-sm text-emerald-400"
+              ? "text-sm text-wine-600"
+              : "text-sm text-sage-600"
           }
         >
           {message.text}
         </p>
       )}
       {create.isError && (
-        <p className="text-sm text-red-400">{errorText(create.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(create.error)}</p>
       )}
 
       <section className="space-y-2">
         <h2 className="font-medium">成员列表</h2>
         {members.isLoading && (
-          <p className="text-sm text-slate-400">加载中…</p>
+          <p className="text-sm text-ink-500">加载中…</p>
         )}
         {members.isError && (
-          <p className="text-sm text-red-400">{errorText(members.error)}</p>
+          <p className="text-sm text-wine-600">{errorText(members.error)}</p>
         )}
         {members.data?.length === 0 && (
-          <p className="text-sm text-slate-400">还没有其他成员。</p>
+          <p className="text-sm text-ink-500">还没有其他成员。</p>
         )}
         {members.data?.map((member) => {
           const isSelf = member.id === user?.id;
@@ -216,16 +216,16 @@ export default function Team() {
           return (
             <article
               key={member.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900 p-4"
+              className="flex flex-wrap items-center justify-between gap-3 card p-4"
             >
               <div>
                 <h3 className="font-medium">
                   {member.display_name}
                   {isSelf && (
-                    <span className="ml-2 text-xs text-slate-500">（我）</span>
+                    <span className="ml-2 text-xs text-ink-500">（我）</span>
                   )}
                 </h3>
-                <p className="mt-1 text-xs text-slate-500">
+                <p className="mt-1 text-xs text-ink-500">
                   {member.email} · 加入于 {member.created_at.slice(0, 10)}
                 </p>
               </div>
@@ -233,15 +233,15 @@ export default function Team() {
                 <span
                   className={
                     member.is_active
-                      ? "text-xs text-emerald-400"
-                      : "text-xs text-slate-500"
+                      ? "text-xs text-sage-600"
+                      : "text-xs text-ink-500"
                   }
                 >
                   {memberStatusLabel(member.is_active)}
                 </span>
                 <select
                   aria-label={`角色 ${member.email}`}
-                  className="rounded border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100 disabled:opacity-50"
+                  className="rounded border border-line bg-white px-3 py-1.5 text-ink-900 disabled:opacity-50"
                   value={member.role}
                   disabled={!editable || pending}
                   onChange={(e) =>
@@ -260,7 +260,7 @@ export default function Team() {
                 {member.is_active ? (
                   <button
                     type="button"
-                    className="rounded border border-red-900 px-3 py-1.5 text-red-400 hover:border-red-800 disabled:opacity-50"
+                    className="rounded border border-wine-100 px-3 py-1.5 text-wine-600 hover:border-wine-100 disabled:opacity-50"
                     disabled={!editable || pending}
                     onClick={() => disable.mutate(member.id)}
                   >
@@ -269,7 +269,7 @@ export default function Team() {
                 ) : (
                   <button
                     type="button"
-                    className="rounded border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                    className="rounded border border-line px-3 py-1.5 text-ink-700 hover:border-ink-300 disabled:opacity-50"
                     disabled={!editable || pending}
                     onClick={() =>
                       update.mutate({

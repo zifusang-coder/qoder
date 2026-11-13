@@ -126,16 +126,16 @@ export default function Analytics() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">数据</h1>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-ink-500">
           导入发布数据，查看项目概览并生成单篇复盘。
         </p>
       </div>
 
-      <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900 p-5 md:grid-cols-2">
-        <label className="space-y-1 text-sm text-slate-400">
+      <div className="grid gap-4 card p-5 md:grid-cols-2">
+        <label className="space-y-1 text-sm text-ink-500">
           <span>项目</span>
           <select
-            className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+            className="input text-ink-900"
             value={effectiveProjectId}
             onChange={(e) => setProjectId(e.target.value)}
             disabled={!projects.data || projects.data.items.length === 0}
@@ -147,11 +147,11 @@ export default function Analytics() {
             ))}
           </select>
         </label>
-        <div className="space-y-1 text-sm text-slate-400">
+        <div className="space-y-1 text-sm text-ink-500">
           <span>导入 CSV</span>
           <div className="flex items-center gap-2">
             <input
-              className="min-w-0 flex-1 text-sm text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-800 file:px-3 file:py-1.5 file:text-slate-200"
+              className="min-w-0 flex-1 text-sm text-ink-700 file:mr-3 file:rounded file:border-0 file:bg-sage-50 file:px-3 file:py-1.5 file:text-ink-700"
               type="file"
               accept=".csv"
               aria-label="导入 CSV 文件"
@@ -160,7 +160,7 @@ export default function Analytics() {
             />
             <button
               type="button"
-              className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
+              className="btn-primary"
               disabled={!canWrite || !file || importCsv.isPending}
               onClick={submitImport}
             >
@@ -168,18 +168,18 @@ export default function Analytics() {
             </button>
           </div>
           {file && (
-            <p className="truncate text-xs text-slate-500">已选择：{file.name}</p>
+            <p className="truncate text-xs text-ink-500">已选择：{file.name}</p>
           )}
         </div>
       </div>
 
       {projects.isError && (
-        <p className="text-sm text-red-400">{errorText(projects.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(projects.error)}</p>
       )}
       {projects.isSuccess && projects.data.items.length === 0 && (
-        <p className="rounded-xl border border-slate-800 bg-slate-900 p-6 text-sm text-slate-400">
+        <p className="card p-6 text-sm text-ink-500">
           还没有项目，请先
-          <Link className="ml-1 text-indigo-400" to="/projects">
+          <Link className="ml-1 text-sage-700" to="/projects">
             创建项目
           </Link>
           。
@@ -190,17 +190,17 @@ export default function Analytics() {
         <p
           className={`text-sm ${
             importNotice.kind === "ok"
-              ? "text-emerald-400"
+              ? "text-sage-600"
               : importNotice.kind === "warn"
-                ? "text-amber-400"
-                : "text-red-400"
+                ? "text-warm-600"
+                : "text-wine-600"
           }`}
         >
           {importNotice.text}
         </p>
       )}
       {importCsv.data && importCsv.data.errors.length > 0 && (
-        <ul className="space-y-1 text-xs text-red-400">
+        <ul className="space-y-1 text-xs text-wine-600">
           {importCsv.data.errors.slice(0, 10).map((error, index) => (
             <li key={index}>{error}</li>
           ))}
@@ -208,10 +208,10 @@ export default function Analytics() {
       )}
 
       {overview.isLoading && (
-        <p className="text-sm text-slate-400">加载中…</p>
+        <p className="text-sm text-ink-500">加载中…</p>
       )}
       {overview.isError && (
-        <p className="text-sm text-red-400">{errorText(overview.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(overview.error)}</p>
       )}
 
       {overview.data && (
@@ -220,25 +220,25 @@ export default function Analytics() {
             {totals.map((item) => (
               <div
                 key={item.label}
-                className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+                className="card p-4"
               >
-                <p className="text-xs text-slate-500">{item.label}</p>
+                <p className="text-xs text-ink-500">{item.label}</p>
                 <p className="mt-1 text-lg font-semibold">
                   {item.value.toLocaleString("zh-CN")}
                 </p>
               </div>
             ))}
-            <div className="col-span-2 rounded-xl border border-indigo-900 bg-slate-900 p-4 sm:col-span-3 lg:col-span-6">
-              <p className="text-xs text-slate-500">互动率</p>
-              <p className="mt-1 text-lg font-semibold text-indigo-400">
+            <div className="col-span-2 rounded-xl border border-sage-100 bg-surface p-4 sm:col-span-3 lg:col-span-6">
+              <p className="text-xs text-ink-500">互动率</p>
+              <p className="mt-1 text-lg font-semibold text-sage-700">
                 {(overview.data.engagement_rate * 100).toFixed(2)}%
               </p>
             </div>
           </section>
 
-          <section className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900">
+          <section className="overflow-x-auto card">
             <table className="w-full min-w-[560px] text-left text-sm">
-              <thead className="border-b border-slate-800 text-xs text-slate-500">
+              <thead className="border-b border-line text-xs text-ink-500">
                 <tr>
                   <th className="px-4 py-3 font-medium">内容</th>
                   <th className="px-4 py-3 font-medium">平台</th>
@@ -251,7 +251,7 @@ export default function Analytics() {
                 {overview.data.items.length === 0 && (
                   <tr>
                     <td
-                      className="px-4 py-4 text-slate-400"
+                      className="px-4 py-4 text-ink-500"
                       colSpan={5}
                     >
                       暂无内容。
@@ -269,19 +269,19 @@ export default function Analytics() {
                   return (
                     <tr
                       key={item.content_id}
-                      className="border-b border-slate-800 last:border-0"
+                      className="border-b border-line last:border-0"
                     >
                       <td className="px-4 py-3">
                         <span className="font-medium">
                           {item.title || "未命名内容"}
                         </span>
-                        <span className="mt-1 block text-xs text-slate-500">
+                        <span className="mt-1 block text-xs text-ink-500">
                           {item.has_data && item.captured_at
                             ? `采集于 ${item.captured_at}`
                             : "暂无数据"}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-slate-300">
+                      <td className="px-4 py-3 text-ink-700">
                         {platformLabel(item.platform)}
                       </td>
                       <td className="px-4 py-3">
@@ -297,7 +297,7 @@ export default function Analytics() {
                       <td className="px-4 py-3">
                         <button
                           type="button"
-                          className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:border-slate-600 disabled:opacity-50"
+                          className="rounded border border-line px-3 py-1.5 text-xs text-ink-700 hover:border-ink-300 disabled:opacity-50"
                           disabled={
                             !canWrite || !item.has_data || postmortem.isPending
                           }
@@ -319,8 +319,8 @@ export default function Analytics() {
                           <p
                             className={`mt-1 text-xs ${
                               feedback.kind === "ok"
-                                ? "text-emerald-400"
-                                : "text-red-400"
+                                ? "text-sage-600"
+                                : "text-wine-600"
                             }`}
                           >
                             {feedback.text}

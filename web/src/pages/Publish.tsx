@@ -209,13 +209,13 @@ export default function Publish() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">发布</h1>
-          <p className="mt-1 text-sm text-slate-400">
+          <p className="mt-1 text-sm text-ink-500">
             审阅发布任务：公众号自动建草稿，其他平台导出素材包。
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs text-slate-500">
+        <div className="flex items-center gap-3 text-xs text-ink-500">
           {canWrite && (
-            <Link className="text-indigo-400" to="/accounts">
+            <Link className="text-sage-700" to="/accounts">
               管理发布账号
             </Link>
           )}
@@ -223,12 +223,12 @@ export default function Publish() {
         </div>
       </div>
 
-      {jobs.isLoading && <p className="text-sm text-slate-400">加载中…</p>}
+      {jobs.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {jobs.isError && (
-        <p className="text-sm text-red-400">{errorText(jobs.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(jobs.error)}</p>
       )}
       {jobs.isSuccess && jobs.data.items.length === 0 && (
-        <p className="rounded-xl border border-slate-800 bg-slate-900 p-6 text-sm text-slate-400">
+        <p className="card p-6 text-sm text-ink-500">
           还没有发布任务，请先在项目详情中创建。
         </p>
       )}
@@ -259,31 +259,31 @@ export default function Publish() {
           return (
             <article
               key={job.id}
-              className="rounded-xl border border-slate-800 bg-slate-900 p-5"
+              className="card p-5"
             >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="font-medium">
                     {platformLabel(job.platform)} ·{" "}
                     {contentKindLabel(job.content_kind)}
-                    <span className="ml-2 text-sm font-normal text-slate-400">
+                    <span className="ml-2 text-sm font-normal text-ink-500">
                       v{job.content_version}
                     </span>
                   </h2>
-                  <p className="mt-1 text-xs text-slate-500">
+                  <p className="mt-1 text-xs text-ink-500">
                     状态：{jobStatusLabel(job.status)} · 创建于{" "}
                     {formatTime(job.created_at)}
                     {job.scheduled_at &&
                       ` · 定时：${formatTime(job.scheduled_at)}`}
                   </p>
                   {capability === "auto_publish" && (
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-1 text-xs text-ink-500">
                       {job.account_id ? (
                         `发布账号：${accountLabel}`
                       ) : (
                         <>
                           未关联发布账号，
-                          <Link className="text-indigo-400" to="/accounts">
+                          <Link className="text-sage-700" to="/accounts">
                             去授权
                           </Link>
                         </>
@@ -295,7 +295,7 @@ export default function Publish() {
                   {canReject(job) && isAdmin && (
                     <button
                       type="button"
-                      className="rounded border border-amber-900 px-4 py-2 text-sm text-amber-400 hover:border-amber-800 disabled:opacity-50"
+                      className="rounded border border-wine-100 px-4 py-2 text-sm text-warm-600 hover:border-warm-600 disabled:opacity-50"
                       disabled={act.isPending}
                       onClick={() => {
                         setFeedback(null);
@@ -312,11 +312,11 @@ export default function Publish() {
                   {canCancel(job) &&
                     isAdmin &&
                     (cancelingId === job.id ? (
-                      <span className="flex flex-wrap items-center gap-2 rounded border border-red-900 px-3 py-1.5 text-sm text-red-300">
+                      <span className="flex flex-wrap items-center gap-2 rounded border border-wine-100 px-3 py-1.5 text-sm text-wine-600">
                         取消后需重新创建任务
                         <button
                           type="button"
-                          className="rounded bg-red-700 px-2 py-1 text-xs font-medium text-white hover:bg-red-600 disabled:opacity-50"
+                          className="rounded bg-wine-600 px-2 py-1 text-xs font-medium text-white hover:bg-wine-700 disabled:opacity-50"
                           disabled={act.isPending}
                           onClick={() => cancelJob(job)}
                         >
@@ -324,7 +324,7 @@ export default function Publish() {
                         </button>
                         <button
                           type="button"
-                          className="rounded px-2 py-1 text-xs text-slate-400 hover:text-slate-200"
+                          className="rounded px-2 py-1 text-xs text-ink-500 hover:text-ink-900"
                           onClick={() => setCancelingId("")}
                         >
                           返回
@@ -333,7 +333,7 @@ export default function Publish() {
                     ) : (
                       <button
                         type="button"
-                        className="rounded border border-red-900 px-4 py-2 text-sm text-red-400 hover:border-red-800 disabled:opacity-50"
+                        className="rounded border border-wine-100 px-4 py-2 text-sm text-wine-600 hover:border-wine-100 disabled:opacity-50"
                         disabled={act.isPending}
                         onClick={() => {
                           setFeedback(null);
@@ -346,7 +346,7 @@ export default function Publish() {
                   {canReschedule(job) && isAdmin && (
                     <button
                       type="button"
-                      className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                      className="rounded border border-line px-4 py-2 text-sm text-ink-700 hover:border-ink-300 disabled:opacity-50"
                       disabled={schedulePending}
                       onClick={() => toggleSchedule(job)}
                     >
@@ -356,7 +356,7 @@ export default function Publish() {
                   {canAct && action ? (
                     <button
                       type="button"
-                      className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
+                      className="btn-primary"
                       disabled={
                         act.isPending ||
                         (action.action === "execute" && missingAccount)
@@ -379,7 +379,7 @@ export default function Publish() {
                     </button>
                   ) : job.status === "approved" && action === null ? (
                     capability === "pending" ? (
-                      <span className="text-sm text-slate-500">
+                      <span className="text-sm text-ink-500">
                         {spec?.note ?? "该平台暂不支持自动发布或导出"}
                       </span>
                     ) : null
@@ -388,14 +388,14 @@ export default function Publish() {
               </div>
 
               {missingAccount && job.status === "approved" && (
-                <p className="mt-3 text-sm text-amber-400">
+                <p className="mt-3 text-sm text-warm-600">
                   该任务创建时未关联账号，请取消后在项目详情重新创建并选择账号。
                 </p>
               )}
 
               {canReject(job) && isAdmin && (
                 <input
-                  className="mt-3 w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                  className="mt-3 input text-sm text-ink-900"
                   maxLength={500}
                   value={notes[job.id] ?? ""}
                   onChange={(e) =>
@@ -406,12 +406,12 @@ export default function Publish() {
               )}
 
               {scheduleOpen === job.id && isAdmin && (
-                <div className="mt-3 space-y-2 rounded border border-slate-800 bg-slate-950 p-3">
+                <div className="mt-3 space-y-2 rounded border border-line bg-white p-3">
                   <div className="flex flex-wrap items-end gap-2">
-                    <label className="min-w-56 flex-1 space-y-1 text-sm text-slate-400">
+                    <label className="min-w-56 flex-1 space-y-1 text-sm text-ink-500">
                       <span>定时发布时间</span>
                       <input
-                        className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                        className="input text-ink-900"
                         type="datetime-local"
                         value={scheduleDraft}
                         onChange={(e) => setScheduleDraft(e.target.value)}
@@ -419,7 +419,7 @@ export default function Publish() {
                     </label>
                     <button
                       type="button"
-                      className="rounded bg-indigo-600 px-4 py-2 text-sm font-medium disabled:opacity-50"
+                      className="btn-primary"
                       disabled={schedulePending || !scheduleDraft}
                       onClick={() => saveSchedule(job)}
                     >
@@ -427,7 +427,7 @@ export default function Publish() {
                     </button>
                     <button
                       type="button"
-                      className="rounded border border-slate-700 px-4 py-2 text-sm text-slate-300 disabled:opacity-50"
+                      className="rounded border border-line px-4 py-2 text-sm text-ink-700 disabled:opacity-50"
                       disabled={schedulePending || !job.scheduled_at}
                       onClick={() => {
                         setFeedback(null);
@@ -437,7 +437,7 @@ export default function Publish() {
                       清除定时
                     </button>
                   </div>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-ink-500">
                     按本机时区解释，提交时转换为 UTC；worker 到期后执行已审核的自动发布任务。
                   </p>
                 </div>
@@ -446,7 +446,7 @@ export default function Publish() {
               {job.checks.passed !== undefined && (
                 <p
                   className={`mt-3 text-sm ${
-                    job.checks.passed ? "text-emerald-400" : "text-red-400"
+                    job.checks.passed ? "text-sage-600" : "text-wine-600"
                   }`}
                 >
                   {job.checks.passed ? "发布前检查通过" : "发布前检查未通过"}
@@ -459,8 +459,8 @@ export default function Publish() {
                       key={`${issue.level}-${index}`}
                       className={
                         issue.level === "error"
-                          ? "text-sm text-red-400"
-                          : "text-sm text-amber-400"
+                          ? "text-sm text-wine-600"
+                          : "text-sm text-warm-600"
                       }
                     >
                       [{issueLevelLabel(issue.level)}] {issue.message}
@@ -472,19 +472,19 @@ export default function Publish() {
               {job.error &&
                 (job.status === "publish_failed" ||
                   job.status === "export_failed") && (
-                  <p className="mt-3 whitespace-pre-wrap text-sm text-red-400">
+                  <p className="mt-3 whitespace-pre-wrap text-sm text-wine-600">
                     {job.error}
                   </p>
                 )}
 
               {(job.external_id || job.external_url || job.export_path) && (
-                <div className="mt-3 space-y-1 text-xs text-slate-500">
+                <div className="mt-3 space-y-1 text-xs text-ink-500">
                   {job.external_id && (
                     <p>
                       外部 ID：
                       {job.external_url ? (
                         <a
-                          className="text-indigo-400"
+                          className="text-sage-700"
                           href={job.external_url}
                           target="_blank"
                           rel="noreferrer"
@@ -509,10 +509,10 @@ export default function Publish() {
                 <p
                   className={`mt-3 text-sm ${
                     note.kind === "ok"
-                      ? "text-emerald-400"
+                      ? "text-sage-600"
                       : note.kind === "warn"
-                        ? "text-amber-400"
-                        : "text-red-400"
+                        ? "text-warm-600"
+                        : "text-wine-600"
                   }`}
                 >
                   {note.text}

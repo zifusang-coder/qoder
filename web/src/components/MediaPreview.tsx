@@ -42,24 +42,24 @@ export default function MediaPreview({ projectId, path, title }: Props) {
 
   const name = title || mediaFileName(path);
   if (error) {
-    return <p className="text-sm text-red-400">{error}</p>;
+    return <p className="text-sm text-wine-600">{error}</p>;
   }
   if (kind === "text") {
     return (
       <div className="space-y-1">
-        <p className="text-xs text-slate-500">{name}</p>
+        <p className="text-xs text-ink-500">{name}</p>
         {text ? (
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-300">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-paper p-3 text-xs text-ink-700">
             {text}
           </pre>
         ) : (
-          <p className="text-sm text-slate-400">加载中…</p>
+          <p className="text-sm text-ink-500">加载中…</p>
         )}
       </div>
     );
   }
   if (!url) {
-    return <p className="text-sm text-slate-400">加载中…</p>;
+    return <p className="text-sm text-ink-500">加载中…</p>;
   }
   if (kind === "video") {
     return (
@@ -71,7 +71,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
           src={url}
         />
         <a
-          className="text-xs text-indigo-400"
+          className="text-xs text-sage-700"
           href={url}
           download={mediaFileName(path)}
         >
@@ -85,7 +85,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
       <div className="space-y-1">
         <audio className="w-full" controls src={url} />
         <a
-          className="text-xs text-indigo-400"
+          className="text-xs text-sage-700"
           href={url}
           download={mediaFileName(path)}
         >
@@ -97,7 +97,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
   if (kind === "image") {
     return (
       <img
-        className="max-h-72 rounded border border-slate-800"
+        className="max-h-72 rounded border border-line"
         src={url}
         alt={name}
       />
@@ -105,7 +105,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
   }
   return (
     <a
-      className="text-sm text-indigo-400"
+      className="text-sm text-sage-700"
       href={url}
       download={mediaFileName(path)}
     >
