@@ -101,10 +101,10 @@ export default function Calendar() {
             按发布时间查看定时任务与已发布内容
           </p>
         </div>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
           <button
             type="button"
-            className="rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
+            className="whitespace-nowrap rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
             onClick={() => shift(-1)}
           >
             上个月
@@ -114,14 +114,14 @@ export default function Calendar() {
           </span>
           <button
             type="button"
-            className="rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
+            className="whitespace-nowrap rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
             onClick={() => shift(1)}
           >
             下个月
           </button>
           <button
             type="button"
-            className="rounded px-2 py-1.5 text-sage-700 hover:text-sage-700"
+            className="whitespace-nowrap rounded px-2 py-1.5 text-sage-700 hover:underline"
             onClick={() =>
               setCursor({
                 year: now.getFullYear(),
@@ -175,7 +175,7 @@ export default function Calendar() {
           <div
             key={cell.key}
             className={`min-h-28 border-b border-r border-line p-2 ${
-              cell.inMonth ? "" : "bg-ink-900/30 text-ink-500"
+              cell.inMonth ? "" : "bg-ink-900/5 text-ink-500"
             }`}
           >
             <div className="mb-2 flex items-center justify-between text-xs">

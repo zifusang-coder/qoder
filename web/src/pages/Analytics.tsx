@@ -132,7 +132,7 @@ export default function Analytics() {
       </div>
 
       <div className="grid gap-4 card p-5 md:grid-cols-2">
-        <label className="space-y-1 text-sm text-ink-500">
+        <label className="min-w-0 space-y-1 text-sm text-ink-500">
           <span>项目</span>
           <select
             className="input text-ink-900"
@@ -147,9 +147,9 @@ export default function Analytics() {
             ))}
           </select>
         </label>
-        <div className="space-y-1 text-sm text-ink-500">
+        <div className="min-w-0 space-y-1 text-sm text-ink-500">
           <span>导入 CSV</span>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <input
               className="min-w-0 flex-1 text-sm text-ink-700 file:mr-3 file:rounded file:border-0 file:bg-sage-50 file:px-3 file:py-1.5 file:text-ink-700"
               type="file"

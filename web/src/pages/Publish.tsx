@@ -492,14 +492,18 @@ export default function Publish() {
                           {job.external_id}
                         </a>
                       ) : (
-                        <span className="font-mono">{job.external_id}</span>
+                        <span className="break-all font-mono">
+                          {job.external_id}
+                        </span>
                       )}
                     </p>
                   )}
                   {job.export_path && (
                     <p>
                       素材包：
-                      <span className="font-mono">{job.export_path}</span>
+                      <span className="break-all font-mono">
+                        {job.export_path}
+                      </span>
                     </p>
                   )}
                 </div>
