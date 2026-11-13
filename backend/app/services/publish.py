@@ -9,9 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.errors import AppError
 from app.models.project import Content, ContentVersion
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
-from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
+from app.publish.base import (
+    PublishConfigError,
+    PublishContent,
+    PublisherAdapter,
+    PublishError,
+    PublishMedia,
+)
+from app.publish.credentials import merge_credential_patch
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.state import InvalidTransition, next_status
+from app.storage import StorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +308,7 @@ async def execute_job(
     *,
     tenant_id: str,
     actor: str,
+    storage: StorageBackend,
     require_due: datetime | None = None,
 ) -> PublishJob:
     job = await _locked_job(session, job_id, tenant_id)
@@ -326,6 +335,44 @@ async def execute_job(
     ).scalar_one_or_none()
     if version is None:
         raise AppError("empty_content", "发布版本不存在", 409)
+
+    content = (
+        await session.execute(
+            select(Content).where(
+                Content.id == job.content_id,
+                Content.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if content is None:
+        raise AppError("empty_content", "内容不存在", 409)
+
+    meta = version.meta if isinstance(version.meta, dict) else {}
+    raw_files = meta.get("files")
+    media: list[PublishMedia] = []
+    if isinstance(raw_files, list):
+        for item in raw_files:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            path = item.get("path")
+            if isinstance(name, str) and name and isinstance(path, str) and path:
+                media.append(
+                    PublishMedia(
+                        name=name,
+                        kind=str(item.get("kind") or "text"),
+                        path=path,
+                    )
+                )
+    cover = meta.get("cover")
+    payload = PublishContent(
+        project_id=str(content.project_id),
+        title=version.title,
+        body=version.body,
+        kind=content.kind,
+        media=tuple(media),
+        cover_path=cover if isinstance(cover, str) and cover else None,
+    )
 
     if job.account_id is None:
         raise AppError("account_missing", "请先选择并授权发布账号", 409)
@@ -360,7 +407,7 @@ async def execute_job(
 
     try:
         result = await adapter.publish(
-            account=account, title=version.title, body=version.body
+            account=account, content=payload, storage=storage
         )
     except PublishConfigError as exc:
         # 配置问题可修复，回滚本次尝试次数，避免用户改好配置前先被限流
@@ -391,7 +438,7 @@ async def execute_job(
         )
         raise failure from None
 
-    return await apply_action(
+    published = await apply_action(
         session,
         job.id,
         "succeed",
@@ -404,6 +451,19 @@ async def execute_job(
             "error": "",
         },
     )
+    if result.credential_patch:
+        published_id = published.id
+        try:
+            merge_credential_patch(account, result.credential_patch)
+            await session.commit()
+        except Exception:
+            # 刷新令牌回写失败不影响已确认的发布结果
+            logger.exception("发布凭据回写失败 job=%s", published_id)
+            await session.rollback()
+            reloaded = await _reload_job(session, published_id, tenant_id)
+            if reloaded is not None:
+                return reloaded
+    return published
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

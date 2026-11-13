@@ -1,16 +1,19 @@
 import html
-import json
 import re
 from typing import Any
 
 import httpx
 import markdown
-from cryptography.fernet import InvalidToken
 
 from app.logging_setup import configure_http_logging
 from app.models.publish import PlatformAccount
-from app.publish.base import PublishConfigError, PublishError, PublishResult
-from app.security import decrypt_secret
+from app.publish.base import (
+    PublishConfigError,
+    PublishContent,
+    PublishError,
+    PublishResult,
+)
+from app.publish.credentials import load_credential
 
 # worker 直接导入适配器时也必须屏蔽 httpx 的完整 URL 日志
 configure_http_logging()
@@ -71,25 +74,6 @@ class WeChatMPAdapter:
             raise PublishError(f"公众号 access_token 获取失败：{errcode} {errmsg}")
         return token
 
-    def _credentials(self, account: PlatformAccount) -> dict[str, str]:
-        try:
-            raw = decrypt_secret(account.credential_enc)
-            creds = json.loads(raw)
-        except (InvalidToken, ValueError, TypeError, UnicodeError):
-            raise PublishConfigError("账号凭据不可用，请重新授权") from None
-        if not isinstance(creds, dict):
-            raise PublishConfigError("公众号凭据不完整，请重新授权")
-        app_id = creds.get("app_id")
-        app_secret = creds.get("app_secret")
-        if (
-            not isinstance(app_id, str)
-            or not app_id.strip()
-            or not isinstance(app_secret, str)
-            or not app_secret.strip()
-        ):
-            raise PublishConfigError("公众号凭据不完整，请重新授权")
-        return {"app_id": app_id.strip(), "app_secret": app_secret.strip()}
-
     @staticmethod
     def _meta_int(meta: dict, key: str) -> int:
         value = meta.get(key, 0)
@@ -128,10 +112,18 @@ class WeChatMPAdapter:
         return article
 
     async def publish(
-        self, *, account: PlatformAccount, title: str, body: str
+        self,
+        *,
+        account: PlatformAccount,
+        content: PublishContent,
+        storage: object,
     ) -> PublishResult:
-        creds = self._credentials(account)
-        article = self._article(account, title, body)
+        if content.kind != "article":
+            raise PublishConfigError("公众号仅支持图文内容")
+        creds = load_credential(
+            account, ("app_id", "app_secret"), label="公众号"
+        )
+        article = self._article(account, content.title, content.body)
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             token = await self._token(client, creds)
             data = await self._post(

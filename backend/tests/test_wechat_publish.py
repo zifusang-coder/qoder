@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
-from app.publish.base import PublishError, PublishResult
+from app.publish.base import PublishContent, PublishError, PublishResult
 from app.publish.wechat import DRAFT_URL, TOKEN_URL, WeChatMPAdapter
 from app.security import decrypt_secret, encrypt_secret
 from app.services.publish import apply_action, execute_job
@@ -21,6 +21,11 @@ from app.services.publish import apply_action, execute_job
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
 
 CREDENTIAL = {"app_id": "wx123", "app_secret": "secret"}
+
+
+class _FakeStorage:
+    def read_bytes(self, project_id: str, relpath: str) -> bytes:
+        raise AssertionError("公众号发布不应读取媒体文件")
 
 
 def _account_payload(
@@ -727,7 +732,11 @@ async def test_adapter_truncates_title_and_uses_thumb_media_id():
     )
 
     result = await WeChatMPAdapter().publish(
-        account=account, title="长" * 100, body="正文"
+        account=account,
+        content=PublishContent(
+            project_id="p", title="长" * 100, body="正文", kind="article"
+        ),
+        storage=_FakeStorage(),
     )
 
     assert result.external_id == "media-1"
@@ -757,7 +766,13 @@ async def test_adapter_uses_fallback_title():
         meta={"thumb_media_id": "thumb-1"},
     )
 
-    await WeChatMPAdapter().publish(account=account, title="   ", body="正文")
+    await WeChatMPAdapter().publish(
+        account=account,
+        content=PublishContent(
+            project_id="p", title="   ", body="正文", kind="article"
+        ),
+        storage=_FakeStorage(),
+    )
     article = json.loads(draft_route.calls[0].request.content)["articles"][0]
     assert article["title"] == "未命名"
 
@@ -779,7 +794,13 @@ async def test_digest_unescapes_html_entities():
         meta={"thumb_media_id": "thumb-1"},
     )
 
-    await WeChatMPAdapter().publish(account=account, title="标题", body="A & B")
+    await WeChatMPAdapter().publish(
+        account=account,
+        content=PublishContent(
+            project_id="p", title="标题", body="A & B", kind="article"
+        ),
+        storage=_FakeStorage(),
+    )
     article = json.loads(draft_route.calls[0].request.content)["articles"][0]
     assert article["digest"] == "A & B"
 
@@ -990,7 +1011,7 @@ async def test_unexpected_adapter_exception_is_sanitized(client, db_session):
         platform = "wechat"
         capability = "auto"
 
-        async def publish(self, *, account, title, body):
+        async def publish(self, *, account, content, storage):
             raise RuntimeError("boom wx123 secret")
 
     with pytest.raises(PublishError) as excinfo:
@@ -1000,6 +1021,7 @@ async def test_unexpected_adapter_exception_is_sanitized(client, db_session):
             BoomAdapter(),
             tenant_id=DEFAULT_TENANT_ID,
             actor="tester@local",
+            storage=_FakeStorage(),
         )
 
     assert str(excinfo.value) == "发布执行失败（RuntimeError）"
@@ -1029,7 +1051,7 @@ async def test_in_flight_marker_is_persisted_before_adapter_call(
         platform = "wechat"
         capability = "auto"
 
-        async def publish(self, *, account, title, body):
+        async def publish(self, *, account, content, storage):
             # 独立会话读取同一引擎；after_commit 证明此刻状态已真正落库，
             # 避免 StaticPool 共享连接看到未提交的 flush 而产生假阳性
             async with AsyncSession(bind=db_session.bind) as probe:
@@ -1051,6 +1073,7 @@ async def test_in_flight_marker_is_persisted_before_adapter_call(
             InspectingAdapter(),
             tenant_id=DEFAULT_TENANT_ID,
             actor="tester@local",
+            storage=_FakeStorage(),
         )
     finally:
         event.remove(db_session.sync_session, "after_commit", _record_commit)
@@ -1226,12 +1249,12 @@ async def test_corrupted_credentials_returns_sanitized_409(client, db_session):
     response = await _execute(client, job["id"])
     assert response.status_code == 409
     assert response.json()["code"] == "account_misconfigured"
-    assert response.json()["message"] == "账号凭据不可用，请重新授权"
+    assert response.json()["message"] == "公众号凭据不可用，请重新授权"
     assert "broken" not in response.text
 
     failed = await _stored_job(db_session, job["id"])
     assert failed.status == "publish_failed"
-    assert failed.error == "账号凭据不可用，请重新授权"
+    assert failed.error == "公众号凭据不可用，请重新授权"
     assert failed.attempts == 0
 
 

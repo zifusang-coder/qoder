@@ -467,6 +467,7 @@ async def execute_publish(
     request: Request,
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> JobOut:
     job = await _owned_job(session, job_id, user)
     if job.platform != "wechat":
@@ -479,6 +480,7 @@ async def execute_publish(
             WeChatMPAdapter(),
             tenant_id=user.tenant_id,
             actor=user.email,
+            storage=storage,
         )
     except InvalidTransition as exc:
         raise AppError(
