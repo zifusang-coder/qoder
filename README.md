@@ -37,7 +37,7 @@ cd web && npm install && npm run dev
 make worker
 ```
 
-等价于 `cd backend && uv run arq app.worker.WorkerSettings`。worker 每分钟扫描 `approved` 且到期的公众号任务并执行；执行前会先对账卡在 `publishing` 的陈旧任务。同时消费 `process_media_job` 队列，执行短视频/配音生成。worker 不在 docker-compose 中常驻；未启动 worker 时媒体任务会停留在 `queued`。
+等价于 `cd backend && uv run arq app.worker.WorkerSettings`。定时发布覆盖能力为自动发布的「平台 + 内容类型」：公众号图文、抖音视频、头条视频。人工导出平台仍由用户在发布页执行导出。worker 每分钟扫描 `approved` 且到期的上述任务并执行；执行前会先对账卡在 `publishing` 的陈旧任务。同时消费 `process_media_job` 队列，执行短视频/配音生成。worker 不在 docker-compose 中常驻；未启动 worker 时媒体任务会停留在 `queued`。
 
 ### 数据导入
 
@@ -114,6 +114,9 @@ GET  /api/projects/{project_id}/files/preview?path=media/<run_id>/video.mp4
 
 ### 发布边界
 
+- 发布账号：9 个平台、同平台多账号、按平台动态凭据表单；凭据加密且只返回掩码。
+- 真实发布：公众号图文草稿、抖音视频、头条视频；小红书/知乎/快手/视频号导出素材包。
+- 待接入：头条图文、百家号、B站显示明确提示，不产生假成功。
 - 公众号：仅通过官方接口创建草稿，群发需人工在公众号后台完成。
 - 小红书/知乎/快手/视频号：导出 zip（manifest、正文、发布指南），由人工上传。
 - 不使用任何逆向接口或自动化点击。
