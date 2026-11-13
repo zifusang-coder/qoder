@@ -21,11 +21,12 @@ from app.publish.state import InvalidTransition
 from app.services.media import run_media_job
 from app.services.publish import MAX_PUBLISH_ATTEMPTS, execute_job
 from app.skills.registry import get_registry
-from app.storage import get_storage
+from app.storage import LocalStorage, get_storage
 from app.worker import (
     MAX_BATCH_SIZE,
     STALE_PUBLISH_MESSAGE,
     WorkerSettings,
+    archive_audit_logs,
     list_due_jobs,
     process_media_job,
     publish_due_jobs,
@@ -865,15 +866,83 @@ async def test_adapter_error_isolated_to_failing_job(worker_factory):
 
 def test_worker_settings_wire_cron():
     assert WorkerSettings.functions == [process_media_job]
-    assert len(WorkerSettings.cron_jobs) == 1
-    cron_job = WorkerSettings.cron_jobs[0]
-    assert cron_job.job_id == "publish-due-jobs"
-    assert cron_job.coroutine is publish_due_jobs
+    assert len(WorkerSettings.cron_jobs) == 2
+    publish_cron, archive_cron = WorkerSettings.cron_jobs
+    assert publish_cron.job_id == "publish-due-jobs"
+    assert publish_cron.coroutine is publish_due_jobs
     # 每分钟整点执行，不保留结果（worker 每次独立扫描数据库）
-    assert cron_job.minute is None
-    assert cron_job.second == 0
-    assert cron_job.keep_result_s == 0
+    assert publish_cron.minute is None
+    assert publish_cron.second == 0
+    assert publish_cron.keep_result_s == 0
+    # 每天凌晨低峰归档一次过期审计日志
+    assert archive_cron.job_id == "audit-archive"
+    assert archive_cron.coroutine is archive_audit_logs
+    assert archive_cron.hour == 3
+    assert archive_cron.minute == 15
     assert WorkerSettings.job_timeout == 600
+
+
+async def test_archive_audit_logs_exports_and_deletes_expired(
+    worker_factory, tmp_path
+):
+    old = datetime.now(UTC) - timedelta(days=200)
+    async with worker_factory() as session:
+        session.add_all(
+            [
+                AuditLog(
+                    tenant_id=DEFAULT_TENANT_ID,
+                    actor_email="old@example.com",
+                    action="old",
+                    created_at=old,
+                ),
+                AuditLog(
+                    tenant_id=DEFAULT_TENANT_ID,
+                    actor_email="new@example.com",
+                    action="new",
+                    created_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        await session.commit()
+
+    storage = LocalStorage(tmp_path / "storage")
+    archived = await archive_audit_logs(
+        session_factory=worker_factory, storage=storage, retention_days=180
+    )
+
+    assert archived == 1
+    async with worker_factory() as session:
+        actions = (await session.execute(select(AuditLog.action))).scalars().all()
+    assert actions == ["new"]
+    files = storage.list_files("_audit_archive")
+    assert len(files) == 1
+    assert '"action":"old"' in storage.read_text("_audit_archive", files[0])
+
+
+async def test_archive_audit_logs_disabled_without_retention(
+    worker_factory, tmp_path
+):
+    async with worker_factory() as session:
+        session.add(
+            AuditLog(
+                tenant_id=DEFAULT_TENANT_ID,
+                actor_email="old@example.com",
+                action="old",
+                created_at=datetime.now(UTC) - timedelta(days=200),
+            )
+        )
+        await session.commit()
+
+    storage = LocalStorage(tmp_path / "storage")
+    archived = await archive_audit_logs(
+        session_factory=worker_factory, storage=storage, retention_days=0
+    )
+
+    assert archived == 0
+    assert storage.list_files("_audit_archive") == []
+    async with worker_factory() as session:
+        count = len((await session.execute(select(AuditLog.id))).scalars().all())
+    assert count == 1
 
 
 async def test_list_due_jobs_skips_suspended_tenant(worker_factory):

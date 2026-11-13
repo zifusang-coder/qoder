@@ -28,6 +28,7 @@ from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
 from app.publish.registry import AUTO_PUBLISH_PAIRS
 from app.publish.state import InvalidTransition
 from app.services.audit import record_best_effort
+from app.services.audit_retention import archive_expired_audit_logs
 from app.services.media import run_media_job
 from app.services.publish import (
     ContentChanged,
@@ -284,10 +285,38 @@ async def process_media_job(_ctx: dict | None, job_id: str) -> None:
             logger.exception("媒体任务执行异常 job=%s", job_id)
 
 
+async def archive_audit_logs(
+    _ctx: dict | None = None,
+    *,
+    session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] = SessionLocal,
+    storage: StorageBackend | None = None,
+    retention_days: int | None = None,
+) -> int:
+    settings = get_settings()
+    days = settings.audit_retention_days if retention_days is None else retention_days
+    if days <= 0:
+        return 0
+    backend = storage or get_storage()
+    async with session_factory() as session:
+        try:
+            archived = await archive_expired_audit_logs(
+                session, backend, retention_days=days
+            )
+        except Exception:
+            # 归档失败不影响次日重试；过期数据保留比丢失更安全
+            logger.exception("审计日志归档失败")
+            await session.rollback()
+            return 0
+    if archived:
+        logger.info("已归档过期审计日志 %s 条，保留期 %s 天", archived, days)
+    return archived
+
+
 class WorkerSettings:
     functions: ClassVar[list] = [process_media_job]
     cron_jobs: ClassVar[list] = [
-        cron(publish_due_jobs, second=0, job_id="publish-due-jobs")
+        cron(publish_due_jobs, second=0, job_id="publish-due-jobs"),
+        cron(archive_audit_logs, hour=3, minute=15, job_id="audit-archive"),
     ]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     job_timeout = 600
