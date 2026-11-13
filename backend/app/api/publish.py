@@ -15,16 +15,17 @@ from app.models.project import Content, ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.models.user import User
 from app.permissions import admin_access, editor_access, has_role, viewer_access
+from app.publish.adapters import adapter_for
 from app.publish.base import Platform, PublishConfigError, PublishError
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
 from app.publish.registry import (
     CAP_AUTO,
+    CAP_MANUAL,
     capability_for,
     content_kind_label,
     spec_for,
 )
 from app.publish.state import InvalidTransition
-from app.publish.wechat import WeChatMPAdapter
 from app.services.audit import record, record_best_effort
 from app.services.precheck import run_precheck
 from app.services.publish import (
@@ -517,14 +518,44 @@ async def execute_publish(
     storage: StorageBackend = Depends(get_storage),  # noqa: B008
 ) -> JobOut:
     job = await _owned_job(session, job_id, user)
-    if job.platform != "wechat":
+    content = (
+        await session.execute(
+            select(Content).where(
+                Content.id == job.content_id,
+                Content.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if content is None:
+        raise AppError("not_found", "内容不存在", 404)
+
+    try:
+        spec = spec_for(job.platform)
+        capability = capability_for(job.platform, content.kind)
+    except KeyError:
+        raise AppError(
+            "platform_not_available", "未知平台，暂不支持自动发布", 409
+        ) from None
+
+    if capability == CAP_MANUAL:
         raise AppError("manual_export_required", "该平台请使用导出流程", 409)
+    if capability != CAP_AUTO:
+        raise AppError(
+            "platform_not_available",
+            spec.note or f"{spec.label}暂不支持自动发布",
+            409,
+        )
+
+    try:
+        adapter = adapter_for(job.platform)
+    except PublishConfigError as exc:
+        raise AppError("platform_not_available", str(exc), 409) from exc
 
     try:
         job = await execute_job(
             session,
             job.id,
-            WeChatMPAdapter(),
+            adapter,
             tenant_id=user.tenant_id,
             actor=user.email,
             storage=storage,
@@ -548,7 +579,7 @@ async def execute_publish(
         resource_id=str(job.id),
         request=request,
     )
-    return _out(job)
+    return _out(job, content.kind)
 
 
 @router.post("/jobs/{job_id}/export", response_model=JobOut)
