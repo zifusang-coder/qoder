@@ -11,6 +11,13 @@ import {
   mediaJobStatusLabel,
 } from "../media";
 import {
+  FALLBACK_PLATFORMS,
+  accountsForPlatform,
+  capabilityFor,
+  specFor,
+  usePlatforms,
+} from "../platforms";
+import {
   PLATFORMS,
   contentKindLabel,
   contentStatusLabel,
@@ -50,6 +57,7 @@ export default function ProjectDetail() {
   const { canWrite } = useAuth();
 
   const [platform, setPlatform] = useState("wechat");
+  const [kind, setKind] = useState("article");
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [openVersions, setOpenVersions] = useState("");
@@ -107,9 +115,20 @@ export default function ProjectDetail() {
     queryKey: ["accounts"],
     queryFn: () => api<Account[]>("/accounts"),
   });
-  const wechatAccounts = (accounts.data ?? []).filter(
-    (account) => account.platform === "wechat" && account.status === "active",
+  const platforms = usePlatforms();
+  const platformSpecs = platforms.data ?? FALLBACK_PLATFORMS;
+  const contentSpec = specFor(platform, platformSpecs);
+  const contentKinds = Object.keys(
+    contentSpec?.content_capabilities ?? { article: "pending" },
   );
+
+  function selectContentPlatform(next: string) {
+    setPlatform(next);
+    const spec = specFor(next, platformSpecs);
+    const nextKind =
+      Object.keys(spec?.content_capabilities ?? {})[0] ?? "article";
+    setKind(nextKind);
+  }
 
   const versions = useQuery({
     queryKey: ["versions", openVersions],
@@ -241,7 +260,7 @@ export default function ProjectDetail() {
     event.preventDefault();
     createContent.mutate({
       platform,
-      kind: "article",
+      kind,
       title: title.trim(),
       body,
     });
@@ -330,11 +349,25 @@ export default function ProjectDetail() {
               <select
                 className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
                 value={platform}
-                onChange={(e) => setPlatform(e.target.value)}
+                onChange={(e) => selectContentPlatform(e.target.value)}
               >
-                {PLATFORMS.map(([value, label]) => (
+                {platformSpecs.map((item) => (
+                  <option key={item.key} value={item.key}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block space-y-1 text-sm text-slate-400">
+              <span>内容类型</span>
+              <select
+                className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2 text-slate-100"
+                value={kind}
+                onChange={(e) => setKind(e.target.value)}
+              >
+                {contentKinds.map((value) => (
                   <option key={value} value={value}>
-                    {label}
+                    {contentKindLabel(value)}
                   </option>
                 ))}
               </select>
@@ -764,9 +797,17 @@ export default function ProjectDetail() {
             const pending =
               createJob.isPending &&
               createJob.variables?.content.id === content.id;
-            const needsAccount = content.platform === "wechat";
+            const contentSpec = specFor(content.platform, platformSpecs);
+            const capability = contentSpec
+              ? capabilityFor(contentSpec, content.kind)
+              : "pending";
+            const needsAccount = capability === "auto_publish";
+            const platformAccounts = accountsForPlatform(
+              accounts.data ?? [],
+              content.platform,
+            );
             const selectedAccountId =
-              accountSelections[content.id] ?? wechatAccounts[0]?.id ?? "";
+              accountSelections[content.id] ?? platformAccounts[0]?.id ?? "";
             const missingAccount =
               needsAccount && accounts.isSuccess && !selectedAccountId;
             const accountBlocked =
@@ -815,7 +856,7 @@ export default function ProjectDetail() {
                             ? "内容还没有版本，无法发布"
                             : accountBlocked
                               ? accounts.isSuccess
-                                ? "请先授权公众号账号"
+                                ? `请先授权${contentSpec?.label ?? "平台"}账号`
                                 : "正在加载发布账号"
                               : undefined
                       }
@@ -846,7 +887,7 @@ export default function ProjectDetail() {
                           }))
                         }
                         disabled={
-                          !accounts.isSuccess || wechatAccounts.length === 0
+                          !accounts.isSuccess || platformAccounts.length === 0
                         }
                       >
                         {!accounts.isSuccess && (
@@ -854,10 +895,10 @@ export default function ProjectDetail() {
                             {accounts.isError ? "账号加载失败" : "加载中…"}
                           </option>
                         )}
-                        {accounts.isSuccess && wechatAccounts.length === 0 && (
+                        {accounts.isSuccess && platformAccounts.length === 0 && (
                           <option value="">暂无可用账号</option>
                         )}
-                        {wechatAccounts.map((account) => (
+                        {platformAccounts.map((account) => (
                           <option key={account.id} value={account.id}>
                             {account.name}
                           </option>
@@ -866,14 +907,19 @@ export default function ProjectDetail() {
                     </label>
                     {missingAccount && (
                       <p className="text-xs text-amber-400">
-                        还没有可用的公众号账号，请先
-                        <Link className="ml-1 text-indigo-400" to="/accounts">
-                          授权账号
-                        </Link>
-                        。
+                        还没有可用的{contentSpec?.label ?? "平台"}账号，请先
+                        <a className="ml-1 text-indigo-400" href="/accounts">
+                          添加账号
+                        </a>
                       </p>
                     )}
                   </div>
+                )}
+
+                {capability === "pending" && (
+                  <p className="mt-2 text-xs text-amber-400">
+                    {contentSpec?.note ?? "该平台暂不支持自动发布或导出"}
+                  </p>
                 )}
 
                 {openVersions === content.id && (

@@ -3,12 +3,14 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import { capabilityFor, specFor } from "../platforms";
 import { formatTime, toDatetimeLocal, toScheduledAt } from "../schedule";
 import {
   actionFor,
   canCancel,
   canReject,
   canReschedule,
+  contentKindLabel,
   errorText,
   jobStatusLabel,
   platformLabel,
@@ -38,7 +40,7 @@ function successText(result: ActionResult): string {
     case "approve":
       return "已通过人工审核";
     case "execute":
-      return "已提交到公众号草稿箱";
+      return "已提交到平台，请在平台后台确认";
     case "export":
       return "已导出素材包";
     case "reject":
@@ -233,6 +235,10 @@ export default function Publish() {
 
       <div className="space-y-3">
         {jobs.data?.items.map((job) => {
+          const spec = specFor(job.platform);
+          const capability = spec
+            ? capabilityFor(spec, job.content_kind)
+            : "pending";
           const action = actionFor(job);
           const actionNeedsAdmin =
             action?.action === "approve" ||
@@ -245,7 +251,8 @@ export default function Publish() {
           const schedulePending =
             reschedule.isPending && reschedule.variables?.job.id === job.id;
           const note = feedback?.jobId === job.id ? feedback : null;
-          const missingAccount = job.platform === "wechat" && !job.account_id;
+          const missingAccount =
+            capability === "auto_publish" && !job.account_id;
           const accountLabel = job.account_id
             ? (accountNames.get(job.account_id) ?? job.account_id)
             : "";
@@ -257,7 +264,8 @@ export default function Publish() {
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <h2 className="font-medium">
-                    {platformLabel(job.platform)}
+                    {platformLabel(job.platform)} ·{" "}
+                    {contentKindLabel(job.content_kind)}
                     <span className="ml-2 text-sm font-normal text-slate-400">
                       v{job.content_version}
                     </span>
@@ -268,7 +276,7 @@ export default function Publish() {
                     {job.scheduled_at &&
                       ` · 定时：${formatTime(job.scheduled_at)}`}
                   </p>
-                  {job.platform === "wechat" && (
+                  {capability === "auto_publish" && (
                     <p className="mt-1 text-xs text-slate-500">
                       {job.account_id ? (
                         `发布账号：${accountLabel}`
@@ -370,9 +378,11 @@ export default function Publish() {
                       {pending ? "处理中…" : action.label}
                     </button>
                   ) : job.status === "approved" && action === null ? (
-                    <span className="text-sm text-slate-500">
-                      {platformLabel(job.platform)}暂不支持自动发布或导出
-                    </span>
+                    capability === "pending" ? (
+                      <span className="text-sm text-slate-500">
+                        {spec?.note ?? "该平台暂不支持自动发布或导出"}
+                      </span>
+                    ) : null
                   ) : null}
                 </div>
               </div>
@@ -428,7 +438,7 @@ export default function Publish() {
                     </button>
                   </div>
                   <p className="text-xs text-slate-500">
-                    按本机时区解释，提交时转换为 UTC；worker 到期后执行已审核的公众号任务。
+                    按本机时区解释，提交时转换为 UTC；worker 到期后执行已审核的自动发布任务。
                   </p>
                 </div>
               )}
