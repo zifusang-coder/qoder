@@ -257,7 +257,8 @@ async def list_accounts(
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[AccountOut]:
     stmt = select(PlatformAccount).where(
-        PlatformAccount.tenant_id == user.tenant_id
+        PlatformAccount.tenant_id == user.tenant_id,
+        PlatformAccount.platform.in_(PLATFORM_ORDER),
     )
     if platform is not None:
         if platform not in PLATFORM_ORDER:

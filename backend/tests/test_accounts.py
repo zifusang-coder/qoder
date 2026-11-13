@@ -1,5 +1,9 @@
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
+
+from app.models.publish import PlatformAccount
+from app.security import decrypt_secret
 
 WECHAT = {"app_id": "wx-1", "app_secret": "wx-secret-1"}
 DOUYIN = {
@@ -23,7 +27,7 @@ async def _create(client, **overrides):
     return await client.post("/api/accounts", json=_payload(**overrides))
 
 
-async def test_same_platform_allows_multiple_accounts(client):
+async def test_same_platform_allows_multiple_accounts(client, db_session):
     first = await _create(
         client,
         name="主号",
@@ -39,9 +43,17 @@ async def test_same_platform_allows_multiple_accounts(client):
 
     assert first.status_code == 201
     assert second.status_code == 201
+
+    # SQLite 时间戳只有秒级精度，显式错开创建时间才能验证倒序
+    older = await db_session.get(
+        PlatformAccount, uuid.UUID(first.json()["id"])
+    )
+    older.created_at = datetime.now(UTC) - timedelta(minutes=1)
+    await db_session.commit()
+
     items = (await client.get("/api/accounts")).json()
-    names = {item["name"] for item in items if item["platform"] == "wechat"}
-    assert {"主号", "副号"} <= names
+    names = [item["name"] for item in items if item["platform"] == "wechat"]
+    assert names == ["副号", "主号"]
 
 
 async def test_same_name_same_platform_conflicts(client):
@@ -124,6 +136,23 @@ async def test_dynamic_credential_validation(client):
     assert ok.status_code == 201
 
 
+async def test_update_rejects_platform_and_invalid_credential(client):
+    created = await _create(client, platform="douyin", credential=DOUYIN)
+    assert created.status_code == 201
+    account_id = created.json()["id"]
+
+    platform_change = await client.patch(
+        f"/api/accounts/{account_id}", json={"platform": "wechat"}
+    )
+    assert platform_change.status_code == 422
+
+    bad_credential = await client.patch(
+        f"/api/accounts/{account_id}",
+        json={"credential": {"app_id": "wx-1", "app_secret": "x"}},
+    )
+    assert bad_credential.status_code == 422
+
+
 async def test_manual_platform_accepts_only_empty_credential(client):
     ok = await _create(
         client, platform="xiaohongshu", credential={}, meta={}
@@ -184,8 +213,24 @@ async def test_platforms_endpoint_exposes_matrix_without_secrets(client):
         if field["secret"]
     }
     assert secret_fields == {"client_secret", "refresh_token"}
-    assert "****" not in response.text
-    assert "rt-secret" not in response.text
+    for spec in specs:
+        assert set(spec) == {
+            "key",
+            "label",
+            "capability",
+            "content_capabilities",
+            "credential_fields",
+            "meta_fields",
+            "note",
+        }
+    for field in by_key["douyin"]["credential_fields"]:
+        assert set(field) == {
+            "key",
+            "label",
+            "secret",
+            "required",
+            "placeholder",
+        }
 
 
 async def test_credentials_are_masked_and_encrypted(client, db_session):
@@ -201,3 +246,7 @@ async def test_credentials_are_masked_and_encrypted(client, db_session):
     }
     for marker in ("cs-secret-1", "rt-secret-1"):
         assert marker not in response.text
+
+    account = await db_session.get(PlatformAccount, uuid.UUID(body["id"]))
+    assert "cs-secret-1" not in account.credential_enc
+    assert json.loads(decrypt_secret(account.credential_enc)) == DOUYIN

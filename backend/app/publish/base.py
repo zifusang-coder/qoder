@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, get_args
 
 from app.publish.registry import PLATFORM_ORDER
 
@@ -19,6 +19,9 @@ Platform = Literal[
     "channels",
     "bilibili",
 ]
+
+if set(get_args(Platform)) != set(PLATFORMS):
+    raise RuntimeError("Platform 字面量与注册表不一致")
 
 
 class PublishError(RuntimeError):

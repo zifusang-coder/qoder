@@ -1,5 +1,8 @@
+from typing import get_args
+
 import pytest
 
+from app.publish.base import Platform
 from app.publish.registry import (
     AUTO_PUBLISH_PAIRS,
     AUTO_PUBLISH_PLATFORMS,
@@ -127,6 +130,10 @@ def test_meta_field_metadata():
     for key, spec in SPECS.items():
         if key not in META_FIELDS:
             assert spec.meta_fields == ()
+
+
+def test_platform_literal_matches_registry():
+    assert set(get_args(Platform)) == PLATFORM_KEYS
 
 
 def test_registry_cannot_be_mutated():
