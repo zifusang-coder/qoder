@@ -199,7 +199,16 @@ async def test_create_account_masks_and_encrypts_credentials(client, db_session)
     assert body["platform"] == "wechat"
     assert body["name"] == "主号"
     assert body["status"] == "active"
-    assert set(body) == {"id", "platform", "name", "status", "credential_masked"}
+    assert set(body) == {
+        "id",
+        "platform",
+        "name",
+        "status",
+        "credential_masked",
+        "meta",
+        "capability",
+        "capability_note",
+    }
     masked = json.loads(body["credential_masked"])
     assert masked == {"app_id": "****", "app_secret": "****"}
     # 键名保留，但任何凭据值都不能带出前缀；用值级断言避免误伤 app_secret 键名

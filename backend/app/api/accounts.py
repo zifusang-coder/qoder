@@ -21,32 +21,35 @@ from app.models.publish import PlatformAccount
 from app.models.user import User
 from app.permissions import admin_access, editor_access
 from app.publish.base import Platform
+from app.publish.registry import (
+    PLATFORM_ORDER,
+    headline_capability,
+    spec_for,
+)
 from app.security import decrypt_secret, encrypt_secret
 from app.services.audit import record
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
-ALLOWED_META = {
-    "author",
-    "thumb_media_id",
-    "need_open_comment",
-    "only_fans_can_comment",
-}
 MAX_AUTHOR = 64
 MAX_THUMB_MEDIA_ID = 200
 
 
-def _clean_meta(meta: dict) -> dict:
+def _clean_meta(platform: str, meta: dict) -> dict:
+    spec = spec_for(platform)
+    allowed = set(spec.meta_fields)
     cleaned: dict = {}
     for key, value in meta.items():
-        if key not in ALLOWED_META:
-            raise ValueError(f"不支持的 meta 字段：{key}")
+        if key not in allowed:
+            raise ValueError(f"{spec.label}不支持 meta 字段：{key}")
         if key == "author":
             if not isinstance(value, str):
                 raise ValueError("meta 字段 author 必须是字符串")
             author = value.strip()
             if len(author) > MAX_AUTHOR:
-                raise ValueError(f"meta 字段 author 长度不能超过 {MAX_AUTHOR}")
+                raise ValueError(
+                    f"meta 字段 author 长度不能超过 {MAX_AUTHOR}"
+                )
             cleaned[key] = author
         elif key == "thumb_media_id":
             if not isinstance(value, str):
@@ -56,7 +59,8 @@ def _clean_meta(meta: dict) -> dict:
                 raise ValueError("公众号封面图 thumb_media_id 不能为空")
             if len(thumb) > MAX_THUMB_MEDIA_ID:
                 raise ValueError(
-                    f"meta 字段 thumb_media_id 长度不能超过 {MAX_THUMB_MEDIA_ID}"
+                    "meta 字段 thumb_media_id 长度不能超过 "
+                    f"{MAX_THUMB_MEDIA_ID}"
                 )
             cleaned[key] = thumb
         else:
@@ -71,18 +75,32 @@ def _clean_meta(meta: dict) -> dict:
 
 
 def _clean_credential(platform: str, credential: dict) -> dict:
-    if platform != "wechat":
-        return credential
-    app_id = credential.get("app_id")
-    app_secret = credential.get("app_secret")
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or not isinstance(app_secret, str)
-        or not app_secret.strip()
-    ):
-        raise ValueError("公众号凭据不完整，请重新授权")
-    return {"app_id": app_id.strip(), "app_secret": app_secret.strip()}
+    spec = spec_for(platform)
+    declared = {field.key for field in spec.credential_fields}
+    unknown = set(credential) - declared
+    if unknown:
+        raise ValueError(
+            f"{spec.label}不支持的凭据字段：{', '.join(sorted(unknown))}"
+        )
+    cleaned: dict[str, str] = {}
+    for field in spec.credential_fields:
+        value = credential.get(field.key)
+        if value is None:
+            if field.required:
+                raise ValueError(
+                    f"{spec.label}凭据不完整，请填写 {field.label}"
+                )
+            continue
+        if not isinstance(value, str):
+            raise ValueError(  # noqa: TRY004
+                f"{spec.label}凭据字段 {field.label} 必须是字符串"
+            )
+        value = value.strip()
+        if field.required and not value:
+            raise ValueError(f"{spec.label}凭据不完整，请填写 {field.label}")
+        if value:
+            cleaned[field.key] = value
+    return cleaned
 
 
 class AccountIn(BaseModel):
@@ -93,13 +111,13 @@ class AccountIn(BaseModel):
         str,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=100),
     ]
-    credential: dict
+    credential: dict = Field(default_factory=dict)
     meta: dict = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_credentials_and_meta(self) -> "AccountIn":
         self.credential = _clean_credential(self.platform, self.credential)
-        self.meta = _clean_meta(self.meta)
+        self.meta = _clean_meta(self.platform, self.meta)
         return self
 
 
@@ -120,8 +138,6 @@ class AccountUpdate(BaseModel):
     def _validate_update(self) -> "AccountUpdate":
         if self.name is None and self.credential is None and self.meta is None:
             raise ValueError("至少需要提供一个要更新的字段")
-        if self.meta is not None:
-            self.meta = _clean_meta(self.meta)
         return self
 
 
@@ -131,6 +147,27 @@ class AccountOut(BaseModel):
     name: str
     status: str
     credential_masked: str
+    meta: dict
+    capability: str
+    capability_note: str
+
+
+class CredentialFieldOut(BaseModel):
+    key: str
+    label: str
+    secret: bool
+    required: bool
+    placeholder: str
+
+
+class PlatformOut(BaseModel):
+    key: str
+    label: str
+    capability: str
+    content_capabilities: dict[str, str]
+    credential_fields: list[CredentialFieldOut]
+    meta_fields: list[str]
+    note: str
 
 
 def _masked_credential(account: PlatformAccount) -> str:
@@ -145,12 +182,21 @@ def _masked_credential(account: PlatformAccount) -> str:
 
 
 def _out(account: PlatformAccount) -> AccountOut:
+    spec = spec_for(account.platform)
+    stored_meta = account.meta if isinstance(account.meta, dict) else {}
     return AccountOut(
         id=str(account.id),
         platform=account.platform,
         name=account.name,
         status=account.status,
         credential_masked=_masked_credential(account),
+        meta={
+            key: value
+            for key, value in stored_meta.items()
+            if key in spec.meta_fields
+        },
+        capability=headline_capability(spec),
+        capability_note=spec.note,
     )
 
 
@@ -177,20 +223,57 @@ async def _owned_account(
     return account
 
 
+@router.get("/platforms", response_model=list[PlatformOut])
+async def list_platforms(
+    user: User = Depends(editor_access),  # noqa: B008
+) -> list[PlatformOut]:
+    return [
+        PlatformOut(
+            key=spec.key,
+            label=spec.label,
+            capability=headline_capability(spec),
+            content_capabilities=dict(spec.content_capabilities),
+            credential_fields=[
+                CredentialFieldOut(
+                    key=field.key,
+                    label=field.label,
+                    secret=field.secret,
+                    required=field.required,
+                    placeholder=field.placeholder,
+                )
+                for field in spec.credential_fields
+            ],
+            meta_fields=list(spec.meta_fields),
+            note=spec.note,
+        )
+        for spec in (spec_for(key) for key in PLATFORM_ORDER)
+    ]
+
+
 @router.get("", response_model=list[AccountOut])
 async def list_accounts(
+    platform: str | None = None,
     user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[AccountOut]:
+    stmt = select(PlatformAccount).where(
+        PlatformAccount.tenant_id == user.tenant_id
+    )
+    if platform is not None:
+        if platform not in PLATFORM_ORDER:
+            raise AppError("not_found", "平台不存在", 404)
+        stmt = stmt.where(PlatformAccount.platform == platform)
     rows = (
         await session.execute(
-            select(PlatformAccount)
-            .where(PlatformAccount.tenant_id == user.tenant_id)
-            .order_by(
-                PlatformAccount.created_at.desc(), PlatformAccount.id.desc()
+            stmt.order_by(
+                PlatformAccount.created_at.desc(),
+                PlatformAccount.id.desc(),
             )
         )
     ).scalars().all()
+    order = {key: index for index, key in enumerate(PLATFORM_ORDER)}
+    # 先按创建时间倒序，再按平台顺序稳定排序，前端可直接分组
+    rows = sorted(rows, key=lambda account: order.get(account.platform, 99))
     return [_out(account) for account in rows]
 
 
@@ -256,9 +339,20 @@ async def update_account(
         )
     meta = None
     if payload.meta is not None:
-        # PATCH 只合并本次提交的键，未提交的 meta（如 thumb_media_id）必须保留
+        try:
+            cleaned_meta = _clean_meta(account.platform, payload.meta)
+        except ValueError as exc:
+            raise AppError("validation_error", str(exc), 422) from None
+        # PATCH 只合并本次提交的键，未提交的 meta 必须保留
         stored = account.meta if isinstance(account.meta, dict) else {}
-        meta = {**{k: v for k, v in stored.items() if k in ALLOWED_META}, **payload.meta}
+        meta = {
+            **{
+                key: value
+                for key, value in stored.items()
+                if key in spec_for(account.platform).meta_fields
+            },
+            **cleaned_meta,
+        }
     if name is not None:
         account.name = name
     if credential_enc is not None:
