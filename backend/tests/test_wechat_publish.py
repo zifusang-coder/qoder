@@ -17,15 +17,28 @@ from app.publish.base import PublishContent, PublishError, PublishResult
 from app.publish.wechat import DRAFT_URL, TOKEN_URL, WeChatMPAdapter
 from app.security import decrypt_secret, encrypt_secret
 from app.services.publish import apply_action, execute_job
+from app.storage import StorageBackend
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
 
 CREDENTIAL = {"app_id": "wx123", "app_secret": "secret"}
 
 
-class _FakeStorage:
+class _FakeStorage(StorageBackend):
+    def save_text(self, project_id: str, relpath: str, text: str) -> str:
+        raise AssertionError("公众号发布不应写入文件")
+
+    def save_bytes(self, project_id: str, relpath: str, data: bytes) -> str:
+        raise AssertionError("公众号发布不应写入文件")
+
+    def read_text(self, project_id: str, relpath: str) -> str:
+        raise AssertionError("公众号发布不应读取媒体文件")
+
     def read_bytes(self, project_id: str, relpath: str) -> bytes:
         raise AssertionError("公众号发布不应读取媒体文件")
+
+    def list_files(self, project_id: str) -> list[str]:
+        raise AssertionError("公众号发布不应枚举文件")
 
 
 def _account_payload(

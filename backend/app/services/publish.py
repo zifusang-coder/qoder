@@ -85,7 +85,7 @@ async def _reload_job(
             )
         ).scalar_one_or_none()
     except Exception:
-        logger.exception("导出任务状态回读失败 job=%s", job_id)
+        logger.exception("任务状态回读失败 job=%s", job_id)
         return None
 
 
@@ -454,8 +454,19 @@ async def execute_job(
     if result.credential_patch:
         published_id = published.id
         try:
-            merge_credential_patch(account, result.credential_patch)
-            await session.commit()
+            # 适配器调用期间用户可能重新授权，锁内重读避免覆盖新凭据
+            locked_account = (
+                await session.execute(
+                    select(PlatformAccount)
+                    .where(PlatformAccount.id == account.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            if merge_credential_patch(
+                locked_account, result.credential_patch
+            ):
+                await session.commit()
         except Exception:
             # 刷新令牌回写失败不影响已确认的发布结果
             logger.exception("发布凭据回写失败 job=%s", published_id)

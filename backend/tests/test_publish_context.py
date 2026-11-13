@@ -33,7 +33,7 @@ class FakeStorage(StorageBackend):
         raise NotImplementedError
 
     def read_bytes(self, project_id, relpath):
-        return b"video-bytes"
+        raise NotImplementedError
 
     def list_files(self, project_id):
         raise NotImplementedError
@@ -164,7 +164,10 @@ async def test_credential_patch_failure_keeps_published(
 ):
     job_id, _account_id = await _create_douyin_job(client, db_session)
 
+    calls = []
+
     def boom(account, patch):
+        calls.append(patch)
         raise RuntimeError("write failed")
 
     monkeypatch.setattr("app.services.publish.merge_credential_patch", boom)
@@ -180,6 +183,7 @@ async def test_credential_patch_failure_keeps_published(
 
     assert job.status == "published"
     assert job.error == ""
+    assert calls == [{"access_token": "fresh-token"}]
 
 
 async def test_execute_job_skips_malformed_media_entries(client, db_session):
@@ -219,7 +223,7 @@ async def test_execute_job_skips_malformed_media_entries(client, db_session):
     assert content.cover_path is None
 
 
-def test_merge_credential_patch_ignores_booleans():
+def test_merge_credential_patch_rejects_unsupported_types():
     account = PlatformAccount(
         tenant_id=DEFAULT_TENANT_ID,
         platform="douyin",
@@ -229,8 +233,10 @@ def test_merge_credential_patch_ignores_booleans():
         meta={},
     )
 
-    merge_credential_patch(account, {"flag": True, "access_token": "t-1"})
+    with pytest.raises(TypeError, match="类型不受支持"):
+        merge_credential_patch(account, {"flag": True, "access_token": "t-1"})
 
+    assert merge_credential_patch(account, {"access_token": "t-1"}) == 1
     stored = json.loads(decrypt_secret(account.credential_enc))
     assert "flag" not in stored
     assert stored["access_token"] == "t-1"

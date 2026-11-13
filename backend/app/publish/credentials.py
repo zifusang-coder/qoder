@@ -57,11 +57,19 @@ def credential_with_tokens(
     return creds
 
 
-def merge_credential_patch(account: PlatformAccount, patch: dict) -> None:
-    creds = _decrypt(account, label="账号")
+def merge_credential_patch(account: PlatformAccount, patch: dict) -> int:
+    if not isinstance(patch, dict):
+        raise TypeError("凭据补丁必须是字典")
+    cleaned: dict[str, str | int] = {}
     for key, value in patch.items():
-        if isinstance(value, (str, int)) and not isinstance(value, bool):
-            creds[str(key)] = value
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise TypeError(f"凭据补丁字段 {key} 类型不受支持")
+        cleaned[str(key)] = value
+    if not cleaned:
+        return 0
+    creds = _decrypt(account, label="账号")
+    creds.update(cleaned)
     account.credential_enc = encrypt_secret(
         json.dumps(creds, ensure_ascii=False)
     )
+    return len(cleaned)

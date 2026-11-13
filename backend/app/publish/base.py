@@ -1,21 +1,13 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from app.publish.registry import PLATFORM_ORDER
+
 if TYPE_CHECKING:
     from app.models.publish import PlatformAccount
     from app.storage import StorageBackend
 
-PLATFORMS = (
-    "wechat",
-    "xiaohongshu",
-    "douyin",
-    "toutiao",
-    "baijiahao",
-    "zhihu",
-    "kuaishou",
-    "channels",
-    "bilibili",
-)
+PLATFORMS = PLATFORM_ORDER
 Platform = Literal[
     "wechat",
     "xiaohongshu",
