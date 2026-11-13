@@ -25,6 +25,7 @@
 - **按能力分流**：创建任务、手动执行与定时 worker 按「平台 + 内容类型」能力分流。
 - **前端能力展示**：账号页动态渲染凭据表单，发布页与项目详情按能力显示操作。
 - **待接入提示**：头条图文与百家号发布仍需官方接口文档，当前返回明确配置错误。
+- **清爽主题**：全局改为白灰底、自然绿主色与酒红点缀；新增 `paper/surface/ink/sage/wine/warm` 设计令牌与 `card/input/btn-*` 组件类，移除旧的深色 slate/indigo 配色。
 
 ### 验证
 
@@ -33,6 +34,7 @@
 - 真实 MinIO 联调：上传、列表、下载与导出 zip 均通过，对象键含项目隔离前缀。
 - 真实千问 embedding：`text-embedding-v3` 返回 1024 维向量；pgvector 语义排序与回填已在本机 PostgreSQL 验证。
 - 真实短视频链路：千问分镜 → edge-tts 配音 → ffmpeg 合成 → 媒体 API 导入 → 鉴权预览全部通过；产物为 1080×1920 H.264 + AAC，时长 25.968s。
+- 主题：前端 `npm test` 与 `npm run build` 通过；桌面与移动宽度下逐页视觉验收通过，无旧色板残留。
 - 媒体脚本测试：真实 ffmpeg 渲染与 `RUN_MEDIA_TTS=1` 的真实 edge-tts 合成均通过。
 - 后端：`uv run pytest -q` 632 passed、2 skipped，`uv run ruff check .` 通过。
 - 前端：`npm test` 111 passed，`npm run build` 通过。
