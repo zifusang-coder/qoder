@@ -7,7 +7,9 @@ from app.publish.registry import (
     CAP_MANUAL,
     CAP_PENDING,
     MANUAL_EXPORT_PLATFORMS,
+    PLATFORM_KEYS,
     PLATFORM_ORDER,
+    SPECS,
     capability_for,
     content_kind_label,
     headline_capability,
@@ -66,3 +68,71 @@ def test_content_kind_labels():
     assert content_kind_label("article") == "图文"
     assert content_kind_label("video") == "视频"
     assert content_kind_label("unknown") == "unknown"
+
+
+CREDENTIAL_KEYS = {
+    "wechat": {"app_id", "app_secret"},
+    "douyin": {"client_key", "client_secret", "open_id", "refresh_token"},
+    "toutiao": {"client_key", "client_secret", "open_id", "refresh_token"},
+    "baijiahao": {"app_id", "app_token"},
+}
+
+SECRET_KEYS = {
+    "wechat": {"app_secret"},
+    "douyin": {"client_secret", "refresh_token"},
+    "toutiao": {"client_secret", "refresh_token"},
+    "baijiahao": {"app_token"},
+}
+
+META_FIELDS = {
+    "wechat": (
+        "author",
+        "thumb_media_id",
+        "need_open_comment",
+        "only_fans_can_comment",
+    ),
+    "toutiao": ("author",),
+}
+
+
+def credential_keys(spec):
+    return {field.key for field in spec.credential_fields}
+
+
+def secret_keys(spec):
+    return {field.key for field in spec.credential_fields if field.secret}
+
+
+def test_registry_keys_match_spec_keys():
+    assert set(SPECS) == PLATFORM_KEYS
+    for key, spec in SPECS.items():
+        assert spec.key == key
+
+
+def test_credential_field_metadata():
+    for key, expected in CREDENTIAL_KEYS.items():
+        spec = SPECS[key]
+        assert credential_keys(spec) == expected
+        assert secret_keys(spec) == SECRET_KEYS[key]
+
+    for key, spec in SPECS.items():
+        if key not in CREDENTIAL_KEYS:
+            assert spec.credential_fields == ()
+
+
+def test_meta_field_metadata():
+    for key, expected in META_FIELDS.items():
+        assert SPECS[key].meta_fields == expected
+
+    for key, spec in SPECS.items():
+        if key not in META_FIELDS:
+            assert spec.meta_fields == ()
+
+
+def test_registry_cannot_be_mutated():
+    with pytest.raises(TypeError):
+        SPECS["wechat"] = SPECS["wechat"]  # type: ignore[index]
+
+    wechat = SPECS["wechat"]
+    with pytest.raises(TypeError):
+        wechat.content_capabilities["video"] = CAP_AUTO  # type: ignore[index]
