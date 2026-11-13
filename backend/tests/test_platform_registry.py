@@ -143,3 +143,12 @@ def test_registry_cannot_be_mutated():
     wechat = SPECS["wechat"]
     with pytest.raises(TypeError):
         wechat.content_capabilities["video"] = CAP_AUTO  # type: ignore[index]
+
+
+def test_adapter_registry_covers_auto_and_pending_platforms():
+    from app.publish.adapters import ADAPTERS, adapter_for
+
+    assert set(ADAPTERS) == {"wechat", "douyin", "toutiao", "baijiahao"}
+    assert adapter_for("douyin").platform == "douyin"
+    with pytest.raises(Exception, match="暂不支持自动发布"):
+        adapter_for("xiaohongshu")

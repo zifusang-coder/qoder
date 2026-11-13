@@ -3,7 +3,11 @@ import json
 import zipfile
 from datetime import UTC, datetime
 
+from app.publish.registry import MANUAL_EXPORT_PLATFORMS
 from app.storage import StorageBackend
+
+# 对外 API 仍保留手动导出平台集合，调用方从本模块导入不受影响
+__all__ = ["GUIDES", "MANUAL_EXPORT_PLATFORMS", "ExportAdapter"]
 
 GUIDES: dict[str, list[str]] = {
     "xiaohongshu": [
@@ -31,8 +35,6 @@ GUIDES: dict[str, list[str]] = {
         "确认可见范围后发表",
     ],
 }
-
-MANUAL_EXPORT_PLATFORMS = frozenset(GUIDES)
 
 
 def _guide_markdown(steps: list[str]) -> str:
