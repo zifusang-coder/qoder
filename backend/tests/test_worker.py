@@ -72,6 +72,7 @@ async def _seed_content(
     *,
     tenant_id=DEFAULT_TENANT_ID,
     platform="wechat",
+    kind="article",
     title="定时内容",
     body="正文",
 ):
@@ -82,6 +83,7 @@ async def _seed_content(
         tenant_id=tenant_id,
         project_id=project.id,
         platform=platform,
+        kind=kind,
         title=title,
         current_version=1,
     )
@@ -170,42 +172,87 @@ async def _job_state(factory, job_id):
         }
 
 
-async def test_list_due_jobs_only_approved_wechat_and_due(worker_factory):
+async def test_list_due_jobs_only_auto_publish_pairs_and_due(worker_factory):
     now = datetime.now(UTC)
     async with worker_factory() as session:
         wechat = await _seed_content(session, platform="wechat")
+        douyin = await _seed_content(
+            session, platform="douyin", kind="video", title="抖音视频"
+        )
+        toutiao_video = await _seed_content(
+            session, platform="toutiao", kind="video", title="头条视频"
+        )
+        toutiao_article = await _seed_content(
+            session, platform="toutiao", kind="article", title="头条图文"
+        )
         xiaohongshu = await _seed_content(
-            session, platform="xiaohongshu", title="小红书内容"
+            session, platform="xiaohongshu", kind="note", title="小红书"
+        )
+        baijiahao = await _seed_content(
+            session, platform="baijiahao", kind="article", title="百家号"
+        )
+        bilibili = await _seed_content(
+            session, platform="bilibili", kind="video", title="B站"
         )
         session.add_all(
             [
                 _job(
                     wechat,
-                    key="k1",
+                    key="wechat-due",
                     status="approved",
                     scheduled_at=now - timedelta(minutes=1),
                 ),
                 _job(
+                    douyin,
+                    key="douyin-due",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=2),
+                ),
+                _job(
+                    toutiao_video,
+                    key="toutiao-video-due",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=3),
+                ),
+                _job(
+                    toutiao_article,
+                    key="toutiao-article-pending",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=4),
+                ),
+                _job(
+                    xiaohongshu,
+                    key="manual-export",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=5),
+                ),
+                _job(
+                    baijiahao,
+                    key="baijiahao-pending",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=6),
+                ),
+                _job(
+                    bilibili,
+                    key="bilibili-pending",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=7),
+                ),
+                _job(
                     wechat,
-                    key="k2",
+                    key="wechat-future",
                     status="approved",
                     scheduled_at=now + timedelta(hours=1),
                 ),
                 _job(
                     wechat,
-                    key="k3",
+                    key="wechat-draft",
                     status="draft",
-                    scheduled_at=now - timedelta(minutes=5),
-                ),
-                _job(
-                    xiaohongshu,
-                    key="k4",
-                    status="approved",
-                    scheduled_at=now - timedelta(minutes=2),
+                    scheduled_at=now - timedelta(minutes=8),
                 ),
                 _job(
                     wechat,
-                    key="k5-no-schedule",
+                    key="wechat-no-schedule",
                     status="approved",
                     scheduled_at=None,
                 ),
@@ -215,7 +262,12 @@ async def test_list_due_jobs_only_approved_wechat_and_due(worker_factory):
 
         due = await list_due_jobs(session, now)
 
-    assert [job.idempotency_key for job in due] == ["k1"]
+    # 只有「平台 + 内容类型」可自动发布的三类任务进入扫描，按 scheduled_at 升序
+    assert [job.idempotency_key for job in due] == [
+        "toutiao-video-due",
+        "douyin-due",
+        "wechat-due",
+    ]
 
 
 async def test_list_due_jobs_respects_batch_limit(worker_factory):
@@ -273,7 +325,7 @@ async def test_publish_due_jobs_batch_truncation(
     with caplog.at_level(logging.WARNING, logger="app.worker"):
         executed = await publish_due_jobs(
             session_factory=worker_factory,
-            adapter_factory=lambda: adapter,
+            adapter_resolver=lambda _platform: adapter,
             now=now,
         )
 
@@ -402,7 +454,7 @@ async def test_publish_due_jobs_reconciles_stale_before_scan(worker_factory):
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
 
@@ -419,6 +471,11 @@ async def test_publish_due_jobs_reconciles_stale_before_scan(worker_factory):
 
     due_state = await _job_state(worker_factory, due_id)
     assert due_state["status"] == "published"
+
+
+class _FakeStorage:
+    def read_bytes(self, project_id, relpath):
+        raise AssertionError("测试适配器不应读取媒体文件")
 
 
 class FakeAdapter:
@@ -450,7 +507,7 @@ async def test_publish_due_jobs_executes_once(worker_factory):
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
     assert executed == 1
@@ -462,7 +519,7 @@ async def test_publish_due_jobs_executes_once(worker_factory):
 
     again = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=datetime.now(UTC),
     )
     assert again == 0
@@ -519,7 +576,7 @@ async def test_publish_due_jobs_rechecks_schedule_after_selection(
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
 
@@ -554,7 +611,7 @@ async def test_execute_job_treats_cleared_schedule_as_not_due(worker_factory):
                 FakeAdapter(),
                 tenant_id=DEFAULT_TENANT_ID,
                 actor="scheduler",
-                storage=get_storage(),
+                storage=_FakeStorage(),
                 require_due=now,
             )
 
@@ -588,7 +645,7 @@ async def test_missing_account_fails_job_and_continues_batch(worker_factory):
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
 
@@ -629,7 +686,7 @@ async def test_content_changed_fails_job(worker_factory):
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
 
@@ -665,7 +722,7 @@ async def test_publish_due_jobs_uses_job_tenant(worker_factory):
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
     assert executed == 1
@@ -723,7 +780,7 @@ async def test_blocked_conditions_fail_job_deterministically(
     adapter = FakeAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
 
@@ -785,7 +842,7 @@ async def test_adapter_error_isolated_to_failing_job(worker_factory):
     adapter = FailingAdapter()
     executed = await publish_due_jobs(
         session_factory=worker_factory,
-        adapter_factory=lambda: adapter,
+        adapter_resolver=lambda _platform: adapter,
         now=now,
     )
 
@@ -870,3 +927,49 @@ async def test_media_job_fails_when_tenant_suspended(worker_factory):
     assert result.error_code == "tenant_suspended"
     assert result.error_message == "租户已停用，任务未执行"
     assert result.attempts == 0
+
+
+async def test_publish_due_jobs_resolves_adapter_per_platform(worker_factory):
+    now = datetime.now(UTC)
+    async with worker_factory() as session:
+        wechat = await _seed_content(session, platform="wechat")
+        douyin = await _seed_content(
+            session, platform="douyin", kind="video"
+        )
+        wechat_account = await _seed_account(session)
+        douyin_account = await _seed_account(session, platform="douyin")
+        session.add_all(
+            [
+                _job(
+                    wechat,
+                    key="resolve-wechat",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=1),
+                    account_id=wechat_account.id,
+                ),
+                _job(
+                    douyin,
+                    key="resolve-douyin",
+                    status="approved",
+                    scheduled_at=now - timedelta(minutes=2),
+                    account_id=douyin_account.id,
+                ),
+            ]
+        )
+        await session.commit()
+
+    resolved: list[str] = []
+
+    def resolver(platform: str):
+        resolved.append(platform)
+        return FakeAdapter()
+
+    executed = await publish_due_jobs(
+        session_factory=worker_factory,
+        adapter_resolver=resolver,
+        storage=_FakeStorage(),
+        now=now,
+    )
+
+    assert executed == 2
+    assert resolved == ["douyin", "wechat"]

@@ -1,8 +1,8 @@
 """arq 定时发布 worker。
 
-定时执行只覆盖审核通过的公众号任务；小红书、知乎、快手、视频号等
-手动导出平台仍由用户在导出流程中处理。worker 作为系统进程跨租户扫描
-到期任务是有意为之，与按当前用户过滤的 API 端点不同。
+定时执行覆盖「平台 + 内容类型」能力为自动发布的任务：公众号图文、
+抖音视频、头条视频。人工导出平台与待接入平台不进入扫描。worker 作为
+系统进程跨租户扫描到期任务是有意为之，与按当前用户过滤的 API 端点不同。
 """
 
 import logging
@@ -14,17 +14,19 @@ from typing import ClassVar
 
 from arq import cron
 from arq.connections import RedisSettings
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
+from app.models.project import Content
 from app.models.publish import PublishJob
 from app.models.tenant import Tenant
-from app.publish.base import PublisherAdapter, PublishError
+from app.publish.adapters import adapter_for
+from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
+from app.publish.registry import AUTO_PUBLISH_PAIRS
 from app.publish.state import InvalidTransition
-from app.publish.wechat import WeChatMPAdapter
 from app.services.audit import record_best_effort
 from app.services.media import run_media_job
 from app.services.publish import (
@@ -34,7 +36,7 @@ from app.services.publish import (
     execute_job,
 )
 from app.skills.registry import get_registry
-from app.storage import get_storage
+from app.storage import StorageBackend, get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ BLOCKED_ERROR_CODES = {
     "account_missing",
     "account_inactive",
     "account_platform_mismatch",
+    "platform_content_mismatch",
+    "platform_not_available",
 }
 
 
@@ -57,14 +61,26 @@ async def list_due_jobs(
     now: datetime,
     limit: int = MAX_BATCH_SIZE,
 ) -> list[PublishJob]:
+    auto_pairs = [
+        and_(
+            PublishJob.platform == platform,
+            Content.kind == kind,
+        )
+        for platform, kind in AUTO_PUBLISH_PAIRS
+    ]
     rows = (
         await session.execute(
             select(PublishJob)
+            .join(
+                Content,
+                (Content.id == PublishJob.content_id)
+                & (Content.tenant_id == PublishJob.tenant_id),
+            )
             .join(Tenant, Tenant.id == PublishJob.tenant_id)
             .where(
                 Tenant.status == "active",
                 PublishJob.status == "approved",
-                PublishJob.platform == "wechat",
+                or_(*auto_pairs),
                 PublishJob.scheduled_at.is_not(None),
                 PublishJob.scheduled_at <= now,
             )
@@ -164,7 +180,8 @@ async def publish_due_jobs(
     _ctx: dict | None = None,
     *,
     session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] = SessionLocal,
-    adapter_factory: Callable[[], PublisherAdapter] = WeChatMPAdapter,
+    adapter_resolver: Callable[[str], PublisherAdapter] = adapter_for,
+    storage: StorageBackend | None = None,
     now: datetime | None = None,
 ) -> int:
     current = now or datetime.now(UTC)
@@ -184,14 +201,23 @@ async def publish_due_jobs(
                 "到期发布任务达到单批上限 %s，剩余任务将在下一次扫描执行",
                 MAX_BATCH_SIZE,
             )
-        targets = [(job.id, job.tenant_id) for job in due[:MAX_BATCH_SIZE]]
+        targets = [
+            (job.id, job.tenant_id, job.platform)
+            for job in due[:MAX_BATCH_SIZE]
+        ]
 
-    adapter = adapter_factory()
-    storage = get_storage()
+    backend = storage or get_storage()
     executed = 0
-    for job_id, tenant_id in targets:
+    for job_id, tenant_id, platform in targets:
         # 每个任务独立会话；状态机保证并发/重复扫描时只有一个执行者成功
         async with session_factory() as session:
+            try:
+                adapter = adapter_resolver(platform)
+            except PublishConfigError as exc:
+                await _fail_blocked_job(
+                    session, job_id, tenant_id=tenant_id, message=str(exc)
+                )
+                continue
             try:
                 await execute_job(
                     session,
@@ -199,7 +225,7 @@ async def publish_due_jobs(
                     adapter,
                     tenant_id=tenant_id,
                     actor="scheduler",
-                    storage=storage,
+                    storage=backend,
                     require_due=current,
                 )
                 executed += 1
