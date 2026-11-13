@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { visibleNavItems } from "../auth";
 import { useAuth } from "../auth-context";
+import { APP_NAME } from "../branding";
 import { setToken } from "../client";
 
 export default function Layout() {
@@ -22,7 +23,7 @@ export default function Layout() {
       <header className="border-b border-slate-800 bg-slate-900">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-3 px-6 py-4">
           <span className="text-sm font-semibold tracking-wide text-indigo-400">
-            新媒体运营
+            {APP_NAME}
           </span>
           <span className="text-xs text-slate-500">{user?.tenant_name}</span>
           <nav className="flex flex-1 flex-wrap gap-1 text-sm">

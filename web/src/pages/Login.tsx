@@ -1,4 +1,5 @@
 import { FormEvent, useState } from "react";
+import { APP_NAME } from "../branding";
 import { api, setToken } from "../client";
 
 export default function Login() {
@@ -29,7 +30,7 @@ export default function Login() {
 
   return (
     <main className="mx-auto mt-24 w-full max-w-sm rounded-xl border border-slate-800 bg-slate-900 p-8">
-      <h1 className="text-xl font-semibold">新媒体运营系统</h1>
+      <h1 className="text-xl font-semibold">{APP_NAME}</h1>
       <p className="mt-1 text-sm text-slate-400">登录后开始创作与发布</p>
       <form className="mt-6 space-y-3" onSubmit={submit}>
         <input
