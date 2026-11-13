@@ -1,7 +1,9 @@
 import {
+  FALLBACK_PLATFORMS,
   capabilityFor,
   specFor,
   type Capability,
+  type PlatformSpec,
 } from "./platforms";
 
 export type { Me } from "./auth";
@@ -360,6 +362,7 @@ const EXECUTE_LABELS: Record<string, string> = {
 
 export function actionFor(
   job: Pick<Job, "status" | "platform" | "content_kind">,
+  specs: PlatformSpec[] = FALLBACK_PLATFORMS,
 ): { action: JobActionKind; label: string } | null {
   if (job.status === "draft" || job.status === "precheck_failed") {
     return { action: "precheck", label: "发布前检查" };
@@ -368,7 +371,7 @@ export function actionFor(
     return { action: "approve", label: "人工通过" };
   }
 
-  const spec = specFor(job.platform);
+  const spec = specFor(job.platform, specs);
   const capability: Capability = spec
     ? capabilityFor(spec, job.content_kind)
     : "pending";

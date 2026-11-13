@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { PlatformSpec } from "../platforms";
 import {
   actionFor,
   canCancel,
@@ -122,6 +123,53 @@ describe("actionFor", () => {
       ).toEqual(expected);
     },
   );
+});
+
+function spec(overrides: Partial<PlatformSpec>): PlatformSpec {
+  return {
+    key: "wechat",
+    label: "公众号",
+    capability: "auto_publish",
+    content_capabilities: {},
+    credential_fields: [],
+    meta_fields: [],
+    note: "",
+    ...overrides,
+  };
+}
+
+describe("actionFor with server capabilities", () => {
+  it("disables execute when the server marks the pair pending", () => {
+    const specs = [spec({ content_capabilities: { article: "pending" } })];
+
+    expect(
+      actionFor(
+        job({ status: "approved", platform: "wechat", content_kind: "article" }),
+        specs,
+      ),
+    ).toBeNull();
+  });
+
+  it("enables execute when the server upgrades a pair to auto_publish", () => {
+    const specs = [
+      spec({
+        key: "xiaohongshu",
+        label: "小红书",
+        content_capabilities: { note: "auto_publish" },
+      }),
+    ];
+
+    expect(
+      actionFor(
+        job({
+          status: "approved",
+          platform: "xiaohongshu",
+          content_kind: "note",
+        }),
+        specs,
+      ),
+    ).toEqual({ action: "execute", label: "发布到小红书" });
+  });
 });
 
 describe("canCancel", () => {

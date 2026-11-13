@@ -3,7 +3,12 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
-import { capabilityFor, specFor } from "../platforms";
+import {
+  FALLBACK_PLATFORMS,
+  capabilityFor,
+  specFor,
+  usePlatforms,
+} from "../platforms";
 import { formatTime, toDatetimeLocal, toScheduledAt } from "../schedule";
 import {
   actionFor,
@@ -75,6 +80,8 @@ export default function Publish() {
     queryKey: ["jobs"],
     queryFn: () => api<JobList>("/publish/jobs"),
   });
+  const platforms = usePlatforms();
+  const platformSpecs = platforms.data ?? FALLBACK_PLATFORMS;
   const accounts = useQuery({
     queryKey: ["accounts"],
     queryFn: () => api<Account[]>("/accounts"),
@@ -210,7 +217,7 @@ export default function Publish() {
         <div>
           <h1 className="text-xl font-semibold">发布</h1>
           <p className="mt-1 text-sm text-ink-500">
-            审阅发布任务：公众号自动建草稿，其他平台导出素材包。
+            审阅发布任务：按平台能力自动发布或导出素材包。
           </p>
         </div>
         <div className="flex items-center gap-3 text-xs text-ink-500">
@@ -235,11 +242,11 @@ export default function Publish() {
 
       <div className="space-y-3">
         {jobs.data?.items.map((job) => {
-          const spec = specFor(job.platform);
+          const spec = specFor(job.platform, platformSpecs);
           const capability = spec
             ? capabilityFor(spec, job.content_kind)
             : "pending";
-          const action = actionFor(job);
+          const action = actionFor(job, platformSpecs);
           const actionNeedsAdmin =
             action?.action === "approve" ||
             action?.action === "execute" ||
@@ -363,7 +370,7 @@ export default function Publish() {
                       }
                       title={
                         action.action === "execute" && missingAccount
-                          ? "请先为任务关联公众号账号"
+                          ? `请先为任务关联${spec?.label ?? "平台"}账号`
                           : undefined
                       }
                       onClick={() => {

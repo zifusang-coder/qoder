@@ -454,16 +454,20 @@ async def execute_job(
     if result.credential_patch:
         published_id = published.id
         try:
-            # 适配器调用期间用户可能重新授权，锁内重读避免覆盖新凭据
+            # 适配器调用期间用户可能重新授权或撤销账号，锁内重读后再决定是否回写
             locked_account = (
                 await session.execute(
                     select(PlatformAccount)
-                    .where(PlatformAccount.id == account.id)
+                    .where(
+                        PlatformAccount.id == account.id,
+                        PlatformAccount.tenant_id == tenant_id,
+                    )
                     .with_for_update()
                     .execution_options(populate_existing=True)
                 )
             ).scalar_one()
-            if merge_credential_patch(
+            # 已撤销/停用的账号不保留任何可用凭据，直接丢弃刷新令牌
+            if locked_account.status == "active" and merge_credential_patch(
                 locked_account, result.credential_patch
             ):
                 await session.commit()

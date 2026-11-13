@@ -159,6 +159,52 @@ async def test_execute_job_passes_content_context(client, db_session):
     assert "fresh-token" not in account.credential_enc
 
 
+class RevokingAdapter(CapturingAdapter):
+    def __init__(self, session, account_id):
+        super().__init__()
+        self.session = session
+        self.account_id = account_id
+
+    async def publish(self, *, account, content, storage):
+        row = await self.session.get(PlatformAccount, self.account_id)
+        row.status = "revoked"
+        row.credential_enc = encrypt_secret("{}")
+        row.meta = {}
+        await self.session.commit()
+        return await super().publish(
+            account=account, content=content, storage=storage
+        )
+
+
+async def test_credential_patch_skipped_when_account_revoked_mid_publish(
+    client, db_session
+):
+    job_id, account_id = await _create_douyin_job(client, db_session)
+
+    job = await execute_job(
+        db_session,
+        job_id,
+        RevokingAdapter(db_session, uuid.UUID(account_id)),
+        tenant_id=DEFAULT_TENANT_ID,
+        actor="tester",
+        storage=FakeStorage(),
+    )
+
+    assert job.status == "published"
+
+    db_session.expire_all()
+    account = (
+        await db_session.execute(
+            select(PlatformAccount).where(
+                PlatformAccount.id == uuid.UUID(account_id)
+            )
+        )
+    ).scalar_one()
+    assert account.status == "revoked"
+    assert json.loads(decrypt_secret(account.credential_enc)) == {}
+    assert account.meta == {}
+
+
 async def test_credential_patch_failure_keeps_published(
     client, db_session, monkeypatch
 ):
