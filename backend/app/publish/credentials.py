@@ -18,20 +18,28 @@ def _decrypt(account: PlatformAccount, *, label: str) -> dict:
     return creds
 
 
+def _require(
+    raw: dict,
+    required: tuple[str, ...],
+    *,
+    label: str,
+) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key in required:
+        value = raw.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise PublishConfigError(f"{label}凭据不完整，请重新授权")
+        cleaned[key] = value.strip()
+    return cleaned
+
+
 def load_credential(
     account: PlatformAccount,
     required: tuple[str, ...],
     *,
     label: str,
 ) -> dict[str, str]:
-    creds = _decrypt(account, label=label)
-    cleaned: dict[str, str] = {}
-    for key in required:
-        value = creds.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise PublishConfigError(f"{label}凭据不完整，请重新授权")
-        cleaned[key] = value.strip()
-    return cleaned
+    return _require(_decrypt(account, label=label), required, label=label)
 
 
 def credential_with_tokens(
@@ -40,11 +48,11 @@ def credential_with_tokens(
     *,
     label: str,
 ) -> dict[str, object]:
-    creds: dict[str, object] = dict(load_credential(account, required, label=label))
     raw = _decrypt(account, label=label)
+    creds: dict[str, object] = dict(_require(raw, required, label=label))
     for key in ("access_token", "expires_at"):
         value = raw.get(key)
-        if isinstance(value, (str, int)) and value:
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and value:
             creds[key] = value
     return creds
 
@@ -52,7 +60,7 @@ def credential_with_tokens(
 def merge_credential_patch(account: PlatformAccount, patch: dict) -> None:
     creds = _decrypt(account, label="账号")
     for key, value in patch.items():
-        if isinstance(value, (str, int)):
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
             creds[str(key)] = value
     account.credential_enc = encrypt_secret(
         json.dumps(creds, ensure_ascii=False)

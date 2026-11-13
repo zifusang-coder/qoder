@@ -426,7 +426,7 @@ class FakeAdapter:
     capability = "auto"
     calls = 0
 
-    async def publish(self, *, account, title, body):
+    async def publish(self, *, account, content, storage):
         self.calls += 1
         return PublishResult(external_id="draft-42")
 
@@ -554,6 +554,7 @@ async def test_execute_job_treats_cleared_schedule_as_not_due(worker_factory):
                 FakeAdapter(),
                 tenant_id=DEFAULT_TENANT_ID,
                 actor="scheduler",
+                storage=get_storage(),
                 require_due=now,
             )
 
@@ -746,9 +747,9 @@ class FailingAdapter:
     def __init__(self):
         self.calls = 0
 
-    async def publish(self, *, account, title, body):
+    async def publish(self, *, account, content, storage):
         self.calls += 1
-        if body == self.failed_body:
+        if content.body == self.failed_body:
             raise PublishError("平台错误")
         return PublishResult(external_id="draft-ok")
 

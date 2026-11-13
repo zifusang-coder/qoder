@@ -1,6 +1,6 @@
 import html
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import markdown
@@ -14,6 +14,9 @@ from app.publish.base import (
     PublishResult,
 )
 from app.publish.credentials import load_credential
+
+if TYPE_CHECKING:
+    from app.storage import StorageBackend
 
 # worker 直接导入适配器时也必须屏蔽 httpx 的完整 URL 日志
 configure_http_logging()
@@ -116,7 +119,7 @@ class WeChatMPAdapter:
         *,
         account: PlatformAccount,
         content: PublishContent,
-        storage: object,
+        storage: "StorageBackend",
     ) -> PublishResult:
         if content.kind != "article":
             raise PublishConfigError("公众号仅支持图文内容")

@@ -461,8 +461,11 @@ async def execute_job(
             logger.exception("发布凭据回写失败 job=%s", published_id)
             await session.rollback()
             reloaded = await _reload_job(session, published_id, tenant_id)
-            if reloaded is not None:
-                return reloaded
+            if reloaded is None:
+                # 回滚已让 published 过期；刷新一次保证调用方读到已落库状态
+                await session.refresh(published)
+                return published
+            return reloaded
     return published
 
 

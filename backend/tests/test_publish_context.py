@@ -6,10 +6,11 @@ from sqlalchemy import select
 
 from app.config import DEFAULT_TENANT_ID
 from app.models.project import ContentVersion
-from app.models.publish import PlatformAccount
+from app.models.publish import PlatformAccount, PublishJob
 from app.publish.base import PublishConfigError, PublishContent, PublishResult
+from app.publish.credentials import merge_credential_patch
 from app.publish.wechat import WeChatMPAdapter
-from app.security import decrypt_secret
+from app.security import decrypt_secret, encrypt_secret
 from app.services.publish import apply_action, execute_job
 from app.storage import StorageBackend
 
@@ -179,6 +180,60 @@ async def test_credential_patch_failure_keeps_published(
 
     assert job.status == "published"
     assert job.error == ""
+
+
+async def test_execute_job_skips_malformed_media_entries(client, db_session):
+    job_id, _account_id = await _create_douyin_job(client, db_session)
+    job_row = await db_session.get(PublishJob, job_id)
+    version = (
+        await db_session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == job_row.content_id,
+                ContentVersion.version == job_row.content_version,
+            )
+        )
+    ).scalar_one()
+    version.meta = {
+        "files": [
+            "not-a-dict",
+            {"name": "audio.mp3"},
+            {"name": "", "path": "media/run/empty.mp3"},
+            {"name": "video.mp4", "path": "media/run/video.mp4"},
+        ]
+    }
+    await db_session.commit()
+
+    adapter = CapturingAdapter()
+    await execute_job(
+        db_session,
+        job_id,
+        adapter,
+        tenant_id=DEFAULT_TENANT_ID,
+        actor="tester",
+        storage=FakeStorage(),
+    )
+
+    content = adapter.calls[0]
+    assert [item.name for item in content.media] == ["video.mp4"]
+    assert content.media[0].kind == "text"
+    assert content.cover_path is None
+
+
+def test_merge_credential_patch_ignores_booleans():
+    account = PlatformAccount(
+        tenant_id=DEFAULT_TENANT_ID,
+        platform="douyin",
+        name="抖音号",
+        credential_enc=encrypt_secret(json.dumps({"open_id": "o-1"})),
+        status="active",
+        meta={},
+    )
+
+    merge_credential_patch(account, {"flag": True, "access_token": "t-1"})
+
+    stored = json.loads(decrypt_secret(account.credential_enc))
+    assert "flag" not in stored
+    assert stored["access_token"] == "t-1"
 
 
 async def test_wechat_rejects_video_content_without_http():

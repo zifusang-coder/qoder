@@ -187,6 +187,7 @@ async def publish_due_jobs(
         targets = [(job.id, job.tenant_id) for job in due[:MAX_BATCH_SIZE]]
 
     adapter = adapter_factory()
+    storage = get_storage()
     executed = 0
     for job_id, tenant_id in targets:
         # 每个任务独立会话；状态机保证并发/重复扫描时只有一个执行者成功
@@ -198,6 +199,7 @@ async def publish_due_jobs(
                     adapter,
                     tenant_id=tenant_id,
                     actor="scheduler",
+                    storage=storage,
                     require_due=current,
                 )
                 executed += 1
