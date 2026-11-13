@@ -1,3 +1,9 @@
+import {
+  capabilityFor,
+  specFor,
+  type Capability,
+} from "./platforms";
+
 export type { Me } from "./auth";
 
 export interface Profile {
@@ -28,6 +34,9 @@ export interface Account {
   name: string;
   status: string;
   credential_masked: string;
+  meta: Record<string, unknown>;
+  capability: string;
+  capability_note: string;
 }
 
 export interface Project {
@@ -76,6 +85,7 @@ export interface Job {
   id: string;
   content_id: string;
   content_version: number;
+  content_kind: string;
   platform: string;
   account_id: string | null;
   status: string;
@@ -277,11 +287,13 @@ export interface AuditLogList {
 
 export const PLATFORMS = [
   ["wechat", "公众号"],
+  ["douyin", "抖音"],
+  ["toutiao", "头条"],
   ["xiaohongshu", "小红书"],
   ["zhihu", "知乎"],
   ["kuaishou", "快手"],
   ["channels", "视频号"],
-  ["douyin", "抖音"],
+  ["baijiahao", "百家号"],
   ["bilibili", "B站"],
 ] as const;
 
@@ -340,8 +352,14 @@ export function canReschedule(job: Job): boolean {
   return RESCHEDULABLE_STATUSES.has(job.status);
 }
 
+const EXECUTE_LABELS: Record<string, string> = {
+  wechat: "发布到公众号草稿",
+  douyin: "发布到抖音",
+  toutiao: "发布到头条",
+};
+
 export function actionFor(
-  job: Job,
+  job: Pick<Job, "status" | "platform" | "content_kind">,
 ): { action: JobActionKind; label: string } | null {
   if (job.status === "draft" || job.status === "precheck_failed") {
     return { action: "precheck", label: "发布前检查" };
@@ -349,24 +367,30 @@ export function actionFor(
   if (job.status === "awaiting_review") {
     return { action: "approve", label: "人工通过" };
   }
+
+  const spec = specFor(job.platform);
+  const capability: Capability = spec
+    ? capabilityFor(spec, job.content_kind)
+    : "pending";
+
   if (job.status === "approved") {
-    if (job.platform === "wechat") {
-      return { action: "execute", label: "发布到公众号草稿" };
+    if (capability === "auto_publish") {
+      return {
+        action: "execute",
+        label:
+          EXECUTE_LABELS[job.platform] ??
+          `发布到${spec?.label ?? job.platform}`,
+      };
     }
-    if (isManualExportPlatform(job.platform)) {
+    if (capability === "manual_export") {
       return { action: "export", label: "导出素材包" };
     }
   }
-  if (job.status === "export_failed") {
-    // 导出失败必须先经 actions 的 retry 回到 exporting，再调用 export
-    return isManualExportPlatform(job.platform)
-      ? { action: "retry_export", label: "重试导出" }
-      : null;
+  if (job.status === "export_failed" && capability === "manual_export") {
+    return { action: "retry_export", label: "重试导出" };
   }
-  if (job.status === "publish_failed") {
-    return job.platform === "wechat"
-      ? { action: "retry", label: "重试发布" }
-      : null;
+  if (job.status === "publish_failed" && capability === "auto_publish") {
+    return { action: "retry", label: "重试发布" };
   }
   return null;
 }

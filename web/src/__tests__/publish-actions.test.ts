@@ -13,6 +13,7 @@ function job(overrides: Partial<Job> = {}): Job {
     id: "j1",
     content_id: "c1",
     content_version: 1,
+    content_kind: "article",
     platform: "wechat",
     account_id: null,
     status: "draft",
@@ -33,34 +34,94 @@ function job(overrides: Partial<Job> = {}): Job {
 type Expected = { action: JobActionKind; label: string } | null;
 
 describe("actionFor", () => {
-  it.each<[string, string, Expected]>([
-    ["draft", "wechat", { action: "precheck", label: "发布前检查" }],
-    ["precheck_failed", "wechat", { action: "precheck", label: "发布前检查" }],
-    ["awaiting_review", "wechat", { action: "approve", label: "人工通过" }],
-    ["approved", "wechat", { action: "execute", label: "发布到公众号草稿" }],
-    ["approved", "xiaohongshu", { action: "export", label: "导出素材包" }],
-    ["approved", "zhihu", { action: "export", label: "导出素材包" }],
-    ["approved", "kuaishou", { action: "export", label: "导出素材包" }],
-    ["approved", "channels", { action: "export", label: "导出素材包" }],
-    ["approved", "douyin", null],
-    ["approved", "bilibili", null],
+  it.each<[string, string, string, Expected]>([
+    ["draft", "wechat", "article", { action: "precheck", label: "发布前检查" }],
+    [
+      "precheck_failed",
+      "wechat",
+      "article",
+      { action: "precheck", label: "发布前检查" },
+    ],
+    [
+      "awaiting_review",
+      "wechat",
+      "article",
+      { action: "approve", label: "人工通过" },
+    ],
+    [
+      "approved",
+      "wechat",
+      "article",
+      { action: "execute", label: "发布到公众号草稿" },
+    ],
+    [
+      "approved",
+      "douyin",
+      "video",
+      { action: "execute", label: "发布到抖音" },
+    ],
+    [
+      "approved",
+      "toutiao",
+      "video",
+      { action: "execute", label: "发布到头条" },
+    ],
+    ["approved", "toutiao", "article", null],
+    ["approved", "baijiahao", "article", null],
+    ["approved", "bilibili", "video", null],
+    [
+      "approved",
+      "xiaohongshu",
+      "note",
+      { action: "export", label: "导出素材包" },
+    ],
+    ["approved", "zhihu", "article", { action: "export", label: "导出素材包" }],
+    [
+      "approved",
+      "kuaishou",
+      "video",
+      { action: "export", label: "导出素材包" },
+    ],
+    [
+      "approved",
+      "channels",
+      "article",
+      { action: "export", label: "导出素材包" },
+    ],
     [
       "export_failed",
       "xiaohongshu",
+      "note",
       { action: "retry_export", label: "重试导出" },
     ],
-    ["export_failed", "wechat", null],
-    ["publish_failed", "wechat", { action: "retry", label: "重试发布" }],
-    ["publish_failed", "xiaohongshu", null],
-    ["published", "wechat", null],
-    ["cancelled", "wechat", null],
-    ["exported", "xiaohongshu", null],
-    ["exporting", "xiaohongshu", null],
-    ["publishing", "wechat", null],
-    ["approved", "unknown", null],
-  ])("status %s on %s offers %o", (status, platform, expected) => {
-    expect(actionFor(job({ status, platform }))).toEqual(expected);
-  });
+    ["export_failed", "wechat", "article", null],
+    [
+      "publish_failed",
+      "wechat",
+      "article",
+      { action: "retry", label: "重试发布" },
+    ],
+    [
+      "publish_failed",
+      "douyin",
+      "video",
+      { action: "retry", label: "重试发布" },
+    ],
+    ["publish_failed", "xiaohongshu", "note", null],
+    ["published", "wechat", "article", null],
+    ["cancelled", "wechat", "article", null],
+    ["exported", "xiaohongshu", "note", null],
+    ["exporting", "xiaohongshu", "note", null],
+    ["publishing", "wechat", "article", null],
+    ["approved", "unknown", "article", null],
+  ])(
+    "status %s on %s/%s offers %o",
+    (status, platform, contentKind, expected) => {
+      expect(
+        actionFor(job({ status, platform, content_kind: contentKind })),
+      ).toEqual(expected);
+    },
+  );
 });
 
 describe("canCancel", () => {
