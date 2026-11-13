@@ -1,4 +1,4 @@
-# 变更日志
+# 云AI新媒体运营系统 变更日志
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号在进入正式发布流程后按语义化版本管理。
 
