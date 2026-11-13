@@ -13,12 +13,43 @@ from app.models.tenant import Tenant
 from app.models.user import User
 from app.security import create_token, hash_password, verify_password
 from app.services.audit import record, record_best_effort
+from app.services.ratelimit import (
+    LoginRateLimiter,
+    RateLimitDecision,
+    get_login_limiter,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 _DUMMY_HASH = hash_password("timing-only-dummy-password")
+
+
+async def _check_login_limit(
+    limiter: LoginRateLimiter, email: str, ip: str
+) -> RateLimitDecision:
+    try:
+        return await limiter.check(email, ip)
+    except Exception:  # Redis 故障不应阻断登录
+        logger.exception("登录限流检查失败，放行请求")
+        return RateLimitDecision(True)
+
+
+async def _record_login_failure(
+    limiter: LoginRateLimiter, email: str, ip: str
+) -> None:
+    try:
+        await limiter.record_failure(email, ip)
+    except Exception:
+        logger.exception("登录失败计数写入失败")
+
+
+async def _record_login_success(limiter: LoginRateLimiter, email: str) -> None:
+    try:
+        await limiter.record_success(email)
+    except Exception:
+        logger.exception("登录成功计数清零失败")
 
 
 class LoginIn(BaseModel):
@@ -67,16 +98,29 @@ async def login(
     payload: LoginIn,
     request: Request,
     session: AsyncSession = Depends(get_session),  # noqa: B008
+    limiter: LoginRateLimiter = Depends(get_login_limiter),  # noqa: B008
 ) -> TokenOut:
+    ip = request.client.host if request.client is not None else ""
+    decision = await _check_login_limit(limiter, payload.email, ip)
+    if not decision.allowed:
+        logger.warning("登录被限流 ip=%s", ip)
+        raise AppError(
+            "too_many_attempts",
+            "登录尝试过于频繁，请稍后再试",
+            429,
+            headers={"Retry-After": str(decision.retry_after)},
+        )
     user = (
         await session.execute(select(User).where(User.email == payload.email))
     ).scalar_one_or_none()
     if user is None:
         verify_password(payload.password, _DUMMY_HASH)
+        await _record_login_failure(limiter, payload.email, ip)
         # 未知邮箱不写审计（避免伪造邮箱污染租户审计），但留服务端日志便于排查
         logger.warning("登录失败：邮箱不存在 email=%s", payload.email)
         raise AppError("invalid_credentials", "邮箱或密码错误", 401)
     if not verify_password(payload.password, user.password_hash):
+        await _record_login_failure(limiter, payload.email, ip)
         await record_best_effort(
             session,
             tenant_id=user.tenant_id,
@@ -100,6 +144,7 @@ async def login(
         actor=user,
         request=request,
     )
+    await _record_login_success(limiter, payload.email)
     return TokenOut(access_token=token, display_name=user.display_name)
 
 

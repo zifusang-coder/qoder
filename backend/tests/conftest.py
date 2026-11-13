@@ -15,6 +15,11 @@ from app.models.base import DEFAULT_TENANT_ID, Base
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.seed import ensure_admin
+from app.services.ratelimit import (
+    InMemoryRateLimitStore,
+    LoginRateLimiter,
+    get_login_limiter,
+)
 from app.skills.registry import get_registry
 
 
@@ -25,6 +30,15 @@ def _disable_embeddings(monkeypatch):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def login_limiter():
+    # 每个测试使用独立的内存计数，避免用例之间互相触发限流
+    limiter = LoginRateLimiter(InMemoryRateLimitStore())
+    app.dependency_overrides[get_login_limiter] = lambda: limiter
+    yield limiter
+    app.dependency_overrides.pop(get_login_limiter, None)
 
 
 @pytest_asyncio.fixture

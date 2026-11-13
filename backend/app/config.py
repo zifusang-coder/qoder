@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     storage_s3_path_style: bool = True
     embedding_model: str = ""
     cors_origins: str = "http://localhost:5173"
+    login_rate_limit_email: int = 5
+    login_rate_limit_ip: int = 20
+    login_rate_limit_window_seconds: int = 300
+    audit_retention_days: int = 180
 
     @model_validator(mode="after")
     def _reject_dev_secrets_outside_dev(self) -> "Settings":
