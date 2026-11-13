@@ -17,6 +17,12 @@ from app.models.user import User
 from app.permissions import admin_access, editor_access, has_role, viewer_access
 from app.publish.base import Platform, PublishConfigError, PublishError
 from app.publish.export import MANUAL_EXPORT_PLATFORMS, ExportAdapter
+from app.publish.registry import (
+    CAP_AUTO,
+    capability_for,
+    content_kind_label,
+    spec_for,
+)
 from app.publish.state import InvalidTransition
 from app.publish.wechat import WeChatMPAdapter
 from app.services.audit import record, record_best_effort
@@ -95,6 +101,7 @@ class JobOut(BaseModel):
     id: str
     content_id: str
     content_version: int
+    content_kind: str
     platform: str
     account_id: str | None
     status: str
@@ -123,11 +130,12 @@ class PrecheckOut(BaseModel):
     issues: list[dict]
 
 
-def _out(job: PublishJob) -> JobOut:
+def _out(job: PublishJob, content_kind: str = "") -> JobOut:
     return JobOut(
         id=str(job.id),
         content_id=str(job.content_id),
         content_version=job.content_version,
+        content_kind=content_kind,
         platform=job.platform,
         account_id=str(job.account_id) if job.account_id else None,
         status=job.status,
@@ -142,6 +150,19 @@ def _out(job: PublishJob) -> JobOut:
         created_at=_utc(job.created_at),
         updated_at=_utc(job.updated_at),
     )
+
+
+async def _job_out(
+    session: AsyncSession, job: PublishJob, content_kind: str | None = None
+) -> JobOut:
+    kind = content_kind
+    if kind is None:
+        kind = (
+            await session.execute(
+                select(Content.kind).where(Content.id == job.content_id)
+            )
+        ).scalar_one_or_none() or ""
+    return _out(job, kind)
 
 
 def _job_id(job_id: str) -> uuid.UUID:
@@ -231,7 +252,7 @@ async def _replay_existing(
         except JobNotReschedulable as exc:
             raise AppError("job_not_reschedulable", str(exc), 409) from exc
         response.status_code = 200
-        return _out(job)
+        return await _job_out(session, job)
     raise AppError("invalid_transition", "发布任务状态已变化，请重试", 409)
 
 
@@ -250,12 +271,26 @@ async def list_jobs(
         await session.execute(select(func.count()).select_from(base.subquery()))
     ).scalar_one()
     stmt = (
-        base.order_by(PublishJob.created_at.desc(), PublishJob.id.desc())
+        select(PublishJob, Content.kind)
+        .join(
+            Content,
+            (Content.id == PublishJob.content_id)
+            & (Content.tenant_id == PublishJob.tenant_id),
+        )
+        .where(PublishJob.tenant_id == user.tenant_id)
+    )
+    if status is not None:
+        stmt = stmt.where(PublishJob.status == status)
+    stmt = (
+        stmt.order_by(PublishJob.created_at.desc(), PublishJob.id.desc())
         .limit(limit)
         .offset(offset)
     )
-    rows = (await session.execute(stmt)).scalars().all()
-    return JobList(items=[_out(job) for job in rows], total=total)
+    rows = (await session.execute(stmt)).all()
+    return JobList(
+        items=[_out(job, kind) for job, kind in rows],
+        total=total,
+    )
 
 
 @router.post("/jobs", response_model=JobOut, status_code=201)
@@ -303,6 +338,15 @@ async def create_job(
     if content.platform != payload.platform:
         raise AppError("platform_mismatch", "内容平台与发布平台不一致", 409)
 
+    spec = spec_for(payload.platform)
+    capability = capability_for(payload.platform, content.kind)
+    if content.kind not in spec.content_capabilities:
+        raise AppError(
+            "platform_content_mismatch",
+            f"{spec.label}不支持{content_kind_label(content.kind)}内容",
+            409,
+        )
+
     account = None
     if payload.account_id is not None:
         account = (
@@ -321,6 +365,9 @@ async def create_job(
             )
         if account.status != "active":
             raise AppError("account_inactive", "账号已停用", 409)
+
+    if capability == CAP_AUTO and account is None:
+        raise AppError("account_missing", "请先选择并授权发布账号", 409)
 
     job = PublishJob(
         tenant_id=user.tenant_id,
@@ -363,7 +410,7 @@ async def create_job(
             raise
         return await _replay_existing(session, existing, payload, user, response)
     await session.refresh(job)
-    return _out(job)
+    return _out(job, content.kind)
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)
@@ -372,7 +419,7 @@ async def get_job(
     user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JobOut:
-    return _out(await _owned_job(session, job_id, user))
+    return await _job_out(session, await _owned_job(session, job_id, user))
 
 
 @router.post("/jobs/{job_id}/precheck", response_model=PrecheckOut)
@@ -458,7 +505,7 @@ async def precheck_job(
     except JobNotFound as exc:
         raise AppError("not_found", "发布任务不存在", 404) from exc
 
-    return PrecheckOut(job=_out(job), **report)
+    return PrecheckOut(job=_out(job, content.kind), **report)
 
 
 @router.post("/jobs/{job_id}/execute", response_model=JobOut)
@@ -540,7 +587,7 @@ async def export_publish(
         detail={"platform": job.platform},
         request=request,
     )
-    return _out(job)
+    return await _job_out(session, job)
 
 
 @router.patch("/jobs/{job_id}/schedule", response_model=JobOut)
@@ -576,7 +623,7 @@ async def schedule_job(
         },
         request=request,
     )
-    return _out(job)
+    return await _job_out(session, job)
 
 
 @router.post("/jobs/{job_id}/actions", response_model=JobOut)
@@ -619,4 +666,4 @@ async def act_on_job(
         detail={"action": payload.action},
         request=request,
     )
-    return _out(job)
+    return await _job_out(session, job)

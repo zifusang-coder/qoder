@@ -923,12 +923,14 @@ async def test_draft_errcode_fails_without_leaking_token(client, db_session):
 # --- preconditions ----------------------------------------------------------
 
 
-async def test_execute_without_account_returns_409(client):
+async def test_create_job_without_account_returns_409(client):
     content = await _create_content(client)
-    job = await _create_job(client, content["id"])
-    await _approve(client, job["id"])
 
-    response = await _execute(client, job["id"])
+    response = await client.post(
+        "/api/publish/jobs",
+        json={"content_id": content["id"], "platform": "wechat"},
+    )
+
     assert response.status_code == 409
     assert response.json()["code"] == "account_missing"
 
@@ -1196,9 +1198,12 @@ async def test_token_credentials_are_sent_in_body(client, db_session):
     assert "wx123" not in str(request.url)
 
 
-async def test_non_wechat_platform_requires_manual_export(client):
-    content = await _create_content(client, platform="douyin")
-    job = await _create_job(client, content["id"], platform="douyin")
+async def test_non_wechat_platform_requires_manual_export(client, db_session):
+    content = await _create_content(client, platform="xiaohongshu")
+    job = await _create_job(
+        client, content["id"], platform="xiaohongshu"
+    )
+    await _approve(client, job["id"])
 
     response = await _execute(client, job["id"])
     assert response.status_code == 409
@@ -1281,8 +1286,9 @@ async def test_corrupted_credentials_returns_sanitized_409(client, db_session):
 
 
 async def test_apply_action_rejects_opaque_fields(client, db_session):
+    account = await _create_account(client)
     content = await _create_content(client)
-    job = await _create_job(client, content["id"])
+    job = await _create_job(client, content["id"], account_id=account["id"])
 
     with pytest.raises(ValueError):
         await apply_action(
@@ -1316,8 +1322,9 @@ async def test_apply_action_rejects_opaque_fields(client, db_session):
 async def test_apply_action_rejects_invalid_field_values(
     client, db_session, fields
 ):
+    account = await _create_account(client)
     content = await _create_content(client)
-    job = await _create_job(client, content["id"])
+    job = await _create_job(client, content["id"], account_id=account["id"])
 
     with pytest.raises(ValueError):
         await apply_action(

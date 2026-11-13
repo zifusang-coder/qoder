@@ -125,7 +125,11 @@ async def test_tenant_isolation_across_modules(db_session):
             await client.post(
                 "/api/publish/jobs",
                 headers=a,
-                json={"content_id": content["id"], "platform": "wechat"},
+                json={
+                    "content_id": content["id"],
+                    "platform": "wechat",
+                    "account_id": account["id"],
+                },
             )
         ).json()
         media = MediaJob(

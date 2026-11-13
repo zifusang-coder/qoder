@@ -18,12 +18,21 @@ from app.services.publish import (
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
 
 
-async def _create_content(client, *, title="标题", body="正文", platform="wechat"):
+async def _create_content(
+    client,
+    *,
+    title="标题",
+    body="正文",
+    platform="wechat",
+    kind=None,
+):
     project = await client.post(
         "/api/projects", json={"title": f"发布测试-{uuid.uuid4().hex[:8]}"}
     )
     assert project.status_code == 201
     payload = {"platform": platform}
+    if kind is not None:
+        payload["kind"] = kind
     if title:
         payload["title"] = title
     if body:
@@ -35,9 +44,53 @@ async def _create_content(client, *, title="标题", body="正文", platform="we
     return content.json()
 
 
+_AUTO_PLATFORMS = {"wechat", "douyin", "toutiao"}
+
+
+async def _ensure_account(client, platform: str) -> str:
+    name = "自动测试账号"
+    existing = await client.get(
+        "/api/accounts", params={"platform": platform}
+    )
+    assert existing.status_code == 200
+    for item in existing.json():
+        if item["name"] == name:
+            return item["id"]
+    if platform == "wechat":
+        payload = {
+            "platform": platform,
+            "name": name,
+            "credential": {"app_id": "wx-auto", "app_secret": "auto-secret"},
+            "meta": {"thumb_media_id": "thumb-auto"},
+        }
+    else:
+        payload = {
+            "platform": platform,
+            "name": name,
+            "credential": {
+                "client_key": "ck-auto",
+                "client_secret": "cs-auto",
+                "open_id": "open-auto",
+                "refresh_token": "rt-auto",
+            },
+            "meta": {"author": "自动作者"} if platform == "toutiao" else {},
+        }
+    created = await client.post("/api/accounts", json=payload)
+    assert created.status_code == 201, created.text
+    return created.json()["id"]
+
+
 async def _create_job(
-    client, content_id, *, platform="wechat", account_id=None, scheduled_at=None
+    client,
+    content_id,
+    *,
+    platform="wechat",
+    account_id=None,
+    scheduled_at=None,
+    auto_account=True,
 ):
+    if account_id is None and auto_account and platform in _AUTO_PLATFORMS:
+        account_id = await _ensure_account(client, platform)
     payload = {"content_id": str(content_id), "platform": platform}
     if account_id is not None:
         payload["account_id"] = str(account_id)
@@ -102,14 +155,14 @@ async def _seed_account(
     return account
 
 
-async def _seed_foreign_content(db_session):
+async def _seed_foreign_content(db_session, *, platform="wechat"):
     project = Project(tenant_id=OTHER_TENANT, title="外部项目")
     db_session.add(project)
     await db_session.flush()
     content = Content(
         tenant_id=OTHER_TENANT,
         project_id=project.id,
-        platform="wechat",
+        platform=platform,
         title="外部内容",
         current_version=1,
     )
@@ -273,14 +326,17 @@ def test_cancelled_can_be_reopened():
 
 
 async def test_create_job_from_current_version(client, db_session):
-    content = await _create_content(client)
-    response = await _create_job(client, content["id"])
+    content = await _create_content(client, platform="xiaohongshu")
+    response = await _create_job(
+        client, content["id"], platform="xiaohongshu"
+    )
 
     assert response.status_code == 201
     body = response.json()
     assert body["status"] == "draft"
     assert body["content_id"] == content["id"]
     assert body["content_version"] == content["current_version"] == 1
+    assert body["platform"] == "xiaohongshu"
     assert body["account_id"] is None
     assert body["checks"] == {}
     assert body["updated_at"]
@@ -459,7 +515,9 @@ async def test_idempotent_replay_returns_same_job(client, db_session):
 
 async def test_idempotency_varies_by_platform_and_account(client, db_session):
     content = await _create_content(client, platform="wechat")
-    douyin_content = await _create_content(client, platform="douyin")
+    douyin_content = await _create_content(
+        client, platform="douyin", kind="video"
+    )
     base = await _create_job(client, content["id"], platform="wechat")
     other_platform = await _create_job(client, douyin_content["id"], platform="douyin")
     assert base.status_code == 201
@@ -629,14 +687,16 @@ async def test_patch_schedule_validation(client, payload):
 
 
 async def test_foreign_tenant_idempotency_key_is_ignored(client, db_session):
-    content = await _create_content(client)
-    key = f"{uuid.UUID(content['id'])}:1:wechat:-"
-    foreign_content = await _seed_foreign_content(db_session)
+    content = await _create_content(client, platform="xiaohongshu")
+    key = f"{uuid.UUID(content['id'])}:1:xiaohongshu:-"
+    foreign_content = await _seed_foreign_content(
+        db_session, platform="xiaohongshu"
+    )
     foreign_job = PublishJob(
         tenant_id=OTHER_TENANT,
         content_id=foreign_content.id,
         content_version=1,
-        platform="wechat",
+        platform="xiaohongshu",
         status="draft",
         idempotency_key=key,
     )
@@ -644,7 +704,9 @@ async def test_foreign_tenant_idempotency_key_is_ignored(client, db_session):
     await db_session.commit()
     await db_session.refresh(foreign_job)
 
-    response = await _create_job(client, content["id"])
+    response = await _create_job(
+        client, content["id"], platform="xiaohongshu"
+    )
     assert response.status_code == 201
     assert response.json()["id"] != str(foreign_job.id)
 
@@ -663,7 +725,9 @@ async def test_foreign_content_returns_404(client, db_session):
 async def test_content_platform_mismatch(client):
     content = await _create_content(client, platform="wechat")
 
-    response = await _create_job(client, content["id"], platform="douyin")
+    response = await _create_job(
+        client, content["id"], platform="douyin", auto_account=False
+    )
     assert response.status_code == 409
     assert response.json()["code"] == "platform_mismatch"
 
@@ -982,7 +1046,9 @@ async def test_retry_from_publish_failed_records_event(client, db_session):
 
 async def test_list_jobs_filters_tenant_and_status(client, db_session):
     content = await _create_content(client, platform="wechat")
-    douyin_content = await _create_content(client, platform="douyin")
+    douyin_content = await _create_content(
+        client, platform="douyin", kind="video"
+    )
     draft = (await _create_job(client, content["id"], platform="wechat")).json()
     other = (
         await _create_job(client, douyin_content["id"], platform="douyin")
@@ -1027,7 +1093,10 @@ async def test_list_jobs_filters_tenant_and_status(client, db_session):
 async def test_list_jobs_pagination(client, db_session):
     jobs = []
     for platform in ("wechat", "douyin", "zhihu"):
-        content = await _create_content(client, platform=platform)
+        kind = "video" if platform == "douyin" else None
+        content = await _create_content(
+            client, platform=platform, kind=kind
+        )
         jobs.append(
             (await _create_job(client, content["id"], platform=platform)).json()
         )
@@ -1083,3 +1152,61 @@ async def test_request_validation(client):
         "/api/publish/jobs", json={"content_id": "not-a-uuid", "platform": "wechat"}
     )
     assert malformed_content.status_code == 422
+
+
+async def test_auto_platform_requires_account(client):
+    content = await _create_content(client, platform="wechat")
+
+    response = await _create_job(
+        client, content["id"], platform="wechat", auto_account=False
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "account_missing"
+
+
+async def test_manual_platform_allows_no_account(client):
+    content = await _create_content(client, platform="xiaohongshu")
+
+    response = await _create_job(
+        client, content["id"], platform="xiaohongshu", auto_account=False
+    )
+
+    assert response.status_code == 201
+    assert response.json()["account_id"] is None
+
+
+async def test_pending_platform_allows_no_account(client):
+    content = await _create_content(
+        client, platform="toutiao", kind="article"
+    )
+
+    response = await _create_job(
+        client, content["id"], platform="toutiao", auto_account=False
+    )
+
+    assert response.status_code == 201
+    assert response.json()["account_id"] is None
+
+
+async def test_platform_content_mismatch_is_rejected(client):
+    content = await _create_content(
+        client, platform="wechat", kind="video"
+    )
+
+    response = await _create_job(client, content["id"], platform="wechat")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "platform_content_mismatch"
+    assert "不支持" in response.json()["message"]
+
+
+async def test_job_out_includes_content_kind(client):
+    content = await _create_content(client, platform="wechat")
+    job = await _create_job(client, content["id"])
+
+    assert job.status_code == 201
+    assert job.json()["content_kind"] == "article"
+
+    listed = await client.get("/api/publish/jobs")
+    assert listed.json()["items"][0]["content_kind"] == "article"

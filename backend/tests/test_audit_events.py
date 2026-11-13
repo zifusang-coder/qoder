@@ -99,9 +99,22 @@ async def test_publish_create_is_audited(client, db_session):
     )
     await db_session.commit()
 
+    account = await client.post(
+        "/api/accounts",
+        json={
+            "platform": "wechat",
+            "name": "审计发布账号",
+            "credential": {"app_id": "audit-id", "app_secret": "audit-secret"},
+        },
+    )
+    assert account.status_code == 201
     resp = await client.post(
         "/api/publish/jobs",
-        json={"content_id": str(content.id), "platform": "wechat"},
+        json={
+            "content_id": str(content.id),
+            "platform": "wechat",
+            "account_id": account.json()["id"],
+        },
     )
     assert resp.status_code == 201
     rows = await _audits(db_session, "publish.create")

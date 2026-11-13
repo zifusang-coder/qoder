@@ -52,18 +52,47 @@ async def _create_job(
     )
     assert project.status_code == 201
     project_body = project.json()
+    kind = "video" if platform in {"douyin", "toutiao", "bilibili"} else "article"
     content = await client.post(
         f"/api/projects/{project_body['id']}/contents",
-        json={"platform": platform, "title": title, "body": body},
+        json={
+            "platform": platform,
+            "kind": kind,
+            "title": title,
+            "body": body,
+        },
     )
     assert content.status_code == 201
     content_body = content.json()
-    job = await client.post(
-        "/api/publish/jobs",
-        json={"content_id": content_body["id"], "platform": platform},
-    )
-    assert job.status_code == 201
+    payload = {
+        "content_id": content_body["id"],
+        "platform": platform,
+    }
+    if platform in {"wechat", "douyin", "toutiao"}:
+        account = await client.post(
+            "/api/accounts",
+            json={
+                "platform": platform,
+                "name": f"导出账号-{uuid.uuid4().hex[:6]}",
+                "credential": _credentials(platform),
+            },
+        )
+        assert account.status_code == 201, account.text
+        payload["account_id"] = account.json()["id"]
+    job = await client.post("/api/publish/jobs", json=payload)
+    assert job.status_code == 201, job.text
     return project_body, content_body, job.json()
+
+
+def _credentials(platform: str) -> dict:
+    if platform == "wechat":
+        return {"app_id": "wx-id", "app_secret": "wx-secret"}
+    return {
+        "client_key": "ck-id",
+        "client_secret": "cs-secret",
+        "open_id": "open-id",
+        "refresh_token": "rt-secret",
+    }
 
 
 async def _export(client, job_id):

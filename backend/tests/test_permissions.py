@@ -9,7 +9,7 @@ from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
 from app.models.base import DEFAULT_TENANT_ID
-from app.models.publish import PublishJob
+from app.models.publish import PlatformAccount, PublishJob
 from app.models.user import User
 
 
@@ -126,9 +126,22 @@ async def test_editor_cannot_reschedule_approved_job_via_replay(db_session):
             json={"platform": "wechat", "title": "标题", "body": "正文"},
         )
         assert content.status_code == 201
+        account = PlatformAccount(
+            tenant_id=DEFAULT_TENANT_ID,
+            platform="wechat",
+            name="编辑测试账号",
+            status="active",
+        )
+        db_session.add(account)
+        await db_session.commit()
+        await db_session.refresh(account)
         created = await client.post(
             "/api/publish/jobs",
-            json={"content_id": content.json()["id"], "platform": "wechat"},
+            json={
+                "content_id": content.json()["id"],
+                "platform": "wechat",
+                "account_id": str(account.id),
+            },
         )
         assert created.status_code == 201
         job_id = uuid.UUID(created.json()["id"])
@@ -145,6 +158,7 @@ async def test_editor_cannot_reschedule_approved_job_via_replay(db_session):
             json={
                 "content_id": content.json()["id"],
                 "platform": "wechat",
+                "account_id": str(account.id),
                 "scheduled_at": "2026-11-09T00:00:00Z",
             },
         )

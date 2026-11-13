@@ -26,6 +26,7 @@ from app.models.profile import Profile
 from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
 from app.permissions import editor_access, viewer_access
+from app.publish.base import Platform
 from app.queue import get_queue
 from app.services.audit import record_best_effort
 from app.services.media import (
@@ -52,9 +53,6 @@ ShortText = Annotated[
 Title300 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
 ProjectTitle = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
-]
-Platform = Literal[
-    "wechat", "xiaohongshu", "douyin", "zhihu", "kuaishou", "channels", "bilibili"
 ]
 
 

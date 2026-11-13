@@ -19,14 +19,23 @@ async def _create_scheduled_job(client, *, scheduled_at, platform="wechat"):
         json={"platform": platform, "title": "日历标题", "body": "正文"},
     )
     assert content.status_code == 201
-    job = await client.post(
-        "/api/publish/jobs",
-        json={
-            "content_id": content.json()["id"],
-            "platform": platform,
-            "scheduled_at": scheduled_at.isoformat(),
-        },
-    )
+    payload = {
+        "content_id": content.json()["id"],
+        "platform": platform,
+        "scheduled_at": scheduled_at.isoformat(),
+    }
+    if platform == "wechat":
+        account = await client.post(
+            "/api/accounts",
+            json={
+                "platform": "wechat",
+                "name": "日历账号",
+                "credential": {"app_id": "cal-id", "app_secret": "cal-secret"},
+            },
+        )
+        assert account.status_code == 201, account.text
+        payload["account_id"] = account.json()["id"]
+    job = await client.post("/api/publish/jobs", json=payload)
     assert job.status_code == 201
     return project.json(), content.json(), job.json()
 
@@ -59,7 +68,7 @@ async def test_calendar_returns_scheduled_job(client):
     assert item["status"] == "draft"
     assert item["scheduled_at"].startswith("2026-11-12T10:00:00")
     assert item["published_at"] is None
-    assert item["account_name"] is None
+    assert item["account_name"] == "日历账号"
 
 
 async def test_calendar_excludes_jobs_outside_range(client):

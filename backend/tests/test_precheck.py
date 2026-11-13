@@ -207,10 +207,19 @@ async def _create_content(client, *, title="标题", body="正文", platform="we
 
 
 async def _create_job(client, content_id, *, platform="wechat"):
-    response = await client.post(
-        "/api/publish/jobs",
-        json={"content_id": str(content_id), "platform": platform},
-    )
+    payload = {"content_id": str(content_id), "platform": platform}
+    if platform == "wechat":
+        account = await client.post(
+            "/api/accounts",
+            json={
+                "platform": "wechat",
+                "name": f"检查账号-{uuid.uuid4().hex[:6]}",
+                "credential": {"app_id": "pc-id", "app_secret": "pc-secret"},
+            },
+        )
+        assert account.status_code == 201, account.text
+        payload["account_id"] = account.json()["id"]
+    response = await client.post("/api/publish/jobs", json=payload)
     assert response.status_code == 201
     return response.json()
 
