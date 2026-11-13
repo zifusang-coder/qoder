@@ -47,10 +47,17 @@
 7. [x] 审计页面可查到登录、成员、发布、租户事件；任何审计 `detail` 中不出现密码、token 或平台凭据。
 8. [x] 迁移成功；默认租户与现有管理员角色正确回填。
 
+## 上线加固
+
+- [x] 登录失败按邮箱与 IP 双维度限流，计数存 Redis 供多实例共享；超限返回 429 `too_many_attempts` 与 `Retry-After`；Redis 故障放行（验证：`tests/test_ratelimit.py`、真实 Redis 验收）
+- [x] 首次登录未改密时，后端仅放行 `/auth/me` 与 `/auth/change-password`，其他业务接口返回 403 `password_change_required`（验证：`tests/test_password_gate.py`、真实 PostgreSQL 验收）
+- [x] 成员变更前锁定租户行，避免并发降级同时通过最后 owner 校验（验证：`tests/test_members.py` 的 `FOR UPDATE` 编译断言、真实 PostgreSQL 并发验收）
+- [x] 过期审计日志先按批归档为 NDJSON 到 `_audit_archive` 再删除；归档失败保留数据；每日 03:15 由 worker 执行（验证：`tests/test_audit_retention.py`、`tests/test_worker.py`、真实 PostgreSQL 验收）
+
 ## 本次结果（执行后填写）
 
-- 后端测试：`cd backend && uv run pytest -q` → 632 passed, 2 skipped；`uv run ruff check .` → 通过。
-- 前端测试：`npm --prefix web run test` → 11 个测试文件、111 个用例全部通过。
+- 后端测试：`cd backend && uv run pytest -q` → 696 passed, 2 skipped；`uv run ruff check .` → 通过。
+- 前端测试：`npm --prefix web run test` → 14 个测试文件、127 个用例全部通过。
 - 前端构建：`npm --prefix web run build`（`tsc -b && vite build`）→ 通过。
 - 迁移：真实 PostgreSQL 16 上 `alembic upgrade head` 成功，当前 head `c3d4e5f6a7b8 (head)`；默认租户存在；`admin@local` 回填为 `owner`，`ensure_admin` 后 `is_platform_admin=t`、`token_version=0`；`audit_logs` 表与索引存在。
 - 真实环境验收：第 1–8 项全部通过（API 脚本 + 浏览器）。补充记录：
@@ -61,3 +68,8 @@
   - 租户停用：B 的登录返回 403 `tenant_suspended`；到期定时任务未被扫描（状态保持 `approved`，`publish.auto_execute` 计数为 0）；重新启用后可登录。
   - 审计：页面可查询 35 条事件，动作/状态/操作人/时间过滤正常；`tenant.create` 详情仅含 `slug` 与 `owner_email`，临时密码未出现在审计中。
   - 浏览器验收中发现登录成功后回跳 `/login` 的问题（`AuthProvider` 只在挂载时读取 token），已在 `web/src/pages/Login.tsx` 改为登录后整页跳转修复（提交 `ea08a16`）。
+- 上线加固真实环境验收（PostgreSQL 16 + Redis 7 + uvicorn）：
+  - 登录限流：同一未知邮箱连续 5 次错误密码返回 401，第 6 次返回 429 `too_many_attempts`，`Retry-After=63`；Redis 中存在邮箱与 IP 两类计数键。
+  - 强制改密：临时密码登录后 `/api/projects` 返回 403 `password_change_required`，`/auth/me` 仍可访问；改密后新 token 访问 `/api/projects` 返回 200。
+  - owner 并发：两名 owner 同时降级对方，结果为一个 200、一个 409 `last_owner`，成员列表仍保留 1 名 owner。
+  - 审计归档：插入 200 天前的日志后执行归档，生成 `_audit_archive/<日期>/<id>.ndjson`，过期行被删除、近期行保留；验收文件已清理。

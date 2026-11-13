@@ -148,6 +148,10 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 - **成员管理**：owner 可创建成员、改角色、停用/启用；临时密码只返回一次，首次登录强制改密；最后一名 owner 不可被降级或停用，不能修改自己的角色或停用自己。
 - **会话失效**：JWT 增加 `ver` 声明并与 `users.token_version` 比对；改密、改角色、停用用户、停用租户都会使旧 token 立即失效。
 - **审计**：新增 `audit_logs` 表，记录登录、改密、成员、租户、发布账号、模型提供商、技能启停、发布与媒体事件；审计按租户隔离、只追加，`password`/`token`/`secret`/`api_key` 等字段写库前脱敏。
+- **登录限流**：同一邮箱与同一 IP 双维度计数，默认 5 次 / 20 次每 5 分钟；计数存放在 Redis，多实例共享，超限返回 `429 too_many_attempts` 与 `Retry-After`；Redis 不可用时放行登录，只记录错误日志。
+- **强制首次改密**：`must_change_password` 为真时，除 `/api/auth/me` 与 `/api/auth/change-password` 外的业务接口统一返回 `403 password_change_required`，不再依赖前端拦截。
+- **并发保护**：成员变更在统计 owner 前锁定租户行（`SELECT ... FOR UPDATE`），避免两个并发降级同时通过“最后一名 owner”校验。
+- **审计归档**：worker 每天 03:15 把超过 `AUDIT_RETENTION_DAYS`（默认 180 天，`<=0` 关闭）的审计日志按批导出为 NDJSON 到对象存储 `_audit_archive` 命名空间后再删除；先归档后删除，失败保留数据等待次日重试。
 - **前端**：新增 `/change-password`、`/team`、`/audit`、`/tenants`；导航按角色过滤，只读角色的写入表单与按钮隐藏。
 
 升级现有数据库执行 `make migrate`。迁移会插入默认租户、把原管理员回填为 `owner` 并删除 `users.is_admin`；首次启动时 `ensure_admin` 将首位管理员提升为平台管理员。所有旧 token 均失效，升级后需要重新登录。
@@ -163,7 +167,7 @@ GET              /api/audit-logs
 POST             /api/auth/change-password
 ```
 
-Phase 3 已知限制：一人一租户；无公开注册、租户删除与计费；审计不自动归档；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）。
+Phase 3 已知限制：一人一租户；无公开注册、租户删除与计费；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）；登录限流依赖 Redis，单机部署下 Redis 故障期间限流暂时失效。
 
 ## Phase 1 已知限制
 

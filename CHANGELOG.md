@@ -26,20 +26,23 @@
 - **前端能力展示**：账号页动态渲染凭据表单，发布页与项目详情按能力显示操作。
 - **待接入提示**：头条图文与百家号发布仍需官方接口文档，当前返回明确配置错误。
 - **清爽主题**：全局改为白灰底、自然绿主色与酒红点缀；新增 `paper/surface/ink/sage/wine/warm` 设计令牌与 `card/input/btn-*` 组件类，移除旧的深色 slate/indigo 配色。
+- **登录限流**：按邮箱与 IP 双维度固定窗口计数，默认 5 次 / 20 次每 5 分钟；计数存入 Redis 供多实例共享，超限返回 `429 too_many_attempts` 与 `Retry-After`；Redis 故障时放行并记录错误日志。
+- **强制首次改密**：`must_change_password` 为真时，除 `/api/auth/me` 与 `/api/auth/change-password` 外的业务接口由后端返回 `403 password_change_required`。
+- **最后 owner 并发保护**：成员变更统计 owner 前锁定租户行，避免并发降级绕过最后一名 owner 校验。
+- **审计归档与保留**：worker 每天 03:15 把超过 `AUDIT_RETENTION_DAYS`（默认 180 天，`<=0` 关闭）的审计日志按批导出为 NDJSON 到对象存储 `_audit_archive` 后再删除；归档失败保留数据等待重试。
 
 ### 验证
 
-- 后端：`uv run pytest -q` 552 passed、2 skipped，`uv run ruff check .` 通过。
-- 前端：`npm test` 86 passed，`npm run build` 通过。
+- 后端：`uv run pytest -q` 696 passed、2 skipped，`uv run ruff check .` 通过。
+- 前端：`npm test` 127 passed，`npm run build` 通过。
+- 上线加固真实环境验收：登录限流第 6 次返回 429 与 `Retry-After`；临时密码登录先 403 `password_change_required`、改密后放行；两名 owner 并发降级得到一个 200、一个 409 `last_owner`；过期审计日志归档为 NDJSON 后删除、近期日志保留。
 - 真实 MinIO 联调：上传、列表、下载与导出 zip 均通过，对象键含项目隔离前缀。
 - 真实千问 embedding：`text-embedding-v3` 返回 1024 维向量；pgvector 语义排序与回填已在本机 PostgreSQL 验证。
 - 真实短视频链路：千问分镜 → edge-tts 配音 → ffmpeg 合成 → 媒体 API 导入 → 鉴权预览全部通过；产物为 1080×1920 H.264 + AAC，时长 25.968s。
-- 主题：前端 `npm test` 与 `npm run build` 通过；桌面与移动宽度下逐页视觉验收通过，无旧色板残留。
 - 媒体脚本测试：真实 ffmpeg 渲染与 `RUN_MEDIA_TTS=1` 的真实 edge-tts 合成均通过。
-- 后端：`uv run pytest -q` 632 passed、2 skipped，`uv run ruff check .` 通过。
-- 前端：`npm test` 111 passed，`npm run build` 通过。
 - 真实 PostgreSQL：迁移到 `c3d4e5f6a7b8`，默认租户与管理员回填正确。
 - 真实环境验收：租户创建与强制改密、双租户隔离、角色矩阵、停用会话失效、租户停用、审计脱敏全部通过。
+- 主题：前端 `npm test` 与 `npm run build` 通过；桌面与移动宽度下逐页视觉验收通过，无旧色板残留。
 
 ### 已知限制
 
