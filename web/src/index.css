@@ -1,5 +1,56 @@
 @import "tailwindcss";
 
+@theme {
+  --color-paper: #f6f6f3;
+  --color-surface: #ffffff;
+  --color-ink-900: #1c211e;
+  --color-ink-700: #3d4642;
+  --color-ink-500: #6b7570;
+  --color-ink-300: #a8b0ac;
+  --color-line: #e3e5e1;
+  --color-sage-50: #eef5f0;
+  --color-sage-100: #dcebe1;
+  --color-sage-500: #3f8a66;
+  --color-sage-600: #2f7554;
+  --color-sage-700: #245c43;
+  --color-wine-50: #f8eef0;
+  --color-wine-100: #efd9dd;
+  --color-wine-500: #8c3a4a;
+  --color-wine-600: #752f3d;
+  --color-wine-700: #5d2531;
+  --color-warm-600: #8a6a3b;
+}
+
 body {
-  @apply bg-slate-950 text-slate-100 antialiased;
+  @apply bg-paper text-ink-900 antialiased;
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-line bg-surface;
+  }
+  .card-pad {
+    @apply p-5;
+  }
+  .input {
+    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-ink-900 placeholder:text-ink-300 focus:border-sage-500 focus:outline-none focus:ring-2 focus:ring-sage-100;
+  }
+  .btn-primary {
+    @apply rounded-lg bg-sage-600 px-4 py-2 text-sm font-medium text-white hover:bg-sage-700 disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply rounded-lg border border-line bg-white px-4 py-2 text-sm text-ink-700 hover:border-ink-300;
+  }
+  .btn-danger {
+    @apply rounded-lg border border-wine-100 bg-wine-50 px-4 py-2 text-sm text-wine-700 hover:bg-wine-100;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+  .nav-link {
+    @apply rounded-md px-3 py-1.5 text-sm text-ink-500 transition-colors hover:text-ink-900;
+  }
+  .nav-link-active {
+    @apply rounded-md bg-sage-50 px-3 py-1.5 text-sm font-medium text-sage-700;
+  }
 }
