@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import Depends, Header
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,4 +41,13 @@ async def get_current_user(
         raise AppError("tenant_suspended", "租户已停用，请联系平台管理员", 403)
     if payload["ver"] != user.token_version:
         raise AppError("token_revoked", "登录状态已失效，请重新登录", 401)
+    return user
+
+
+async def get_current_member(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """业务接口默认依赖；首次登录未改密时只允许访问 /auth/me 与改密接口。"""
+    if user.must_change_password:
+        raise AppError("password_change_required", "请先修改初始密码", 403)
     return user

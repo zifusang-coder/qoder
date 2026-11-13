@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 
 from fastapi import Depends
 
-from app.deps import get_current_user
+from app.deps import get_current_member
 from app.errors import AppError
 from app.models.user import User
 
@@ -16,7 +16,7 @@ ROLE_RANK: dict[str, int] = {
     "owner": 3,
 }
 
-UserDep = Annotated[User, Depends(get_current_user)]
+UserDep = Annotated[User, Depends(get_current_member)]
 
 
 def has_role(user: User, min_role: Role) -> bool:

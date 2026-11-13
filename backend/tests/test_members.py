@@ -1,8 +1,10 @@
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 
 from app.config import get_settings
 from app.errors import AppError
+from app.models.base import DEFAULT_TENANT_ID
 from app.models.user import User
 from app.security import hash_password
 from app.seed import ensure_admin
@@ -94,6 +96,41 @@ async def test_last_owner_guard(db_session):
     with pytest.raises(AppError) as exc:
         await ensure_not_last_owner(db_session, admin.tenant_id, admin)
     assert exc.value.code == "last_owner"
+
+
+class _CountResult:
+    def scalar_one(self) -> int:
+        return 2
+
+
+class _RecordingSession:
+    def __init__(self) -> None:
+        self.statements = []
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        return _CountResult()
+
+
+async def test_last_owner_guard_locks_tenant_row():
+    session = _RecordingSession()
+    member = User(
+        tenant_id=DEFAULT_TENANT_ID,
+        email="owner@local",
+        password_hash="x",
+        display_name="Owner",
+        role="owner",
+        is_active=True,
+        must_change_password=False,
+        is_platform_admin=False,
+        token_version=0,
+    )
+
+    await ensure_not_last_owner(session, DEFAULT_TENANT_ID, member)
+
+    lock_sql = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    assert "tenants" in lock_sql
+    assert "FOR UPDATE" in lock_sql
 
 
 async def test_role_change_revokes_existing_token(
