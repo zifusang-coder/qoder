@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import css from "../index.css?raw";
 
+const sources = import.meta.glob(
+  ["../**/*.{ts,tsx,css}", "!../__tests__/**"],
+  { query: "?raw", import: "default", eager: true },
+) as Record<string, string>;
+
+function source(path: string): string {
+  const key = Object.keys(sources).find((item) => item.endsWith(path));
+  if (!key) throw new Error(`未找到源文件：${path}`);
+  return sources[key];
+}
+
 const TOKENS = [
   "--color-paper: #f6f6f3;",
   "--color-surface: #ffffff;",
@@ -46,5 +57,19 @@ describe("theme tokens", () => {
     for (const className of COMPONENT_CLASSES) {
       expect(css).toContain(className);
     }
+  });
+});
+
+describe("application shell", () => {
+  it("uses the clean component classes", () => {
+    const layout = source("/components/Layout.tsx");
+    expect(layout).toContain("border-line bg-surface");
+    expect(layout).toContain("nav-link-active");
+    expect(layout).toContain("text-sage-700");
+
+    const login = source("/pages/Login.tsx");
+    expect(login).toContain("btn-primary");
+    expect(login).toContain('className="input"');
+    expect(login).not.toMatch(/slate-|indigo-/);
   });
 });

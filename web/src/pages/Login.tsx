@@ -29,12 +29,12 @@ export default function Login() {
   }
 
   return (
-    <main className="mx-auto mt-24 w-full max-w-sm rounded-xl border border-slate-800 bg-slate-900 p-8">
-      <h1 className="text-xl font-semibold">{APP_NAME}</h1>
-      <p className="mt-1 text-sm text-slate-400">登录后开始创作与发布</p>
+    <main className="card mx-auto mt-24 w-full max-w-sm p-8">
+      <h1 className="text-xl font-semibold text-ink-900">{APP_NAME}</h1>
+      <p className="mt-1 text-sm text-ink-500">登录后开始创作与发布</p>
       <form className="mt-6 space-y-3" onSubmit={submit}>
         <input
-          className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+          className="input"
           aria-label="邮箱"
           required
           value={email}
@@ -42,7 +42,7 @@ export default function Login() {
           placeholder="邮箱"
         />
         <input
-          className="w-full rounded border border-slate-700 bg-slate-950 px-3 py-2"
+          className="input"
           aria-label="密码"
           required
           type="password"
@@ -50,11 +50,8 @@ export default function Login() {
           onChange={(e) => setPassword(e.target.value)}
           placeholder="密码"
         />
-        {error && <p className="text-sm text-red-400">{error}</p>}
-        <button
-          className="w-full rounded bg-indigo-600 py-2 font-medium disabled:opacity-50"
-          disabled={loading}
-        >
+        {error && <p className="text-sm text-wine-600">{error}</p>}
+        <button className="btn-primary w-full" disabled={loading}>
           {loading ? "登录中…" : "登录"}
         </button>
       </form>

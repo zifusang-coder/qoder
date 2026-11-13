@@ -77,7 +77,7 @@ export function RequireRole({
   const roleOk =
     minRole === undefined || (role !== null && atLeast(role, minRole));
   if (!roleOk || (platformAdmin && !isPlatformAdmin)) {
-    return <p className="text-sm text-red-400">权限不足，请联系租户管理员。</p>;
+    return <p className="text-sm text-wine-600">权限不足，请联系租户管理员。</p>;
   }
   return <>{children}</>;
 }
@@ -89,19 +89,19 @@ export function ProtectedLayout() {
 
   if (!token) return <Navigate to="/login" replace />;
   if (loading) {
-    return <p className="p-8 text-sm text-slate-400">正在校验登录状态…</p>;
+    return <p className="p-8 text-sm text-ink-500">正在校验登录状态…</p>;
   }
   if (
     error instanceof ApiError &&
     (error.code === "tenant_suspended" || error.code === "account_disabled")
   ) {
     return (
-      <main className="mx-auto mt-24 max-w-md rounded-xl border border-red-900 bg-slate-900 p-8">
-        <h1 className="text-lg font-semibold text-red-400">无法继续访问</h1>
-        <p className="mt-2 text-sm text-slate-300">{error.message}</p>
+      <main className="mx-auto mt-24 max-w-md rounded-xl border border-wine-100 bg-wine-50 p-8">
+        <h1 className="text-lg font-semibold text-wine-700">无法继续访问</h1>
+        <p className="mt-2 text-sm text-ink-700">{error.message}</p>
         <button
           type="button"
-          className="mt-4 rounded bg-indigo-600 px-4 py-2 text-sm"
+          className="btn-primary mt-4"
           onClick={() => {
             setToken(null);
             window.location.assign("/login");
