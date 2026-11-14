@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
-from app.agent.tools._common import owned_job, schema
+from app.agent.tools._common import int_arg, owned_content, owned_job, schema
 from app.models.publish import PublishJob
 
 
@@ -22,12 +22,16 @@ def _job_row(job: PublishJob) -> dict:
 
 
 async def list_jobs(ctx: ToolContext, args: dict) -> ToolResult:
-    limit = int(args.get("limit", 20))
+    limit = int_arg(args, "limit", default=20, minimum=1, maximum=50)
     statement = select(PublishJob).where(PublishJob.tenant_id == ctx.tenant_id)
     if args.get("status"):
         statement = statement.where(PublishJob.status == args["status"])
     if args.get("content_id"):
-        statement = statement.where(PublishJob.content_id == args["content_id"])
+        # content_id 是 Uuid 列：先按租户解析成 Content 再比较，避免原始字符串直达驱动
+        content = await owned_content(
+            ctx.session, ctx.tenant_id, args["content_id"]
+        )
+        statement = statement.where(PublishJob.content_id == content.id)
     rows = (
         await ctx.session.execute(
             statement.order_by(PublishJob.created_at.desc()).limit(limit)

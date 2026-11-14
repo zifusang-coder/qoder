@@ -1,12 +1,12 @@
 from sqlalchemy import select
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
-from app.agent.tools._common import owned_project, schema
+from app.agent.tools._common import int_arg, owned_project, schema
 from app.models.project import Content, Project
 
 
 async def list_projects(ctx: ToolContext, args: dict) -> ToolResult:
-    limit = int(args.get("limit", 20))
+    limit = int_arg(args, "limit", default=20, minimum=1, maximum=50)
     statement = select(Project).where(Project.tenant_id == ctx.tenant_id)
     if args.get("status"):
         statement = statement.where(Project.status == args["status"])

@@ -310,6 +310,35 @@ async def test_analytics_summary_aggregates(db_session):
     assert result.data["items"][0]["title"] == "文章标题"
 
 
+async def test_analytics_summary_uses_latest_snapshot_per_content(db_session):
+    """改写为 SQL 聚合后仍需按内容只取最新一条，且窗口外快照不参与汇总。"""
+    seeded = await _seed(db_session, TENANT_A)
+    for captured_at, views, likes in (
+        (date.today() - timedelta(days=1), 500, 5),
+        (date.today() - timedelta(days=60), 999, 9),
+    ):
+        db_session.add(
+            AnalyticsSnapshot(
+                tenant_id=TENANT_A,
+                content_id=seeded["content"].id,
+                platform="wechat",
+                captured_at=captured_at,
+                views=views,
+                likes=likes,
+            )
+        )
+    await db_session.commit()
+    registry = _registry()
+
+    result = await _call(
+        registry, db_session, TENANT_A, "analytics.summary", {"days": 30}
+    )
+    assert result.data["totals"]["views"] == 1000
+    assert result.data["totals"]["likes"] == 50
+    assert len(result.data["items"]) == 1
+    assert result.data["items"][0]["captured_at"] == date.today().isoformat()
+
+
 async def test_platform_capabilities_exposes_matrix(db_session):
     registry = _registry()
     result = await _call(
@@ -341,3 +370,204 @@ async def test_publish_and_media_job_reads(db_session):
         {"job_id": str(seeded["media_job"].id)},
     )
     assert media_job.data["job"]["skill_id"] == "short-video"
+
+
+async def test_publish_job_list_filters_by_content_id(db_session):
+    seeded = await _seed(db_session, TENANT_A)
+    second = Content(
+        tenant_id=TENANT_A,
+        project_id=seeded["project"].id,
+        platform="wechat",
+        kind="article",
+        title="第二篇",
+        current_version=1,
+    )
+    db_session.add(second)
+    await db_session.flush()
+    db_session.add(
+        PublishJob(
+            tenant_id=TENANT_A,
+            content_id=second.id,
+            content_version=1,
+            platform="wechat",
+            status="draft",
+            idempotency_key="key-second-content",
+            scheduled_at=datetime.now(UTC) + timedelta(days=2),
+        )
+    )
+    await db_session.commit()
+    registry = _registry()
+
+    filtered = await _call(
+        registry,
+        db_session,
+        TENANT_A,
+        "publish.job.list",
+        {"content_id": str(seeded["content"].id)},
+    )
+    assert [item["id"] for item in filtered.data["items"]] == [
+        str(seeded["job"].id)
+    ]
+
+    everything = await _call(registry, db_session, TENANT_A, "publish.job.list", {})
+    assert len(everything.data["items"]) == 2
+
+
+async def test_publish_job_list_content_id_is_tenant_scoped(db_session):
+    foreign = await _seed(db_session, TENANT_B)
+    registry = _registry()
+    with pytest.raises(AppError) as exc:
+        await _call(
+            registry,
+            db_session,
+            TENANT_A,
+            "publish.job.list",
+            {"content_id": str(foreign["content"].id)},
+        )
+    assert exc.value.code == "not_found"
+    assert exc.value.status == 404
+
+
+@pytest.mark.parametrize(
+    "content_id",
+    ["not-a-uuid", "12345678-1234-1234-1234-1234567890ab-extra", "12345678"],
+)
+async def test_publish_job_list_malformed_content_id_is_app_error(
+    db_session, content_id
+):
+    registry = _registry()
+    with pytest.raises(AppError) as exc:
+        await _call(
+            registry,
+            db_session,
+            TENANT_A,
+            "publish.job.list",
+            {"content_id": content_id},
+        )
+    assert exc.value.code == "not_found"
+    assert exc.value.status == 404
+
+
+async def test_analytics_summary_caps_items_for_tenant_larger_than_chunk(
+    db_session,
+):
+    """501 条内容（超过 CONTENT_LOOKUP_CHUNK）仍应聚合正确且条目数封顶。"""
+    project = Project(tenant_id=TENANT_A, title="大租户项目")
+    db_session.add(project)
+    await db_session.flush()
+    contents = [
+        Content(
+            tenant_id=TENANT_A,
+            project_id=project.id,
+            platform="wechat",
+            kind="article",
+            title=f"文章 {index}",
+            current_version=1,
+        )
+        for index in range(501)
+    ]
+    db_session.add_all(contents)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            AnalyticsSnapshot(
+                tenant_id=TENANT_A,
+                content_id=content.id,
+                platform="wechat",
+                captured_at=date.today(),
+                views=index + 1,
+                likes=index + 1,
+            )
+            for index, content in enumerate(contents)
+        ]
+    )
+    await db_session.commit()
+    registry = _registry()
+
+    result = await _call(
+        registry, db_session, TENANT_A, "analytics.summary", {"days": 30}
+    )
+    assert len(result.data["items"]) == analytics.MAX_ITEMS == 20
+    assert result.data["items"][0]["views"] == 501
+    assert result.data["totals"]["views"] == 501 * 502 // 2
+    assert result.data["totals"]["likes"] == 501 * 502 // 2
+    assert "501 条内容有数据" in result.summary
+
+
+@pytest.mark.parametrize(
+    ("date_from", "date_to"),
+    [
+        (
+            (date.today() + timedelta(days=2)).isoformat(),
+            date.today().isoformat(),
+        ),
+        (
+            date.today().isoformat(),
+            (date.today() + timedelta(days=100)).isoformat(),
+        ),
+    ],
+    ids=["inverted", "over-90-days"],
+)
+async def test_calendar_list_rejects_invalid_ranges(db_session, date_from, date_to):
+    registry = _registry()
+    with pytest.raises(AppError) as exc:
+        await _call(
+            registry,
+            db_session,
+            TENANT_A,
+            "calendar.list",
+            {"date_from": date_from, "date_to": date_to},
+        )
+    assert exc.value.code == "invalid_arguments"
+    assert exc.value.status == 422
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("profile.list", {"limit": "abc"}),
+        ("project.list", {"limit": [1]}),
+        ("content.list", {"limit": {"n": 1}}),
+        ("publish.job.list", {"limit": "1.5"}),
+        ("analytics.summary", {"days": "三十"}),
+    ],
+)
+async def test_non_integer_arguments_raise_422(db_session, tool, args):
+    registry = _registry()
+    with pytest.raises(AppError) as exc:
+        await _call(registry, db_session, TENANT_A, tool, args)
+    assert exc.value.code == "invalid_arguments"
+    assert exc.value.status == 422
+
+
+async def test_content_get_rejects_non_integer_version(db_session):
+    seeded = await _seed(db_session, TENANT_A)
+    registry = _registry()
+    with pytest.raises(AppError) as exc:
+        await _call(
+            registry,
+            db_session,
+            TENANT_A,
+            "content.get",
+            {"content_id": str(seeded["content"].id), "version": "v2"},
+        )
+    assert exc.value.code == "invalid_arguments"
+    assert exc.value.status == 422
+
+
+async def test_out_of_range_integers_are_clamped(db_session):
+    await _seed(db_session, TENANT_A)
+    registry = _registry()
+
+    listed = await _call(
+        registry, db_session, TENANT_A, "profile.list", {"limit": 10_000}
+    )
+    assert len(listed.data["items"]) == 1
+    contents = await _call(
+        registry, db_session, TENANT_A, "content.list", {"limit": 0}
+    )
+    assert len(contents.data["items"]) == 1
+    summary = await _call(
+        registry, db_session, TENANT_A, "analytics.summary", {"days": 0}
+    )
+    assert summary.data["totals"]["views"] == 1000

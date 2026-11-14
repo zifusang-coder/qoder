@@ -25,6 +25,30 @@ def parse_uuid(value: object, message: str) -> uuid.UUID:
         raise AppError("not_found", message, 404) from None
 
 
+def int_arg(
+    args: dict,
+    name: str,
+    *,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
+    """解析整数参数：非法值报 422，超出 schema 边界的值夹取到边界。"""
+    raw = args.get(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise AppError("invalid_arguments", f"{name} 必须是整数", 422) from None
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
 async def owned_project(
     session: AsyncSession, tenant_id: str, project_id: object
 ) -> Project:

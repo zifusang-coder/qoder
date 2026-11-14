@@ -1,13 +1,13 @@
 from sqlalchemy import select
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
-from app.agent.tools._common import parse_uuid, schema
+from app.agent.tools._common import int_arg, parse_uuid, schema
 from app.errors import AppError
 from app.models.profile import Profile, ProfileMemory
 
 
 async def list_profiles(ctx: ToolContext, args: dict) -> ToolResult:
-    limit = int(args.get("limit", 20))
+    limit = int_arg(args, "limit", default=20, minimum=1, maximum=50)
     rows = (
         await ctx.session.execute(
             select(Profile)
