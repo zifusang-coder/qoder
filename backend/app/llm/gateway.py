@@ -8,11 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import AppError
+from app.llm.tools import ToolCall, ToolTurn
 from app.llm.types import LLMConfig, Usage
 from app.models.settings import LLMProvider
 from app.security import decrypt_secret
 
-Message = dict[str, str]
+Message = dict[str, object]
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,204 @@ class LLMGateway:
             "max_tokens": max_tokens,
             "stream": stream,
         }
+
+    def _openai_tools(self, tools: list[dict]) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool["parameters"],
+                },
+            }
+            for tool in tools
+        ]
+
+    def _anthropic_payload(
+        self, messages: list[dict]
+    ) -> tuple[str, list[dict]]:
+        system = "\n".join(
+            str(message.get("content") or "")
+            for message in messages
+            if message.get("role") == "system"
+        )
+        converted: list[dict] = []
+        for message in messages:
+            role = message.get("role")
+            if role == "system":
+                continue
+            if role == "assistant":
+                blocks: list[dict] = []
+                text = message.get("content")
+                if text:
+                    blocks.append({"type": "text", "text": str(text)})
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    raw = function.get("arguments") or "{}"
+                    try:
+                        parsed = json.loads(raw)
+                    except json.JSONDecodeError:
+                        parsed = {"raw_arguments": raw}
+                    if not isinstance(parsed, dict):
+                        parsed = {"value": parsed}
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": str(call.get("id") or ""),
+                            "name": str(function.get("name") or ""),
+                            "input": parsed,
+                        }
+                    )
+                converted.append(
+                    {"role": "assistant", "content": blocks or [{"type": "text", "text": " "}]}
+                )
+            elif role == "tool":
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": str(message.get("tool_call_id") or ""),
+                    "content": str(message.get("content") or ""),
+                }
+                previous = converted[-1] if converted else None
+                if (
+                    previous is not None
+                    and previous.get("role") == "user"
+                    and previous.pop("_tool_results", False)
+                ):
+                    previous["content"].append(block)
+                else:
+                    converted.append(
+                        {"role": "user", "content": [block], "_tool_results": True}
+                    )
+            else:
+                converted.append(
+                    {"role": "user", "content": str(message.get("content") or "")}
+                )
+        for message in converted:
+            message.pop("_tool_results", None)
+        return system, converted
+
+    async def complete_tool_calls(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict],
+        tool_choice: str = "auto",
+        tier: str = "standard",
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+    ) -> ToolTurn:
+        self.last_usage = Usage()
+        model = self._model(tier)
+        if self.config.kind == "anthropic":
+            system, converted = self._anthropic_payload(messages)
+            payload: dict = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": converted,
+                "tools": [
+                    {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "input_schema": tool["parameters"],
+                    }
+                    for tool in tools
+                ],
+                "tool_choice": {"type": "auto"},
+            }
+            if system:
+                payload["system"] = system
+        else:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "tools": self._openai_tools(tools),
+                "tool_choice": tool_choice if tool_choice in {"auto", "none", "required"} else "auto",
+            }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    self.endpoint, headers=self._headers(), json=payload
+                )
+        except httpx.TimeoutException as exc:
+            raise AppError("llm_timeout", "LLM 请求超时", 504) from exc
+        except httpx.RequestError as exc:
+            raise AppError("llm_unavailable", "LLM 服务不可用", 502) from exc
+        self._raise_for_upstream_error(response)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise AppError("llm_invalid_response", "LLM 返回格式异常", 502) from exc
+        if not isinstance(data, dict):
+            raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
+
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        if self.config.kind == "anthropic":
+            self.last_usage = Usage(
+                _token_count(usage.get("input_tokens")),
+                _token_count(usage.get("output_tokens")),
+            )
+            content = data.get("content")
+            if not isinstance(content, list):
+                raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
+            text = "".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            calls = [
+                ToolCall(
+                    id=str(block.get("id") or ""),
+                    name=str(block.get("name") or ""),
+                    arguments=json.dumps(block.get("input") or {}, ensure_ascii=False),
+                )
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "tool_use"
+            ]
+            stop = data.get("stop_reason")
+            finish_reason = {
+                "tool_use": "tool_calls",
+                "max_tokens": "length",
+                "end_turn": "stop",
+            }.get(str(stop), str(stop or "stop"))
+            return ToolTurn(text, calls, finish_reason, self.last_usage)
+
+        self.last_usage = Usage(
+            _token_count(usage.get("prompt_tokens")),
+            _token_count(usage.get("completion_tokens")),
+        )
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        message = first.get("message") if isinstance(first.get("message"), dict) else {}
+        text = message.get("content")
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
+        calls = []
+        raw_calls = message.get("tool_calls")
+        if raw_calls is not None and not isinstance(raw_calls, list):
+            raise AppError("llm_invalid_response", "LLM 返回格式异常", 502)
+        for index, item in enumerate(raw_calls or []):
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function") if isinstance(item.get("function"), dict) else {}
+            calls.append(
+                ToolCall(
+                    id=str(item.get("id") or f"call_{index}"),
+                    name=str(function.get("name") or ""),
+                    arguments=str(function.get("arguments") or "{}"),
+                )
+            )
+        finish_reason = str(
+            first.get("finish_reason") or ("tool_calls" if calls else "stop")
+        )
+        return ToolTurn(text, calls, finish_reason, self.last_usage)
 
     async def complete(
         self,
