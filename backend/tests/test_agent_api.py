@@ -4,12 +4,19 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
+from app.api import agent as agent_api
+from app.config import get_settings
 from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
-from app.models.agent import AgentApproval, AgentRun, AgentStep
+from app.models.agent import (
+    AgentApproval,
+    AgentPolicy,
+    AgentRun,
+    AgentStep,
+)
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.project import Project
 from app.models.user import User
@@ -306,10 +313,18 @@ async def test_cancel_rules(api, queue, db_session):
     state["user"] = creator
     run_id = (await create_run(http)).json()["id"]
 
+    # Retargeted from the brief: cancel is editor_access plus self-ownership,
+    # so nobody else -- not even an admin -- may cancel another user's run.
     other = await make_user(db_session, role="editor")
     state["user"] = other
     forbidden = await http.post(f"/api/agent/runs/{run_id}/cancel")
     assert forbidden.status_code == 403
+    assert forbidden.json()["code"] == "forbidden"
+
+    admin = await make_user(db_session, role="admin")
+    state["user"] = admin
+    admin_forbidden = await http.post(f"/api/agent/runs/{run_id}/cancel")
+    assert admin_forbidden.status_code == 403
 
     state["user"] = creator
     cancelled = await http.post(f"/api/agent/runs/{run_id}/cancel")
@@ -319,6 +334,96 @@ async def test_cancel_rules(api, queue, db_session):
     again = await http.post(f"/api/agent/runs/{run_id}/cancel")
     assert again.status_code == 409
     assert again.json()["code"] == "agent_run_not_cancellable"
+
+
+async def test_viewer_cannot_cancel_own_run(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    state["user"] = creator
+    run_id = (await create_run(http)).json()["id"]
+
+    # A run owner demoted to viewer is read-only: editor_access rejects even
+    # the creator's own cancellation.
+    creator.role = "viewer"
+    await db_session.commit()
+
+    resp = await http.post(f"/api/agent/runs/{run_id}/cancel")
+
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "forbidden"
+    run = await db_session.get(AgentRun, uuid.UUID(run_id))
+    await db_session.refresh(run)
+    assert run.status == "queued"
+
+
+async def test_cancel_returns_409_when_run_finished_concurrently(
+    api, queue, db_session, monkeypatch
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    state["user"] = creator
+    run_id = (await create_run(http)).json()["id"]
+
+    original_owned_run = agent_api._owned_run
+
+    async def finish_after_load(session, raw_id, user):
+        run = await original_owned_run(session, raw_id, user)
+        # Another writer terminates the run after this request read it but
+        # before the conditional update lands.
+        await session.execute(
+            update(AgentRun)
+            .where(AgentRun.id == run.id)
+            .values(status="succeeded")
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        return run
+
+    monkeypatch.setattr(agent_api, "_owned_run", finish_after_load)
+
+    resp = await http.post(f"/api/agent/runs/{run_id}/cancel")
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "agent_run_not_cancellable"
+    stored = await db_session.get(AgentRun, uuid.UUID(run_id))
+    await db_session.refresh(stored)
+    assert stored.status == "succeeded"
+
+
+async def test_concurrent_cancels_succeed_only_once(
+    api, queue, db_session, monkeypatch
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    state["user"] = creator
+    run_id = (await create_run(http)).json()["id"]
+
+    original_owned_run = agent_api._owned_run
+
+    async def rival_cancels_first(session, raw_id, user):
+        run = await original_owned_run(session, raw_id, user)
+        # A second cancel request commits between our load and our update.
+        await session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == run.id,
+                AgentRun.status.in_(agent_api.ACTIVE_STATUSES),
+            )
+            .values(status="cancelled", finished_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        return run
+
+    monkeypatch.setattr(agent_api, "_owned_run", rival_cancels_first)
+
+    resp = await http.post(f"/api/agent/runs/{run_id}/cancel")
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "agent_run_not_cancellable"
+    stored = await db_session.get(AgentRun, uuid.UUID(run_id))
+    await db_session.refresh(stored)
+    assert stored.status == "cancelled"
 
 
 async def test_cancel_closes_pending_approvals(api, queue, db_session):
@@ -536,3 +641,330 @@ async def test_approvals_invisible_across_tenants_both_ways(api, queue, db_sessi
     ).status_code == 404
     await db_session.refresh(approval_a)
     assert approval_a.status == "pending"
+
+
+async def test_enqueue_failure_releases_idempotency_key(api, db_session):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    headers = {"Idempotency-Key": "retryable-key"}
+    body = {"goal": "写一篇周报"}
+
+    app.dependency_overrides[get_queue] = lambda: DownQueue()
+    try:
+        first = await http.post("/api/agent/runs", json=body, headers=headers)
+    finally:
+        app.dependency_overrides.pop(get_queue, None)
+
+    assert first.status_code == 503
+    assert first.json()["code"] == "queue_unavailable"
+    failed = (
+        await db_session.execute(
+            select(AgentRun).where(AgentRun.user_id == user.id)
+        )
+    ).scalars().all()
+    assert len(failed) == 1
+    assert failed[0].status == "failed"
+    assert failed[0].error_code == "queue_unavailable"
+    # The row survives as a failure artifact but no longer owns the key, so a
+    # replay makes a fresh attempt instead of replaying the failure.
+    assert failed[0].idempotency_key is None
+
+    fake = FakeQueue()
+    app.dependency_overrides[get_queue] = lambda: fake
+    try:
+        second = await http.post("/api/agent/runs", json=body, headers=headers)
+    finally:
+        app.dependency_overrides.pop(get_queue, None)
+
+    assert second.status_code == 202, second.text
+    assert second.json()["id"] != str(failed[0].id)
+    assert second.json()["status"] == "queued"
+    assert fake.jobs == [("run_agent_job", second.json()["id"])]
+    rows = (
+        await db_session.execute(
+            select(AgentRun).where(AgentRun.user_id == user.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 2
+
+
+async def test_decide_enqueue_failure_rolls_back_the_consent(api, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    admin = await make_user(db_session, role="admin")
+    run, approval = await make_pending(db_session, creator=creator)
+    state["user"] = admin
+
+    app.dependency_overrides[get_queue] = lambda: DownQueue()
+    try:
+        failed = await http.post(
+            f"/api/agent/approvals/{approval.id}/decide",
+            json={"decision": "approve", "note": "可以"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_queue, None)
+
+    assert failed.status_code == 503
+    assert failed.json()["code"] == "queue_unavailable"
+    await db_session.refresh(approval)
+    await db_session.refresh(run)
+    assert approval.status == "pending"
+    assert approval.decided_by is None
+    assert approval.decided_at is None
+    assert approval.note == ""
+    assert run.status == "waiting_approval"
+    assert run.error_code == ""
+    assert run.error_message == ""
+
+    fake = FakeQueue()
+    app.dependency_overrides[get_queue] = lambda: fake
+    try:
+        retried = await http.post(
+            f"/api/agent/approvals/{approval.id}/decide",
+            json={"decision": "approve", "note": "可以"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_queue, None)
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "queued"
+    assert fake.jobs == [("run_agent_job", str(run.id))]
+
+
+async def test_budget_rejects_unknown_dimension(api, queue, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="editor")
+
+    resp = await create_run(http, budget={"max_step": 5})
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "agent_budget_invalid"
+    assert queue.jobs == []
+
+    wrong_type = await create_run(http, budget={"max_steps": "many"})
+    assert wrong_type.status_code == 422
+    assert wrong_type.json()["code"] == "agent_budget_invalid"
+
+
+async def test_budget_defaults_come_from_settings(api, queue, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="editor")
+    settings = get_settings()
+
+    resp = await create_run(http)
+
+    assert resp.status_code == 202, resp.text
+    expected = {
+        "max_steps": settings.agent_max_steps_default,
+        "max_tokens": settings.agent_token_budget_default,
+        "max_tool_calls": settings.agent_max_tool_calls,
+        "max_seconds": settings.agent_max_seconds,
+    }
+    assert resp.json()["budget"] == expected
+    run = await db_session.get(AgentRun, uuid.UUID(resp.json()["id"]))
+    assert run.budget == expected
+
+
+async def test_idempotency_conflict_across_users_is_generic(
+    api, queue, db_session
+):
+    http, state = api
+    user_a = await make_user(db_session, role="editor")
+    user_b = await make_user(db_session, role="editor")
+    user_a_id, user_b_id = user_a.id, user_b.id
+    headers = {"Idempotency-Key": "shared-key"}
+
+    state["user"] = user_a
+    first = await http.post(
+        "/api/agent/runs", json={"goal": "A 的周报"}, headers=headers
+    )
+    assert first.status_code == 202
+
+    state["user"] = user_b
+    second = await http.post(
+        "/api/agent/runs", json={"goal": "B 的周报"}, headers=headers
+    )
+
+    assert second.status_code == 409
+    assert second.json()["code"] == "agent_idempotency_conflict"
+    message = second.json()["message"]
+    # The conflict is generic: it must not leak that another user or run exists.
+    assert first.json()["id"] not in message
+    assert str(user_a_id) not in message
+    assert "A 的周报" not in message
+    own = (
+        await db_session.execute(
+            select(AgentRun).where(AgentRun.user_id == user_b_id)
+        )
+    ).scalars().all()
+    assert own == []
+
+
+async def test_list_runs_populates_pending_approval(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    run, approval = await make_pending(db_session, creator=creator)
+    state["user"] = creator
+
+    resp = await http.get("/api/agent/runs")
+
+    assert resp.status_code == 200
+    item = next(row for row in resp.json() if row["id"] == str(run.id))
+    assert item["pending_approval"] is not None
+    assert item["pending_approval"]["id"] == str(approval.id)
+
+
+async def test_list_runs_orders_by_created_at_then_id(api, queue, db_session):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    same = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
+    tied = []
+    for index in range(3):
+        run = AgentRun(
+            tenant_id=DEFAULT_TENANT_ID,
+            user_id=user.id,
+            goal=f"同秒 {index}",
+            created_at=same,
+        )
+        db_session.add(run)
+        tied.append(run)
+    older = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID,
+        user_id=user.id,
+        goal="更早",
+        created_at=same - timedelta(minutes=1),
+    )
+    db_session.add(older)
+    await db_session.commit()
+
+    resp = await http.get("/api/agent/runs")
+
+    ids = [item["id"] for item in resp.json()]
+    expected_tied = sorted((str(run.id) for run in tied), reverse=True)
+    assert ids == expected_tied + [str(older.id)]
+
+
+async def test_run_list_pagination(api, queue, db_session):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    for index in range(3):
+        db_session.add(
+            AgentRun(
+                tenant_id=DEFAULT_TENANT_ID,
+                user_id=user.id,
+                goal=f"任务 {index}",
+            )
+        )
+    await db_session.commit()
+
+    all_rows = (await http.get("/api/agent/runs?limit=100")).json()
+    first = (await http.get("/api/agent/runs?limit=2&offset=0")).json()
+    second = (await http.get("/api/agent/runs?limit=2&offset=2")).json()
+
+    assert len(all_rows) == 3
+    assert [item["id"] for item in first + second] == [
+        item["id"] for item in all_rows
+    ]
+    assert (await http.get("/api/agent/runs?limit=0")).status_code == 422
+
+
+async def test_run_detail_step_pagination(api, queue, db_session):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    run = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID, user_id=user.id, goal="多步运行"
+    )
+    db_session.add(run)
+    await db_session.flush()
+    for index in range(1, 4):
+        db_session.add(
+            AgentStep(
+                tenant_id=DEFAULT_TENANT_ID,
+                run_id=run.id,
+                step_index=index,
+                kind="tool",
+                tool_name="project.create",
+            )
+        )
+    await db_session.commit()
+
+    page = (
+        await http.get(f"/api/agent/runs/{run.id}?limit=2&offset=1")
+    ).json()
+
+    assert [step["step_index"] for step in page["steps"]] == [2, 3]
+    assert (
+        await http.get(f"/api/agent/runs/{run.id}?limit=500")
+    ).status_code == 422
+
+
+async def test_approval_list_pagination(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    admin = await make_user(db_session, role="admin")
+    for _ in range(3):
+        await make_pending(db_session, creator=creator)
+    state["user"] = admin
+
+    all_ids = [
+        item["id"] for item in (await http.get("/api/agent/approvals")).json()
+    ]
+    head = (await http.get("/api/agent/approvals?limit=2")).json()
+    tail = (
+        await http.get("/api/agent/approvals?limit=2&offset=2")
+    ).json()
+
+    assert len(all_ids) == 3
+    assert [item["id"] for item in head + tail] == all_ids
+    assert (
+        await http.get("/api/agent/approvals?limit=101")
+    ).status_code == 422
+
+
+async def test_retry_expires_source_pending_approvals(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    state["user"] = creator
+    source, approval = await make_pending(db_session, creator=creator)
+    source.status = "failed"
+    source.error_code = "agent_internal_error"
+    await db_session.commit()
+
+    resp = await http.post(f"/api/agent/runs/{source.id}/retry")
+
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["id"] != str(source.id)
+    await db_session.refresh(approval)
+    assert approval.status == "expired"
+    assert approval.decided_at is not None
+
+
+async def test_retry_snapshots_current_policy(api, queue, db_session):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    run_id = (await create_run(http)).json()["id"]
+    source = await db_session.get(AgentRun, uuid.UUID(run_id))
+    assert source.policy["project.create"] == "auto"
+    source.status = "failed"
+    await db_session.commit()
+
+    db_session.add(
+        AgentPolicy(
+            tenant_id=DEFAULT_TENANT_ID,
+            overrides={"tool:project.create": "deny"},
+        )
+    )
+    await db_session.commit()
+
+    resp = await http.post(f"/api/agent/runs/{run_id}/retry")
+
+    assert resp.status_code == 202, resp.text
+    retried = await db_session.get(AgentRun, uuid.UUID(resp.json()["id"]))
+    assert retried.policy["project.create"] == "deny"
+    await db_session.refresh(source)
+    assert source.policy["project.create"] == "auto"

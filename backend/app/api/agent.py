@@ -6,7 +6,7 @@ from typing import Any, Literal
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,9 @@ BUDGET_CEILINGS = {
     "max_tool_calls": 40,
     "max_seconds": 900,
 }
+BUDGET_KEYS = ("max_steps", "max_tokens", "max_tool_calls", "max_seconds")
+QUEUE_UNAVAILABLE_MESSAGE = "队列不可用，请稍后重试"
+IDEMPOTENCY_CONFLICT_MESSAGE = "该幂等键不可用，请更换后重试"
 
 
 class PolicyIn(BaseModel):
@@ -63,7 +66,10 @@ class RunIn(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
     profile_id: str | None = None
     project_id: str | None = None
-    budget: dict[str, int] = Field(default_factory=dict)
+    # Kept loose on purpose: every invalid dimension (unknown key, wrong type,
+    # non-positive value) must surface as ``agent_budget_invalid`` from
+    # ``_clamp_budget`` rather than as a Pydantic ``validation_error``.
+    budget: dict[str, Any] = Field(default_factory=dict)
 
 
 class StepOut(BaseModel):
@@ -181,28 +187,69 @@ def _run_out(run: AgentRun, approval: AgentApproval | None = None) -> RunOut:
     )
 
 
+def _budget_defaults(settings: Settings) -> dict[str, int]:
+    """Defaults for omitted budget dimensions, straight from configuration.
+
+    The runtime reads the same settings when a run's budget is missing a key,
+    so a run created here always carries the identical, complete budget. A
+    configured default above its plan ceiling is clamped: the server never
+    hands out a budget larger than the plan allows.
+    """
+    configured = {
+        "max_steps": settings.agent_max_steps_default,
+        "max_tokens": settings.agent_token_budget_default,
+        "max_tool_calls": settings.agent_max_tool_calls,
+        "max_seconds": settings.agent_max_seconds,
+    }
+    return {
+        key: min(configured[key], BUDGET_CEILINGS[key]) for key in BUDGET_KEYS
+    }
+
+
 def _clamp_budget(
-    raw: dict[str, int] | None, settings: Settings
+    raw: dict[str, Any] | None, settings: Settings
 ) -> dict[str, int]:
     """Validate explicit values, clamp them to ceilings and fill omissions.
 
-    Omitted dimensions use the ceiling as their default so a run always carries
-    a complete budget. Explicit non-positive or non-integer values are rejected
-    rather than silently replaced.
+    Unknown dimensions are rejected (a typo must not silently run with the
+    defaults), explicit non-positive or non-integer values are rejected rather
+    than silently replaced, and omitted dimensions use the operator's settings
+    defaults. The result always lists all four keys in a stable order.
     """
     cleaned: dict[str, int] = {}
     for key, value in (raw or {}).items():
         ceiling = BUDGET_CEILINGS.get(key)
         if ceiling is None:
-            continue
+            raise AppError(
+                "agent_budget_invalid", f"未知预算维度：{key}", 422
+            )
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise AppError(
                 "agent_budget_invalid", f"预算 {key} 必须是正整数", 422
             )
         cleaned[key] = min(value, ceiling)
-    for key, ceiling in BUDGET_CEILINGS.items():
-        cleaned.setdefault(key, ceiling)
-    return cleaned
+    defaults = _budget_defaults(settings)
+    for key in BUDGET_KEYS:
+        cleaned.setdefault(key, defaults[key])
+    return {key: cleaned[key] for key in BUDGET_KEYS}
+
+
+def _stored_budget(raw: dict | None) -> dict[str, int]:
+    """Re-read a persisted budget leniently before clamping it again.
+
+    Retrying an old run must not fail on a row written before a dimension
+    changed: unknown keys and unusable values are dropped, and the missing
+    dimensions fall back to the settings defaults like any other omission.
+    """
+    values = raw if isinstance(raw, dict) else {}
+    return {
+        key: value
+        for key, value in values.items()
+        if key in BUDGET_CEILINGS
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    }
 
 
 async def _ensure_limits(
@@ -293,16 +340,39 @@ async def _context_lines(
 
 
 async def _find_by_key(
-    session: AsyncSession, tenant_id: str, key: str
+    session: AsyncSession, tenant_id: str, user_id: uuid.UUID, key: str
 ) -> AgentRun | None:
+    """Look up the caller's own run for an idempotency key.
+
+    The DB uniqueness is tenant-wide ``(tenant_id, idempotency_key)``, so the
+    lookup is scoped to the caller: a key owned by somebody else must never
+    hand that user's run to this caller.
+    """
     return (
         await session.execute(
             select(AgentRun).where(
                 AgentRun.tenant_id == tenant_id,
+                AgentRun.user_id == user_id,
                 AgentRun.idempotency_key == key,
             )
         )
     ).scalar_one_or_none()
+
+
+async def _key_owned_by_other(
+    session: AsyncSession, tenant_id: str, key: str
+) -> bool:
+    """Whether *any* row in the tenant holds this key (existence only)."""
+    return (
+        await session.execute(
+            select(AgentRun.id)
+            .where(
+                AgentRun.tenant_id == tenant_id,
+                AgentRun.idempotency_key == key,
+            )
+            .limit(1)
+        )
+    ).first() is not None
 
 
 async def _new_run(
@@ -329,24 +399,97 @@ async def _new_run(
     return run
 
 
-async def _enqueue(
-    session: AsyncSession, queue: ArqRedis | None, run: AgentRun
-) -> None:
+async def _enqueue(queue: ArqRedis | None, run: AgentRun) -> None:
+    """Hand the run to the worker, raising ``queue_unavailable`` on failure.
+
+    The caller owns the failure compensation: a create keeps the row as a
+    failure artifact but releases the idempotency key, while an approval
+    decision rolls the consent back so it can be decided again.
+    """
     if queue is None:
-        await fail_run(
-            session, run, "queue_unavailable", "队列不可用，请稍后重试"
+        raise AppError(
+            "queue_unavailable", QUEUE_UNAVAILABLE_MESSAGE, 503
         )
-        raise AppError("queue_unavailable", "队列不可用，请稍后重试", 503)
     try:
         await queue.enqueue_job("run_agent_job", str(run.id))
     except Exception:
         logger.exception("agent enqueue failed run=%s", run.id)
-        await fail_run(
-            session, run, "queue_unavailable", "队列不可用，请稍后重试"
-        )
         raise AppError(
-            "queue_unavailable", "队列不可用，请稍后重试", 503
+            "queue_unavailable", QUEUE_UNAVAILABLE_MESSAGE, 503
         ) from None
+
+
+async def _compensate_approval(
+    session: AsyncSession, approval: AgentApproval, run: AgentRun
+) -> None:
+    """Undo an approval whose enqueue failed, in one transaction.
+
+    The decision commit landed ``approval=approved`` and ``run=queued`` before
+    the worker was reachable. Leaving it there would keep an "approved" consent
+    for a call that never ran while making a re-decide impossible (409), so the
+    pair is rolled back to ``pending`` / ``waiting_approval`` -- but only while
+    each row still holds the value this request wrote, so a concurrent cancel or
+    expiry is never resurrected. Both rows move together or neither does.
+    """
+    run_id, approval_id = run.id, approval.id
+    reset_run = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run_id,
+            AgentRun.tenant_id == run.tenant_id,
+            AgentRun.status == "queued",
+        )
+        .values(
+            status="waiting_approval",
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    reset_approval = await session.execute(
+        update(AgentApproval)
+        .where(
+            AgentApproval.id == approval_id,
+            AgentApproval.tenant_id == approval.tenant_id,
+            AgentApproval.status == "approved",
+        )
+        .values(status="pending", decided_by=None, decided_at=None, note="")
+        .execution_options(synchronize_session=False)
+    )
+    if reset_run.rowcount and reset_approval.rowcount:
+        await session.commit()
+        return
+    await session.rollback()
+    logger.warning(
+        "agent approval compensation skipped (state moved on) run=%s approval=%s",
+        run_id,
+        approval_id,
+    )
+
+
+async def _expire_source_approvals(
+    session: AsyncSession, source: AgentRun
+) -> None:
+    """Close approvals a retried run can never resume.
+
+    A retried source is terminal, so any approval still pending on it would be
+    a decidable consent for a run nobody will continue. It is expired before the
+    retry run is created; the retry itself snapshots policy afresh.
+    """
+    await session.execute(
+        update(AgentApproval)
+        .where(
+            AgentApproval.tenant_id == source.tenant_id,
+            AgentApproval.run_id == source.id,
+            AgentApproval.status == "pending",
+        )
+        .values(
+            status="expired", decided_at=datetime.now(UTC), note="运行已重试"
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
 
 
 @router.get("/policy", response_model=PolicyOut)
@@ -394,17 +537,15 @@ async def create_run(
     key = idempotency_key.strip() if idempotency_key else None
     if idempotency_key is not None and (not key or len(key) > 64):
         raise AppError("invalid_payload", "Idempotency-Key 不合法", 422)
+    # Read once: a rollback (the insert race below) expires the ORM user, and
+    # touching its attributes afterwards would attempt sync IO.
+    tenant_id = user.tenant_id
+    user_id = user.id
     if key:
-        existing = await _find_by_key(session, user.tenant_id, key)
+        existing = await _find_by_key(
+            session, tenant_id, user_id, key
+        )
         if existing is not None:
-            # The unique key is tenant-wide; never hand one user's run to
-            # another user who happens to reuse the same key.
-            if existing.user_id != user.id:
-                raise AppError(
-                    "agent_idempotency_conflict",
-                    "该 Idempotency-Key 已被其他用户使用",
-                    409,
-                )
             return _run_out(existing)
 
     settings = get_settings()
@@ -425,20 +566,36 @@ async def create_run(
             idempotency_key=key,
         )
     except IntegrityError:
-        # A concurrent request with the same key won the insert race.
+        # A concurrent request with the same key won the insert race. Only the
+        # caller's own run may be replayed; a tenant-wide key collision with
+        # somebody else is reported generically, without naming their run.
         await session.rollback()
-        existing = await _find_by_key(session, user.tenant_id, key or "")
-        if existing is None:
-            raise
-        if existing.user_id != user.id:
+        existing = (
+            await _find_by_key(session, tenant_id, user_id, key)
+            if key
+            else None
+        )
+        if existing is not None:
+            return _run_out(existing)
+        if key and await _key_owned_by_other(session, tenant_id, key):
             raise AppError(
                 "agent_idempotency_conflict",
-                "该 Idempotency-Key 已被其他用户使用",
+                IDEMPOTENCY_CONFLICT_MESSAGE,
                 409,
             ) from None
-        return _run_out(existing)
+        raise
 
-    await _enqueue(session, queue, run)
+    try:
+        await _enqueue(queue, run)
+    except AppError:
+        # The row stays as a failure artifact, but the key is released: a
+        # replay must make a fresh attempt instead of replaying a run that
+        # never reached the queue.
+        run.idempotency_key = None
+        await fail_run(
+            session, run, "queue_unavailable", QUEUE_UNAVAILABLE_MESSAGE
+        )
+        raise
     await record_best_effort(
         session,
         tenant_id=user.tenant_id,
@@ -462,18 +619,39 @@ async def list_runs(
     stmt = select(AgentRun).where(AgentRun.tenant_id == user.tenant_id)
     if status:
         stmt = stmt.where(AgentRun.status == status)
+    # ``created_at`` is second-precision on some backends; ``id`` keeps the
+    # order stable (and pagination non-overlapping) for rows created together.
     stmt = (
-        stmt.order_by(AgentRun.created_at.desc())
+        stmt.order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
         .limit(limit)
         .offset(offset)
     )
     rows = (await session.execute(stmt)).scalars().all()
-    return [_run_out(run) for run in rows]
+    approvals: dict[uuid.UUID, AgentApproval] = {}
+    if rows:
+        pending = (
+            await session.execute(
+                select(AgentApproval)
+                .where(
+                    AgentApproval.run_id.in_(
+                        [run.id for run in rows]
+                    ),
+                    AgentApproval.status == "pending",
+                )
+                .order_by(AgentApproval.created_at, AgentApproval.id)
+            )
+        ).scalars().all()
+        for approval in pending:
+            # Earliest pending approval wins when a run somehow has several.
+            approvals.setdefault(approval.run_id, approval)
+    return [_run_out(run, approvals.get(run.id)) for run in rows]
 
 
 @router.get("/runs/{run_id}", response_model=RunDetailOut)
 async def get_run(
     run_id: str,
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> RunDetailOut:
@@ -483,6 +661,8 @@ async def get_run(
             select(AgentStep)
             .where(AgentStep.run_id == run.id)
             .order_by(AgentStep.step_index)
+            .limit(limit)
+            .offset(offset)
         )
     ).scalars().all()
     approval = (
@@ -503,33 +683,46 @@ async def get_run(
 @router.post("/runs/{run_id}/cancel", response_model=RunOut)
 async def cancel_run(
     run_id: str,
-    user: User = Depends(viewer_access),  # noqa: B008
+    user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> RunOut:
     run = await _owned_run(session, run_id, user)
-    if run.status not in ACTIVE_STATUSES:
-        raise AppError(
-            "agent_run_not_cancellable", "运行已结束，无法取消", 409
-        )
-    if user.id != run.user_id and user.role not in {"admin", "owner"}:
+    if user.id != run.user_id:
         raise AppError("forbidden", "只能取消自己发起的运行", 403)
 
     now = datetime.now(UTC)
-    run.status = "cancelled"
-    run.finished_at = now
-    approvals = (
-        await session.execute(
-            select(AgentApproval).where(
-                AgentApproval.run_id == run.id,
-                AgentApproval.status == "pending",
-            )
+    # A conditional update instead of read-then-write: of two concurrent
+    # cancels (or a cancel racing the worker's terminal transition) exactly
+    # one can match an active status, so the run is cancelled at most once.
+    cancelled = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run.id,
+            AgentRun.tenant_id == user.tenant_id,
+            AgentRun.status.in_(ACTIVE_STATUSES),
         )
-    ).scalars().all()
-    for approval in approvals:
-        approval.status = "expired"
-        approval.decided_at = now
-        approval.note = "运行已取消"
+        .values(status="cancelled", finished_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if cancelled.rowcount == 0:
+        await session.rollback()
+        raise AppError(
+            "agent_run_not_cancellable", "运行已结束，无法取消", 409
+        )
+    # Close the run's pending approvals in the same transaction, otherwise a
+    # decidable consent would outlive the run it belonged to.
+    await session.execute(
+        update(AgentApproval)
+        .where(
+            AgentApproval.tenant_id == user.tenant_id,
+            AgentApproval.run_id == run.id,
+            AgentApproval.status == "pending",
+        )
+        .values(status="expired", decided_at=now, note="运行已取消")
+        .execution_options(synchronize_session=False)
+    )
     await session.commit()
+    await session.refresh(run)
     await record_best_effort(
         session,
         tenant_id=user.tenant_id,
@@ -555,13 +748,25 @@ async def retry_run(
         )
     settings = get_settings()
     await _ensure_limits(session, user, settings)
+    # A terminal source can never resume, so its pending approvals are closed
+    # before the retry exists. The retry re-snapshots the tenant's *current*
+    # policy (the brief does not require inheriting the source snapshot): a
+    # tool tightened since the source ran must stay tightened.
+    await _expire_source_approvals(session, source)
     run = await _new_run(
         session,
         user,
         goal=source.goal,
-        budget=_clamp_budget(source.budget, settings),
+        budget=_clamp_budget(_stored_budget(source.budget), settings),
     )
-    await _enqueue(session, queue, run)
+    try:
+        await _enqueue(queue, run)
+    except AppError:
+        # The retry row stays as a failure artifact and can itself be retried.
+        await fail_run(
+            session, run, "queue_unavailable", QUEUE_UNAVAILABLE_MESSAGE
+        )
+        raise
     await record_best_effort(
         session,
         tenant_id=user.tenant_id,
@@ -576,6 +781,8 @@ async def retry_run(
 
 @router.get("/approvals", response_model=list[ApprovalOut])
 async def list_approvals(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(admin_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> list[ApprovalOut]:
@@ -588,7 +795,9 @@ async def list_approvals(
                 AgentApproval.status == "pending",
                 AgentRun.user_id != user.id,
             )
-            .order_by(AgentApproval.created_at)
+            .order_by(AgentApproval.created_at, AgentApproval.id)
+            .limit(limit)
+            .offset(offset)
         )
     ).scalars().all()
     return [_approval_out(row) for row in rows]
@@ -611,5 +820,12 @@ async def decide(
         note=payload.note,
     )
     if payload.decision == "approve":
-        await _enqueue(session, queue, run)
+        try:
+            await _enqueue(queue, run)
+        except AppError:
+            # The consent was committed before the worker could be reached.
+            # Roll it back so the call did not "run" and a re-decide is
+            # possible; a 503 tells the reviewer to retry.
+            await _compensate_approval(session, approval, run)
+            raise
     return _run_out(run)
