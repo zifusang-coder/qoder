@@ -112,6 +112,22 @@ GET  /api/projects/{project_id}/files/preview?path=media/<run_id>/video.mp4
 
 生成请求字段：`topic`（短视频必填）或 `text`（配音必填）、`title`、`platform`、`duration_seconds`（8–180）、`voice`、`voice_name`、`theme`、`rate`、`instructions`。任务失败会记录结构化 `error_code`（如 `llm_rate_limited`、`llm_unavailable`），不会落库半成品。`tts-voiceover` 在 LLM 清洗失败时会降级为直接使用原始口播稿合成，音频元数据标记 `llm_fallback`，前端展示黄色提示。
 
+### AI 助理与 Agent 运行时
+
+- **入口**：前端 `/assistant`；后端 `/api/agent`。editor 及以上可发起任务，viewer 可查看。
+- **运行方式**：`POST /api/agent/runs` 返回 `202` 并入队 arq 的 `run_agent_job`；运行状态为 `queued → running → succeeded / failed / cancelled`，命中审批时为 `waiting_approval`。
+- **预算**：请求可传 `max_steps` / `max_tokens` / `max_tool_calls` / `max_seconds`，服务端分别夹紧到 30 / 200000 / 40 / 900；默认值见 `.env.example`。
+- **工具**：只读工具与低风险写工具默认可自动执行；`publish.create_draft_job` 只创建 `status=draft`、`scheduled_at=None` 的任务，不触发真实发布；本期不注册任何高风险工具。
+- **审批**：租户可把任意工具收紧为 `confirm` 或 `deny`（`PUT /api/agent/policy`），不能把默认确认的工具放宽。命中 `confirm` 时运行挂起，由发起人之外的管理员在 `/assistant` 或 `POST /api/agent/approvals/{id}/decide` 处理；超过 `AGENT_APPROVAL_TTL_HOURS` 自动过期并使运行失败。
+- **恢复**：worker 每分钟对账心跳超时的运行，未超过 2 次尝试则重新入队；步骤与写工具以 `(run_id, step_index)` 幂等，重启不产生重复产物。
+- **配额**：同一用户最多 2 个活跃运行；租户当日 token 超过 `AGENT_DAILY_TOKEN_QUOTA` 返回 `429 agent_daily_quota_exceeded`；队列不可用返回 `503 queue_unavailable`。
+
+真实模型验收（需要已配置 LLM 提供商）：
+
+```bash
+cd backend && RUN_AGENT_E2E=1 uv run pytest tests/test_agent_e2e.py -q
+```
+
 ### 发布边界
 
 - 发布账号：9 个平台、同平台多账号、按平台动态凭据表单；凭据加密且只返回掩码。
@@ -132,6 +148,8 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 ```
 
 首次运行前安装依赖：`make setup`（后端）与 `npm --prefix web install`（前端）。只有本地联调与人工验收需要 `make up` 启动 PostgreSQL 和 Redis。
+
+Agent 真实模型用例默认跳过，设置 `RUN_AGENT_E2E=1` 才会执行。
 
 ## Phase 2 工程基础
 
