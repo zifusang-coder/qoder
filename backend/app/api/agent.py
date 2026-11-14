@@ -38,12 +38,6 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 ACTIVE_STATUSES = ("queued", "running", "waiting_approval")
 RETRYABLE_STATUSES = ("failed", "cancelled")
 ACTIVE_RUNS_PER_USER = 2
-BUDGET_CEILINGS = {
-    "max_steps": 30,
-    "max_tokens": 200_000,
-    "max_tool_calls": 40,
-    "max_seconds": 900,
-}
 BUDGET_KEYS = ("max_steps", "max_tokens", "max_tool_calls", "max_seconds")
 QUEUE_UNAVAILABLE_MESSAGE = "队列不可用，请稍后重试"
 IDEMPOTENCY_CONFLICT_MESSAGE = "该幂等键不可用，请更换后重试"
@@ -187,6 +181,21 @@ def _run_out(run: AgentRun, approval: AgentApproval | None = None) -> RunOut:
     )
 
 
+def _ceilings(settings: Settings) -> dict[str, int]:
+    """Upper bound per budget dimension, in ``BUDGET_KEYS`` order.
+
+    ``max_steps`` is the one ceiling an operator can move: it bounds a single
+    run's tool loop and comes from ``AGENT_MAX_STEPS_CEILING``. The other three
+    are plan constants, so no environment change can widen them.
+    """
+    return {
+        "max_steps": settings.agent_max_steps_ceiling,
+        "max_tokens": 200_000,
+        "max_tool_calls": 40,
+        "max_seconds": 900,
+    }
+
+
 def _budget_defaults(settings: Settings) -> dict[str, int]:
     """Defaults for omitted budget dimensions, straight from configuration.
 
@@ -201,9 +210,8 @@ def _budget_defaults(settings: Settings) -> dict[str, int]:
         "max_tool_calls": settings.agent_max_tool_calls,
         "max_seconds": settings.agent_max_seconds,
     }
-    return {
-        key: min(configured[key], BUDGET_CEILINGS[key]) for key in BUDGET_KEYS
-    }
+    ceilings = _ceilings(settings)
+    return {key: min(configured[key], ceilings[key]) for key in BUDGET_KEYS}
 
 
 def _clamp_budget(
@@ -217,8 +225,9 @@ def _clamp_budget(
     defaults. The result always lists all four keys in a stable order.
     """
     cleaned: dict[str, int] = {}
+    ceilings = _ceilings(settings)
     for key, value in (raw or {}).items():
-        ceiling = BUDGET_CEILINGS.get(key)
+        ceiling = ceilings.get(key)
         if ceiling is None:
             raise AppError(
                 "agent_budget_invalid", f"未知预算维度：{key}", 422
@@ -245,7 +254,7 @@ def _stored_budget(raw: dict | None) -> dict[str, int]:
     return {
         key: value
         for key, value in values.items()
-        if key in BUDGET_CEILINGS
+        if key in BUDGET_KEYS
         and isinstance(value, int)
         and not isinstance(value, bool)
         and value > 0

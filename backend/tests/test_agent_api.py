@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
 from app.api import agent as agent_api
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
@@ -764,6 +764,20 @@ async def test_budget_defaults_come_from_settings(api, queue, db_session):
     assert resp.json()["budget"] == expected
     run = await db_session.get(AgentRun, uuid.UUID(resp.json()["id"]))
     assert run.budget == expected
+
+
+def test_step_ceiling_comes_from_settings():
+    """``AGENT_MAX_STEPS_CEILING`` bounds both explicit and defaulted steps."""
+    settings = Settings(agent_max_steps_ceiling=5)
+
+    explicit = agent_api._clamp_budget({"max_steps": 20}, settings)
+    assert explicit["max_steps"] == 5
+    assert list(explicit) == list(agent_api.BUDGET_KEYS)
+
+    defaulted = agent_api._clamp_budget({}, settings)
+    # The configured default (12) is itself above the lowered ceiling.
+    assert defaulted["max_steps"] == 5
+    assert defaulted["max_tokens"] == settings.agent_token_budget_default
 
 
 async def test_idempotency_conflict_across_users_is_generic(
