@@ -1,5 +1,6 @@
 import re
 from collections.abc import Iterable
+from functools import lru_cache
 
 import jsonschema
 
@@ -94,3 +95,8 @@ def build_registry() -> ToolRegistry:
     ):
         registry.register_all(module.SPECS)
     return registry
+
+
+@lru_cache
+def get_tool_registry() -> ToolRegistry:
+    return build_registry()
