@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.errors import AppError
 from app.llm.tools import ToolCall, ToolTurn
 from app.llm.types import Usage
-from app.models.agent import AgentRun, AgentStep
+from app.models.agent import AgentApproval, AgentRun, AgentStep
 from app.skills.registry import SkillRegistry
 from app.storage import get_storage
 
@@ -475,7 +475,7 @@ async def test_prefixed_policy_override_is_honored(db_session):
 
 
 async def test_high_risk_policy_cannot_be_loosened(db_session):
-    """快照里的宽松动作会被 resolve_policy 收敛回风险默认值。"""
+    """快照里的宽松动作会被 resolve_policy 收敛回 confirm，运行挂起等审批。"""
 
     async def handler(ctx, args):
         raise AssertionError("高风险工具未获批不应执行")
@@ -489,9 +489,18 @@ async def test_high_risk_policy_cannot_be_loosened(db_session):
     )
     await db_session.refresh(run)
     steps = await steps_of(db_session, run)
+    approval = (
+        await db_session.execute(
+            select(AgentApproval).where(AgentApproval.run_id == run.id)
+        )
+    ).scalars().one()
 
-    assert steps[1].status == "denied"
-    assert "需要人工确认" in steps[1].error
+    assert run.status == "waiting_approval"
+    assert steps[1].kind == "approval"
+    assert steps[1].status == "skipped"
+    assert approval.status == "pending"
+    assert approval.tool_name == "demo.write"
+    assert approval.risk == "high"
 
 
 async def test_tool_secrets_never_reach_history(db_session):
