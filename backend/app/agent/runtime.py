@@ -55,6 +55,7 @@ PAUSED_OBSERVATION = "因等待人工确认，本轮剩余工具未执行"
 RUN_NOT_RUNNING_OBSERVATION = "本次未执行：运行状态已变化"
 APPROVAL_MISSING_OBSERVATION = "审批任务已丢失，请重新发起"
 APPROVAL_DENIED_OBSERVATION = "该操作未获批准，未执行"
+APPROVAL_ARGUMENTS_MISSING = "审批参数不可用，请重试"
 APPROVAL_REJECTED = "审批已驳回"
 APPROVAL_EXPIRED = "审批已过期，运行已结束"
 BUDGET_ERROR = "agent_budget_exhausted"
@@ -860,9 +861,13 @@ async def _pause_for_approval(
         pending_call={
             "call_id": call.id,
             "name": call.name,
-            # Store the same scrubbed arguments as ``step.input`` and the
-            # approval payload: a resume must never replay a raw secret.
+            # Display copy: the same scrubbed arguments as ``step.input`` and
+            # the approval payload. Never replayed as-is.
             "arguments": json.dumps(scrub(args), ensure_ascii=False),
+            # Execution copy: the model's original arguments. Scrubbing truncates
+            # long strings and drops sensitive-looking keys, so a resumed call
+            # must be rebuilt from this, not from the preview above.
+            "raw_arguments": call.arguments,
             "step_index": step.step_index,
         },
     )
@@ -934,6 +939,59 @@ async def _answer_pending_decision(
     await _persist(session, run, items, pending_call=None)
 
 
+def _raw_pending_arguments(items: list[dict], call_id: str) -> str:
+    """Recover the original arguments of a paused call from the transcript.
+
+    Pending rows written before ``raw_arguments`` existed only stored the
+    scrubbed display copy, which is unsafe to execute: strings are truncated and
+    sensitive-looking keys are dropped. The assistant turn still holds the
+    model's own JSON, so that is the only acceptable source.
+    """
+    for item in reversed(items):
+        if item.get("role") != "assistant":
+            continue
+        for call in item.get("tool_calls") or []:
+            if not isinstance(call, dict) or str(call.get("id") or "") != call_id:
+                continue
+            function = call.get("function")
+            arguments = (
+                function.get("arguments") if isinstance(function, dict) else None
+            )
+            if isinstance(arguments, str) and arguments.strip():
+                return arguments
+    return ""
+
+
+async def _fail_unusable_pending(
+    session: AsyncSession,
+    run: AgentRun,
+    items: list[dict],
+    step: AgentStep,
+    *,
+    name: str,
+    call_id: str,
+) -> None:
+    """Fail a run whose approved call can no longer be replayed faithfully.
+
+    Executing the scrubbed preview would silently write a truncated payload, so
+    the pending call is answered with an error instead, the step is closed and
+    the run is failed. The pause is cleared so nothing retries it by accident.
+    """
+    step.status = "denied"
+    step.error = APPROVAL_ARGUMENTS_MISSING
+    step.finished_at = _now()
+    step.duration_ms = _elapsed_since(step.started_at)
+    _place_tool_reply(
+        items,
+        call_id,
+        wrap_observation(
+            name, APPROVAL_ARGUMENTS_MISSING, {"error": APPROVAL_ARGUMENTS_MISSING}
+        ),
+    )
+    await _persist(session, run, items, pending_call=None)
+    await fail_run(session, run, INTERNAL_ERROR, APPROVAL_ARGUMENTS_MISSING)
+
+
 async def _resume_pending(
     session: AsyncSession,
     run: AgentRun,
@@ -954,16 +1012,22 @@ async def _resume_pending(
     never be executed twice by a retried pause. Dispatch re-resolves the tool's
     policy first: an approval only redeems the ``confirm`` that caused the
     pause, so a tool denied since then is answered as denied, not executed.
+
+    The call is rebuilt from ``raw_arguments`` (the model's original JSON), never
+    from the scrubbed ``arguments`` preview the approver saw: scrubbing truncates
+    long strings and drops sensitive-looking keys, so replaying it would execute
+    a different call than the one that was approved.
     """
     pending = _pending_call(run)
     if pending is None:
         return False, []
     call_id = str(pending.get("call_id") or "")
-    call = ToolCall(
-        id=call_id,
-        name=str(pending.get("name") or ""),
-        arguments=str(pending.get("arguments") or "{}"),
-    )
+    name = str(pending.get("name") or "")
+    raw_arguments = pending.get("raw_arguments")
+    if not isinstance(raw_arguments, str) or not raw_arguments.strip():
+        # Legacy pause rows predate ``raw_arguments``; the transcript is the
+        # only remaining source of the original call.
+        raw_arguments = _raw_pending_arguments(items, call_id)
     step = (
         await session.execute(
             select(AgentStep).where(
@@ -977,11 +1041,17 @@ async def _resume_pending(
             items,
             call_id,
             wrap_observation(
-                call.name, APPROVAL_MISSING_OBSERVATION, {"missing": True}
+                name, APPROVAL_MISSING_OBSERVATION, {"missing": True}
             ),
         )
         await _persist(session, run, items, pending_call=None)
         return True, []
+    if not raw_arguments:
+        await _fail_unusable_pending(
+            session, run, items, step, name=name, call_id=call_id
+        )
+        return True, []
+    call = ToolCall(id=call_id, name=name, arguments=raw_arguments)
 
     if step.status == "ok":
         output = step.output if isinstance(step.output, dict) else {}
@@ -1156,9 +1226,10 @@ async def decide_approval(
     Approving re-queues the run with a conditional update: only a run still in
     ``waiting_approval`` becomes ``queued``, so a concurrent cancel or expiry is
     never overwritten and the wait is billed to ``paused_ms`` exactly once.
-    Rejecting fails the run with ``approval_rejected``. Both paths write the tool
-    reply the paused call owed, so the transcript never keeps an assistant tool
-    turn with an unanswered id.
+    Rejecting fails the run with ``approval_rejected`` under the same kind of
+    conditional update, so a run already cancelled or expired stays terminal.
+    Both paths write the tool reply the paused call owed, so the transcript never
+    keeps an assistant tool turn with an unanswered id.
     """
     if approval.tenant_id != actor.tenant_id:
         raise AppError("agent_run_not_found", "审批不存在", 404)
@@ -1253,10 +1324,36 @@ async def decide_approval(
         raise AppError(
             "agent_approval_not_pending", "该审批已处理或已过期", 409
         )
-    run.status = "failed"
-    run.error_code = "approval_rejected"
-    run.error_message = APPROVAL_REJECTED
-    run.finished_at = now
+    # Same compare-and-set the approve branch uses: only a run still waiting for
+    # this decision becomes failed. A concurrent cancel (or expiry) keeps its
+    # terminal status; the approval decision itself stands on its own CAS.
+    rejected = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run.id,
+            AgentRun.tenant_id == run.tenant_id,
+            AgentRun.status == "waiting_approval",
+        )
+        .values(
+            status="failed",
+            error_code="approval_rejected",
+            error_message=APPROVAL_REJECTED,
+            finished_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if rejected.rowcount == 0:
+        await session.commit()
+        await session.refresh(run)
+        await _audit(
+            session,
+            run,
+            "agent.approval.reject",
+            status="failure",
+            detail={"tool": approval.tool_name},
+        )
+        return run
+    await session.refresh(run)
     await _fail_pending_step(session, approval, APPROVAL_REJECTED)
     await _answer_pending_decision(
         session, run, summary=APPROVAL_REJECTED, data={"rejected": True}
@@ -1490,6 +1587,10 @@ async def _run_loop(
         if run.status == "cancelled":
             run.finished_at = run.finished_at or _now()
             await session.commit()
+            return
+        if run.status != "running":
+            # The resume closed the run itself (e.g. an approved call whose
+            # original arguments are gone); it must not start another model turn.
             return
 
         message = _budget_stop(run, budget)

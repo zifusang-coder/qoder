@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from app.agent.contracts import ToolResult, ToolSpec
-from app.agent.registry import ToolRegistry
+from app.agent.registry import ToolRegistry, build_registry
 from app.agent.runtime import (
     INTERRUPTED_OBSERVATION,
     _pause_for_approval,
@@ -19,6 +19,7 @@ from app.errors import AppError
 from app.llm.tools import ToolCall, ToolTurn
 from app.llm.types import Usage
 from app.models.agent import AgentApproval, AgentPolicy, AgentRun, AgentStep
+from app.models.project import Content, ContentVersion, Project
 from app.models.user import User
 from app.skills.registry import SkillRegistry
 from app.storage import get_storage
@@ -221,6 +222,7 @@ async def test_confirm_tool_pauses_and_skips_remaining_calls(db_session):
         "call_id": "c1",
         "name": "demo.high",
         "arguments": json.dumps({"text": "x"}),
+        "raw_arguments": json.dumps({"text": "x"}),
         "step_index": 2,
     }
     tool_messages = [
@@ -785,3 +787,186 @@ async def test_pending_arguments_are_scrubbed(db_session):
     assert json.loads(pending["arguments"]) == steps[1].input
     assert approval.payload == {"text": "[已脱敏]"}
     assert "sk-secret1234" not in pending["arguments"]
+    # 执行副本单独保存原始参数：脱敏只用于展示与审批预览。
+    assert json.loads(pending["raw_arguments"]) == {"text": "sk-secret1234"}
+
+
+async def seed_content(db_session, *, tenant_id: str = TENANT_A) -> Content:
+    project = Project(tenant_id=tenant_id, title="项目", topic="效率")
+    db_session.add(project)
+    await db_session.flush()
+    content = Content(
+        tenant_id=tenant_id,
+        project_id=project.id,
+        platform="wechat",
+        kind="article",
+        title="旧标题",
+        current_version=1,
+    )
+    db_session.add(content)
+    await db_session.flush()
+    db_session.add(
+        ContentVersion(
+            tenant_id=tenant_id,
+            content_id=content.id,
+            version=1,
+            title="旧标题",
+            body="原始正文",
+        )
+    )
+    await db_session.commit()
+    return content
+
+
+def long_body() -> str:
+    """超过 2000 字符且含 Bearer 令牌：脱敏会截断并替换，原始参数不会。"""
+    return "开头。Bearer eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2ln\n" + "长正文。" * 600
+
+
+async def confirm_content_run(db_session, *, creator, body: str):
+    """把 content.create_version 收紧为 confirm 并挂起一次带长正文的调用。"""
+    db_session.add(
+        AgentPolicy(
+            tenant_id=TENANT_A,
+            overrides={"tool:content.create_version": "confirm"},
+        )
+    )
+    await db_session.commit()
+    content = await seed_content(db_session)
+    args = {"content_id": str(content.id), "title": "新标题", "body": body}
+    specs = build_registry().all()
+    run = await new_run(
+        db_session,
+        user_id=creator.id,
+        policy={"content.create_version": "confirm"},
+    )
+    turns = [turn("", [("c1", "content.create_version", args)])]
+    await run_agent(db_session, run, **deps(turns, specs))
+    await db_session.refresh(run)
+    approval = (
+        await db_session.execute(
+            select(AgentApproval).where(AgentApproval.run_id == run.id)
+        )
+    ).scalars().one()
+    return run, approval, content, specs
+
+
+def drop_raw_arguments(run) -> None:
+    """模拟修复前写入的挂起行：只有脱敏副本，没有 raw_arguments。"""
+    messages = dict(run.messages)
+    pending = dict(messages["pending_call"])
+    pending.pop("raw_arguments", None)
+    messages["pending_call"] = pending
+    run.messages = messages
+
+
+async def test_approved_call_executes_the_original_arguments(db_session):
+    creator = await make_user(db_session, role="editor")
+    body = long_body()
+    assert len(body) > 2000
+    run, approval, content, specs = await confirm_content_run(
+        db_session, creator=creator, body=body
+    )
+
+    assert run.status == "waiting_approval"
+    # 审批人看到的仍是脱敏预览：正文被截断，令牌被替换，原始长文不可见。
+    preview = approval.payload["body"]
+    assert preview != body
+    assert len(preview) <= 2000
+    assert "eyJ" not in preview
+    assert body not in json.dumps(approval.payload, ensure_ascii=False)
+
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+    await run_agent(db_session, run, **deps([turn("已完成")], specs))
+    await db_session.refresh(run)
+
+    assert run.status == "succeeded"
+    version = (
+        await db_session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == content.id,
+                ContentVersion.version == 2,
+            )
+        )
+    ).scalar_one()
+    # 批准后执行的是模型原始参数，逐字节一致。
+    assert version.body == body
+    assert run.result["artifacts"] == [
+        {
+            "type": "content",
+            "id": str(content.id),
+            "title": "新标题",
+            "version_id": str(version.id),
+            "version": 2,
+        }
+    ]
+
+
+async def test_legacy_pending_row_recovers_the_original_arguments(db_session):
+    creator = await make_user(db_session, role="editor")
+    body = long_body()
+    run, approval, content, specs = await confirm_content_run(
+        db_session, creator=creator, body=body
+    )
+    drop_raw_arguments(run)
+    await db_session.commit()
+
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+    await run_agent(db_session, run, **deps([turn("已完成")], specs))
+    await db_session.refresh(run)
+
+    assert run.status == "succeeded"
+    version = (
+        await db_session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == content.id,
+                ContentVersion.version == 2,
+            )
+        )
+    ).scalar_one()
+    # 历史挂起行从转写里的 assistant 消息恢复原始参数，而不是续跑脱敏副本。
+    assert version.body == body
+
+
+async def test_unusable_pending_arguments_fail_the_run(db_session):
+    creator = await make_user(db_session, role="editor")
+    run, approval, _content, specs = await confirm_content_run(
+        db_session, creator=creator, body=long_body()
+    )
+    drop_raw_arguments(run)
+    # 转写里也没有原始参数了（例如历史已被压缩），不能拿脱敏副本执行。
+    items = [dict(item) for item in run.messages["items"]]
+    for item in items:
+        if item.get("role") != "assistant":
+            continue
+        item["tool_calls"] = [
+            {**call, "function": {**call["function"], "arguments": ""}}
+            for call in item.get("tool_calls") or []
+        ]
+    messages = dict(run.messages)
+    messages["items"] = items
+    run.messages = messages
+    await db_session.commit()
+
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+    environment = deps([turn("不应被调用")], specs)
+    await run_agent(db_session, run, **environment)
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert environment["gateway"].calls == []
+    assert run.status == "failed"
+    assert run.error_code == "agent_internal_error"
+    assert steps[1].status == "denied"
+    assert "审批参数不可用" in steps[1].error
+    assert "pending_call" not in run.messages
+    assert_round_answered(run)
+    tool_messages = [
+        item for item in run.messages["items"] if item["role"] == "tool"
+    ]
+    assert "审批参数不可用" in tool_messages[0]["content"]
+    versions = (await db_session.execute(select(ContentVersion))).scalars().all()
+    assert [row.version for row in versions] == [1]
