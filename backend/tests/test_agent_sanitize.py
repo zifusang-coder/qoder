@@ -1,11 +1,14 @@
 import json
 
 from app.agent.sanitize import (
+    COMPRESSED_PREFIX,
     MAX_DATA_BYTES,
     MAX_MESSAGES_BYTES,
     OBSERVATION_PREFIX,
+    REDACTED,
     compact_messages,
     fit_bytes,
+    redact_secrets,
     scrub,
     wrap_observation,
 )
@@ -52,6 +55,31 @@ def test_scrub_drops_sensitive_keys_recursively():
 def test_scrub_caps_long_strings():
     cleaned = scrub({"body": "x" * 5000})
     assert len(cleaned["body"]) == 2000
+
+
+def test_redact_secrets_scrubs_api_key_inside_prose():
+    text = redact_secrets("Incorrect API key provided: sk-abc123")
+    assert "sk-abc123" not in text
+    assert REDACTED in text
+    assert text.startswith("Incorrect API key provided:")
+
+
+def test_redact_secrets_scrubs_bearer_token():
+    text = redact_secrets("Authorization: Bearer abc")
+    assert "abc" not in text
+    assert "Bearer" in text
+    assert REDACTED in text
+
+
+def test_redact_secrets_keeps_normal_chinese_prose():
+    text = "运行发生内部错误，请稍后重试"
+    assert redact_secrets(text) == text
+
+
+def test_scrub_redacts_secret_values_too():
+    cleaned = scrub({"error": "Incorrect API key provided: sk-abc123"})
+    assert "sk-abc123" not in cleaned["error"]
+    assert REDACTED in cleaned["error"]
 
 
 def test_fit_bytes_truncates_list_and_reports_flag():
@@ -104,6 +132,40 @@ def test_compact_messages_keeps_recent_observations_full():
     assert tool_items[0]["content"].startswith("[已压缩]")
     assert len(tool_items[0]["content"]) <= 220
     assert stored[0] == {"role": "system", "content": "sys"}
+
+
+def test_compact_messages_is_idempotent_across_repeated_persists():
+    items = [{"role": "system", "content": "sys"}]
+    for index in range(12):
+        items.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"c{index}",
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        items.append(
+            {"role": "tool", "tool_call_id": f"c{index}", "content": f"obs-{index}-" + "y" * 300}
+        )
+
+    once = compact_messages(items)["items"]
+    for _ in range(4):
+        again = compact_messages(once)["items"]
+        assert again == once
+
+    contents = [
+        item["content"] for item in once if item.get("role") == "tool"
+    ]
+    compressed = [content for content in contents if content.startswith(COMPRESSED_PREFIX)]
+    assert compressed
+    assert all(COMPRESSED_PREFIX * 2 not in content for content in contents)
+    assert all(len(content) <= len(COMPRESSED_PREFIX) + 200 for content in compressed)
 
 
 def test_compact_messages_enforces_size_limit():
@@ -216,7 +278,7 @@ def test_compact_messages_caps_assistant_with_large_tool_calls():
     assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
 
 
-def test_compact_messages_stubs_history_when_structure_alone_is_oversized():
+def test_compact_messages_stubs_history_but_keeps_final_tool_turn():
     calls = [
         {
             "id": f"c{index:05d}" + "i" * 40,
@@ -231,8 +293,44 @@ def test_compact_messages_stubs_history_when_structure_alone_is_oversized():
     packed = compact_messages(items)
 
     stored = packed["items"]
-    assert stored == [{"role": "user", "content": "[对话历史过长，已截断]"}]
     assert packed["truncated"] is True
+    assert stored[0] == {"role": "user", "content": "[对话历史过长，已截断]"}
+    assistant = stored[1]
+    assert assistant["role"] == "assistant"
+    assert [call["id"] for call in assistant["tool_calls"]] == [
+        call["id"] for call in calls[:4]
+    ]
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
+
+
+def test_compact_messages_stub_keeps_pending_tool_call_and_reply():
+    calls = [
+        {
+            "id": f"c{index:06d}" + "i" * 280,
+            "type": "function",
+            "function": {"name": "x", "arguments": "{}"},
+        }
+        for index in range(600)
+    ]
+    items = [
+        {"role": "user", "content": "继续"},
+        {"role": "assistant", "content": "", "tool_calls": calls},
+        {"role": "tool", "tool_call_id": calls[0]["id"], "content": "ok"},
+    ]
+    assert len(json.dumps(items, ensure_ascii=False).encode()) > MAX_MESSAGES_BYTES
+
+    packed = compact_messages(items)
+
+    stored = packed["items"]
+    assert packed["truncated"] is True
+    assert stored, "compaction must never return an empty message list"
+    assert _orphan_tool_replies(stored) == []
+    assistants = [item for item in stored if item["role"] == "assistant"]
+    assert len(assistants) == 1
+    kept_ids = {call["id"] for call in assistants[0]["tool_calls"]}
+    assert calls[0]["id"] in kept_ids
+    replies = [item for item in stored if item["role"] == "tool"]
+    assert replies and all(item["tool_call_id"] in kept_ids for item in replies)
     assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
 
 

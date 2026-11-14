@@ -11,7 +11,6 @@ import contextlib
 import hashlib
 import json
 import logging
-import re
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -26,14 +25,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.contracts import ToolContext, ToolSpec
 from app.agent.policy import TOOL_PREFIX, resolve_policy
 from app.agent.registry import ToolRegistry
-from app.agent.sanitize import compact_messages, fit_bytes, scrub, wrap_observation
+from app.agent.sanitize import (
+    compact_messages,
+    fit_bytes,
+    redact_secrets,
+    scrub,
+    wrap_observation,
+)
 from app.config import Settings
 from app.errors import AppError
 from app.llm.gateway import LLMGateway
 from app.llm.tools import ToolCall
 from app.models.agent import AgentRun, AgentStep
 from app.models.user import User
-from app.services.audit import is_sensitive_key, record_best_effort
+from app.services.audit import record_best_effort
 from app.skills.registry import SkillRegistry
 from app.storage import StorageBackend
 
@@ -87,23 +92,19 @@ class _BudgetStop(Exception):
         self.observation = observation
 
 
-_SENSITIVE_PAIR = re.compile(
-    r"(?i)(?P<key>[A-Za-z0-9_.-]{1,64})(?P<sep>\s*[:=]\s*)"
-    r"(?P<value>\"[^\"]*\"|'[^']*'|[^\s,;{}\[\]]+)"
-)
+class _HandlerTimeout(Exception):
+    """Signal: the handler raised its own ``TimeoutError`` (e.g. socket timeout).
 
-
-def _redact_sensitive_pair(match: re.Match) -> str:
-    if is_sensitive_key(match.group("key")):
-        return f"{match.group('key')}{match.group('sep')}***"
-    return match.group(0)
+    ``asyncio.wait_for`` raises the same builtin exception when its own deadline
+    fires, so the handler is wrapped to keep the two cases distinguishable.
+    """
 
 
 def _scrub_text(text: str, limit: int = 1000) -> str:
-    """Scrub free text (including ``api_key=value`` style pairs) before persisting."""
+    """Scrub free text (including value-shaped secrets) before persisting."""
     cleaned = scrub({"message": str(text)})
     value = cleaned.get("message", "") if isinstance(cleaned, dict) else ""
-    return _SENSITIVE_PAIR.sub(_redact_sensitive_pair, str(value))[:limit]
+    return redact_secrets(str(value))[:limit]
 
 
 def _canonical_arguments(arguments: str) -> str:
@@ -604,12 +605,25 @@ async def _execute_tool(
             session, run, call, step, TIME_BUDGET_MESSAGE, code=BUDGET_ERROR
         )
         raise _BudgetStop(observation)
+    # Only a ``wait_for`` deadline that equals the remaining budget means the
+    # wall clock ran out; a shorter configured timeout is the handler's own.
+    budget_limited = remaining_seconds <= spec.timeout_seconds
     timeout_seconds = min(spec.timeout_seconds, remaining_seconds)
-    budget_limited = timeout_seconds < spec.timeout_seconds
+
+    async def invoke() -> Any:
+        try:
+            return await spec.handler(ctx, args)
+        except TimeoutError as exc:
+            # A handler's own TimeoutError (socket, client library) must not be
+            # mistaken for the budget expiring while wall-clock time remains.
+            raise _HandlerTimeout from exc
+
     try:
-        result = await asyncio.wait_for(
-            spec.handler(ctx, args), timeout=timeout_seconds
-        )
+        result = await asyncio.wait_for(invoke(), timeout=timeout_seconds)
+    except _HandlerTimeout:
+        return await _fail_tool(
+            session, run, call, step, "工具执行超时"
+        ), []
     except TimeoutError:
         if budget_limited:
             observation = await _fail_tool(
@@ -693,6 +707,20 @@ async def _fail_internal(session: AsyncSession, run: AgentRun) -> None:
         await session.refresh(run)
         if run.status not in {"queued", "running"}:
             return
+        # A crash outside the tool try/except can leave a step ``running``
+        # forever; give it the same interrupted treatment as crash recovery.
+        running = (
+            await session.execute(
+                select(AgentStep).where(
+                    AgentStep.run_id == run.id, AgentStep.status == "running"
+                )
+            )
+        ).scalars().all()
+        for step in running:
+            step.status = "interrupted"
+            step.error = INTERRUPTED_OBSERVATION
+            step.finished_at = _now()
+            step.duration_ms = _elapsed_since(step.started_at)
         await fail_run(session, run, INTERNAL_ERROR, INTERNAL_MESSAGE)
     except Exception:
         logger.exception("agent failed to mark run failed run=%s", run.id)

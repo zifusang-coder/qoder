@@ -7,8 +7,13 @@ from sqlalchemy import select
 
 from app.agent.contracts import ToolResult, ToolSpec
 from app.agent.registry import ToolRegistry
-from app.agent.runtime import INTERRUPTED_OBSERVATION, SYSTEM_PROMPT, run_agent
-from app.agent.sanitize import MAX_MESSAGES_BYTES
+from app.agent.runtime import (
+    INTERRUPTED_OBSERVATION,
+    SYSTEM_PROMPT,
+    _persist,
+    run_agent,
+)
+from app.agent.sanitize import COMPRESSED_PREFIX, MAX_MESSAGES_BYTES
 from app.config import get_settings
 from app.errors import AppError
 from app.llm.tools import ToolCall, ToolTurn
@@ -568,6 +573,24 @@ async def test_tool_exception_message_is_scrubbed(db_session):
     assert "sk-secret" not in tool_messages[0]["content"]
 
 
+async def test_inline_api_key_in_error_is_redacted(db_session):
+    async def handler(ctx, args):
+        raise RuntimeError("Incorrect API key provided: sk-abc123")
+
+    turns = [turn("", [("c1", "demo.read", {})]), turn("工具失败。")]
+    run = await new_run(db_session)
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert steps[1].status == "error"
+    assert "sk-abc123" not in steps[1].error
+    assert "[已脱敏]" in steps[1].error
+    assert "Incorrect API key provided:" in steps[1].error
+    tool_messages = [item for item in run.messages["items"] if item["role"] == "tool"]
+    assert "sk-abc123" not in tool_messages[0]["content"]
+
+
 async def test_long_call_id_is_truncated_consistently(db_session):
     async def handler(ctx, args):
         return ToolResult(summary="ok")
@@ -710,6 +733,31 @@ async def test_per_tool_timeout_is_reported(db_session):
     assert run.status == "succeeded"
 
 
+async def test_handler_timeout_error_before_budget_keeps_the_loop_going(db_session):
+    """handler 自己抛 TimeoutError（如 socket 超时）不等于墙钟预算耗尽。"""
+
+    async def handler(ctx, args):
+        raise TimeoutError("socket timed out")
+
+    turns = [turn("", [("c1", "demo.read", {"text": "a"})]), turn("超时了，已继续。")]
+    deps_map = deps(turns, [tool("demo.read", handler, timeout=60.0)])
+    # 剩余预算小于 handler 配置的超时，走 wait_for 预算裁剪分支。
+    run = await new_run(db_session, budget={**BUDGET, "max_seconds": 10})
+    run.started_at = datetime.now(UTC) - timedelta(seconds=9.5)
+    await db_session.commit()
+
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert run.status == "succeeded"
+    assert len(deps_map["gateway"].calls) == 2
+    assert steps[1].status == "error"
+    assert "工具执行超时" in steps[1].error
+    assert "运行时间预算已用尽" not in steps[1].error
+    assert run.usage["tool_calls"] == 1
+
+
 async def test_artifacts_survive_recovery_once(db_session):
     artifact = {"type": "profile", "id": "p1", "title": "画像"}
     run = await new_run(
@@ -816,6 +864,47 @@ async def test_long_history_is_compacted_in_loop(db_session):
     assert len(compacted) == len(run.messages["items"]) - 1
 
 
+async def test_repeated_persist_does_not_stack_compressed_prefixes(db_session):
+    items = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": "写一篇新文章并创建草稿"},
+    ]
+    for index in range(30):
+        items.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"h{index}",
+                        "type": "function",
+                        "function": {"name": "demo.read", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        items.append(
+            {"role": "tool", "tool_call_id": f"h{index}", "content": "x" * 12_000}
+        )
+    run = await new_run(db_session)
+    live = json.loads(json.dumps(items))
+
+    await _persist(db_session, run, live)
+    first = json.loads(json.dumps(run.messages))
+    for _ in range(4):
+        await _persist(db_session, run, live)
+
+    assert run.messages == first
+    contents = [
+        str(item.get("content") or "")
+        for item in run.messages["items"]
+        if item["role"] == "tool"
+    ]
+    assert all(not content.startswith(COMPRESSED_PREFIX * 2) for content in contents)
+    assert any(content.startswith(COMPRESSED_PREFIX) for content in contents)
+    assert body_size(run.messages) <= MAX_MESSAGES_BYTES
+
+
 async def test_loop_detection_ignores_argument_key_order(db_session):
     calls = []
 
@@ -878,3 +967,33 @@ async def test_gateway_crash_marks_run_failed(db_session):
     assert run.finished_at is not None
     assert steps[0].status == "error"
     assert steps[0].error == "LLM 调用失败"
+
+
+async def test_internal_failure_interrupts_running_steps(db_session):
+    run = await new_run(db_session)
+    run.step_count = 1
+    orphan = AgentStep(
+        tenant_id=TENANT_A,
+        run_id=run.id,
+        step_index=1,
+        kind="tool",
+        tool_name="demo.read",
+        call_id="c0",
+        status="running",
+    )
+    db_session.add(orphan)
+    await db_session.commit()
+
+    deps_map = deps([], [])
+    deps_map["gateway"] = BoomGateway()
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+    await db_session.refresh(orphan)
+    steps = await steps_of(db_session, run)
+
+    assert run.status == "failed"
+    assert run.error_code == "agent_internal_error"
+    assert orphan.status == "interrupted"
+    assert orphan.error == INTERRUPTED_OBSERVATION
+    assert orphan.finished_at is not None
+    assert all(step.status != "running" for step in steps)
