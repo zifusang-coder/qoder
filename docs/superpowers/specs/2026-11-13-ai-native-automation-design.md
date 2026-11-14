@@ -131,6 +131,7 @@ async def complete_tool_calls(
 | `usage` | JSON | `prompt_tokens`/`completion_tokens`/`tool_calls`/`steps`/`elapsed_ms` |
 | `policy` | JSON | 本次运行的策略快照 |
 | `step_count` | Integer | 已执行步数 |
+| `attempts` | Integer，默认 0 | 心跳对账重入队次数 |
 | `idempotency_key` | String(64)，可空 | 唯一约束 `(tenant_id, idempotency_key)` |
 | `heartbeat_at` / `started_at` / `finished_at` | DateTime(timezone) | 运行控制 |
 
@@ -180,6 +181,7 @@ async def complete_tool_calls(
 ```
 agent/
   __init__.py
+  contracts.py
   policy.py
   registry.py
   sanitize.py
@@ -214,6 +216,8 @@ class ToolContext:
     step_index: int
     gateway: LLMGateway
     storage: StorageBackend
+    registry: SkillRegistry
+    queue: ArqRedis | None
     settings: Settings
 
 
@@ -270,7 +274,7 @@ def resolve_policy(tenant_overrides: dict, tool: ToolSpec) -> str:
 | `high` | confirm | 只能收紧为 deny，不能放宽为 auto |
 | 真发布（未来） | confirm 且标记 `never_auto` | 不可放宽 |
 
-尝试放宽返回 `422 policy_not_loosenable`。运行创建时把解析结果写进 `agent_runs.policy`，后续配置变化不影响已开始的运行，便于回放当时判定。
+尝试放宽返回 `422 policy_not_loosenable`。租户通过 `PUT /api/agent/policy` 维护覆盖，`admin`/`owner` 可操作。运行创建时把解析结果写进 `agent_runs.policy`，后续配置变化不影响已开始的运行，便于回放当时判定。
 
 ### 7.2 审批流程
 
@@ -343,6 +347,8 @@ worker 每分钟扫描 `running` 且 `heartbeat_at < now - agent_run_stale_secon
 | POST | `/runs/{id}/retry` | editor | 仅 `failed`/`cancelled`，以操作者为发起人复制目标新建运行 |
 | GET | `/approvals` | admin/owner | 待处理审批（不含自己发起的运行） |
 | POST | `/approvals/{id}/decide` | admin/owner | `{decision: approve\|reject, note?}`；不能审批自己发起的运行 |
+| GET | `/policy` | admin/owner | 租户工具策略覆盖 |
+| PUT | `/policy` | admin/owner | 保存覆盖；只允许收紧 |
 
 入队失败（Redis 不可用）时运行落 `failed` / `queue_unavailable`，接口返回 503，复用 `backend/app/api/projects.py` 中媒体任务的既有模式。
 
@@ -356,6 +362,7 @@ worker 每分钟扫描 `running` 且 `heartbeat_at < now - agent_run_stale_secon
 | `agent_daily_quota_exceeded` | 429 | 租户当日 token 配额用尽 |
 | `agent_approval_not_pending` | 409 | 审批已处理或过期 |
 | `agent_budget_invalid` | 422 | 预算超出服务端夹紧范围 |
+| `policy_not_loosenable` | 422 | 试图把确认或禁止放宽为自动 |
 | `queue_unavailable` | 503 | 队列不可用 |
 
 预算由服务端夹紧：`max_steps` 请求值最大 `agent_max_steps_ceiling`（30），`max_tokens` 最大 200000，`max_tool_calls` 最大 40，`max_seconds` 最大 900。
