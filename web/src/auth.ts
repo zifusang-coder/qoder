@@ -42,6 +42,7 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
+  { to: "/assistant", label: "AI 助理", minRole: "editor" },
   { to: "/chat", label: "助手", minRole: "editor" },
   { to: "/profiles", label: "账号画像", minRole: "viewer" },
   { to: "/projects", label: "项目", minRole: "viewer" },

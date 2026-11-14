@@ -23,6 +23,7 @@ import {
   type Artifact,
   type StepGroup,
 } from "../agent";
+import { visibleNavItems } from "../auth";
 
 const step = (
   step_index: number,
@@ -318,5 +319,14 @@ describe("firstLine", () => {
   it("truncates by code points so an emoji is not split", () => {
     expect(firstLine("a😀b", 2)).toBe("a😀…");
     expect(firstLine("a😀b", 3)).toBe("a😀b");
+  });
+});
+
+describe("assistant navigation", () => {
+  it("shows the assistant entry to editors and above only", () => {
+    const editor = visibleNavItems({ role: "editor", is_platform_admin: false });
+    const viewer = visibleNavItems({ role: "viewer", is_platform_admin: false });
+    expect(editor.some((item) => item.to === "/assistant")).toBe(true);
+    expect(viewer.some((item) => item.to === "/assistant")).toBe(false);
   });
 });

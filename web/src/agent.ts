@@ -51,9 +51,20 @@ export interface AgentRun {
   error_code: string;
   error_message: string;
   budget: Record<string, number>;
-  /** 新运行只有 `{}`；后端可能回传数字字符串，读取时统一走 `Number`。 */
+  /**
+   * 新运行只有 `{}`；后端可能回传数字字符串，读取时统一走 `Number`。
+   * `tool_calls` / `elapsed_ms` / `paused_ms` 由运行时写入，用于预算条。
+   */
   usage: Partial<
-    Record<"prompt_tokens" | "completion_tokens" | "steps", number>
+    Record<
+      | "prompt_tokens"
+      | "completion_tokens"
+      | "steps"
+      | "tool_calls"
+      | "elapsed_ms"
+      | "paused_ms",
+      number
+    >
   >;
   /** 后端 `RunOut` 目前不序列化该字段，因此线上可能缺省。 */
   step_count?: number;

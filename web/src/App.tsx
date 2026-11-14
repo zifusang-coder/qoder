@@ -5,6 +5,7 @@ import { getToken } from "./client";
 import Layout from "./components/Layout";
 import Accounts from "./pages/Accounts";
 import Analytics from "./pages/Analytics";
+import Assistant from "./pages/Assistant";
 import Audit from "./pages/Audit";
 import Calendar from "./pages/Calendar";
 import ChangePassword from "./pages/ChangePassword";
@@ -37,6 +38,14 @@ export default function App() {
             element={
               <RequireRole minRole="editor">
                 <Chat />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/assistant"
+            element={
+              <RequireRole minRole="editor">
+                <Assistant />
               </RequireRole>
             }
           />
