@@ -19,11 +19,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jsonschema
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.contracts import ToolContext, ToolSpec
-from app.agent.policy import TOOL_PREFIX, resolve_policy
+from app.agent.policy import RANK, TOOL_PREFIX, load_overrides, resolve_policy
 from app.agent.registry import ToolRegistry
 from app.agent.sanitize import (
     compact_messages,
@@ -32,7 +32,7 @@ from app.agent.sanitize import (
     scrub,
     wrap_observation,
 )
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.errors import AppError
 from app.llm.gateway import LLMGateway
 from app.llm.tools import ToolCall
@@ -52,6 +52,7 @@ LOOP_OBSERVATION = "本次未执行：检测到重复调用，运行已停止"
 CANCEL_OBSERVATION = "本次未执行：运行已取消"
 SKIPPED_OBSERVATION = f"单轮最多执行 {MAX_CALLS_PER_ROUND} 个工具调用，本次未执行"
 PAUSED_OBSERVATION = "因等待人工确认，本轮剩余工具未执行"
+RUN_NOT_RUNNING_OBSERVATION = "本次未执行：运行状态已变化"
 APPROVAL_MISSING_OBSERVATION = "审批任务已丢失，请重新发起"
 APPROVAL_DENIED_OBSERVATION = "该操作未获批准，未执行"
 APPROVAL_REJECTED = "审批已驳回"
@@ -544,6 +545,22 @@ def _policy_action(run: AgentRun, spec: ToolSpec) -> str:
     return resolve_policy(overrides, spec)
 
 
+async def _current_action(
+    session: AsyncSession, run: AgentRun, spec: ToolSpec
+) -> str:
+    """Resolve a tool's action *now*, combining the run snapshot with live policy.
+
+    A run snapshots its policy when it is created, but a tenant may tighten a
+    tool while that run waits for approval. The stricter of the snapshot and the
+    tenant's current overrides wins, so a paused ``confirm`` cannot be replayed
+    after the tool was switched to ``deny``; ``resolve_policy`` clamps both sides
+    to the tool's risk default, so neither source can loosen the other.
+    """
+    snapshot = _policy_action(run, spec)
+    live = resolve_policy(await load_overrides(session, run.tenant_id), spec)
+    return snapshot if RANK[snapshot] >= RANK[live] else live
+
+
 async def _fail_tool(
     session: AsyncSession,
     run: AgentRun,
@@ -578,7 +595,7 @@ async def _execute_tool(
     queue: Any,
     settings: Settings,
     step: AgentStep | None = None,
-    skip_policy: bool = False,
+    approved: bool = False,
 ) -> tuple[str, list, bool]:
     """Dispatch one tool call, returning ``(observation, artifacts, paused)``.
 
@@ -588,8 +605,10 @@ async def _execute_tool(
 
     ``paused`` means the resolved policy is ``confirm``: the call is not
     executed, a pending approval is recorded and the run is left
-    ``waiting_approval``. ``skip_policy`` re-executes a call a human already
-    approved, so the policy engine is bypassed exactly once.
+    ``waiting_approval``. ``approved`` re-executes a call a human already
+    approved: the policy is re-resolved at resume time (a ``deny`` set after the
+    pause still wins), and only the ``confirm`` that triggered the pause is
+    treated as satisfied by the decision.
     """
     spec = tool_registry.get(call.name)
     if spec is None:
@@ -621,7 +640,15 @@ async def _execute_tool(
         message = f"参数不合法：{exc.validator} 校验失败（{path}）"
         return await _fail_tool(session, run, call, step, message), [], False
 
-    action = "auto" if skip_policy else _policy_action(run, spec)
+    if approved:
+        # The human decision authorises exactly the ``confirm`` it was asked
+        # about. It cannot authorise a call the tenant has since denied, and it
+        # cannot turn a deny into an execution, so resolve the current action.
+        action = await _current_action(session, run, spec)
+        if action == "confirm":
+            action = "auto"
+    else:
+        action = _policy_action(run, spec)
     if action == "deny":
         if step is None:
             step = await _start_step(
@@ -657,7 +684,9 @@ async def _execute_tool(
     elif step.status != "running":
         # A paused (``skipped``) approval step becomes a running tool step now
         # that the human decision exists; the step index stays the same so the
-        # write tools' ``(run_id, step_index)`` idempotency still holds.
+        # write tools' ``(run_id, step_index)`` idempotency still holds. The kind
+        # becomes ``tool`` so per-kind counts describe what actually ran.
+        step.kind = "tool"
         step.status = "running"
         step.started_at = _now()
         step.finished_at = None
@@ -772,7 +801,43 @@ async def _pause_for_approval(
 
     The tool call is *not* counted against the tool budget: it has not run yet,
     and it will be counted when the approved call executes on resume.
+
+    Parking is a conditional update (``WHERE status='running'``): when a cancel
+    or another terminal transition won the race, the run is no longer ours to
+    park. In that case no approval is created, the step is closed as
+    interrupted, the call is answered as not executed and ``paused`` is still
+    returned so the loop stops cleanly on the state the other writer set.
     """
+    parked = await session.execute(
+        update(AgentRun)
+        .where(AgentRun.id == run.id, AgentRun.status == "running")
+        .values(status="waiting_approval")
+        .execution_options(synchronize_session=False)
+    )
+    if parked.rowcount == 0:
+        # Discard the uncommitted step mutation, then answer the call so the
+        # paused assistant turn keeps one reply per tool_call id.
+        await session.rollback()
+        await session.refresh(run)
+        await session.refresh(step)
+        cancelled = run.status == "cancelled"
+        reason = CANCEL_OBSERVATION if cancelled else RUN_NOT_RUNNING_OBSERVATION
+        step.status = "interrupted"
+        step.error = _scrub_text(reason, 1000)
+        step.finished_at = _now()
+        step.duration_ms = _elapsed_since(step.started_at)
+        _place_tool_reply(
+            items,
+            call.id,
+            wrap_observation(
+                call.name,
+                reason,
+                {"cancelled": True} if cancelled else {"not_running": True},
+            ),
+        )
+        await _persist(session, run, items)
+        return "", [], True
+
     approval = AgentApproval(
         tenant_id=run.tenant_id,
         run_id=run.id,
@@ -788,7 +853,6 @@ async def _pause_for_approval(
     step.output = {"summary": "等待人工确认", "tool": spec.name}
     step.finished_at = _now()
     step.duration_ms = _elapsed_since(step.started_at)
-    run.status = "waiting_approval"
     await _persist(
         session,
         run,
@@ -796,10 +860,16 @@ async def _pause_for_approval(
         pending_call={
             "call_id": call.id,
             "name": call.name,
-            "arguments": call.arguments,
+            # Store the same scrubbed arguments as ``step.input`` and the
+            # approval payload: a resume must never replay a raw secret.
+            "arguments": json.dumps(scrub(args), ensure_ascii=False),
             "step_index": step.step_index,
         },
     )
+    # Re-read the row the conditional update wrote: the in-memory status was
+    # deliberately left alone so this commit could not overwrite another
+    # writer's terminal transition.
+    await session.refresh(run)
     await _audit(
         session, run, "agent.approval.request", detail={"tool": spec.name}
     )
@@ -841,6 +911,29 @@ def _place_tool_reply(items: list[dict], call_id: str, content: str) -> None:
     items.append(reply)
 
 
+async def _answer_pending_decision(
+    session: AsyncSession, run: AgentRun, *, summary: str, data: dict
+) -> None:
+    """Write the reply a paused call is owed before the pause is forgotten.
+
+    A rejection or an expiry ends the run without resuming it, so unless the
+    paused call gets its tool reply the transcript keeps an assistant tool turn
+    with an unanswered id, which providers reject when the history is replayed.
+    """
+    pending = _pending_call(run)
+    call_id = str((pending or {}).get("call_id") or "")
+    if pending is None or not call_id:
+        _clear_pending(run)
+        return
+    items = _items(run)
+    _place_tool_reply(
+        items,
+        call_id,
+        wrap_observation(str(pending.get("name") or "tool"), summary, data),
+    )
+    await _persist(session, run, items, pending_call=None)
+
+
 async def _resume_pending(
     session: AsyncSession,
     run: AgentRun,
@@ -858,7 +951,9 @@ async def _resume_pending(
     Reuses the sanitized output of an already-``ok`` step instead of replaying
     it. A step crash recovery already marked ``interrupted``/``error``/``denied``
     is answered from its persisted error rather than retried, so an approval can
-    never be executed twice by a retried pause.
+    never be executed twice by a retried pause. Dispatch re-resolves the tool's
+    policy first: an approval only redeems the ``confirm`` that caused the
+    pause, so a tool denied since then is answered as denied, not executed.
     """
     pending = _pending_call(run)
     if pending is None:
@@ -890,6 +985,9 @@ async def _resume_pending(
 
     if step.status == "ok":
         output = step.output if isinstance(step.output, dict) else {}
+        if step.kind != "tool":
+            # The call did execute; only the transcript reply was lost.
+            step.kind = "tool"
         _place_tool_reply(
             items,
             call_id,
@@ -955,7 +1053,7 @@ async def _resume_pending(
         queue=queue,
         settings=settings,
         step=step,
-        skip_policy=True,
+        approved=True,
     )
     if paused:
         return True, []
@@ -1024,8 +1122,10 @@ async def _expire_approval(
     run.error_code = "approval_expired"
     run.error_message = APPROVAL_EXPIRED
     run.finished_at = now
-    _clear_pending(run)
     await _fail_pending_step(session, approval, "审批已过期")
+    await _answer_pending_decision(
+        session, run, summary=APPROVAL_EXPIRED, data={"expired": True}
+    )
     await session.commit()
     await _audit(
         session,
@@ -1047,25 +1147,34 @@ async def decide_approval(
 ) -> AgentRun:
     """Approve or reject one pending approval, tenant-scoped.
 
-    Approving only re-queues the run; the worker picks it up and
-    ``_resume_pending`` executes exactly the approved call. Rejecting fails the
-    run with ``approval_rejected``. A decided or expired approval is a 409.
+    Order matters: the tenant-scoped lookup comes first, then authorization
+    (role, not the creator, not already decided), then the expiry check, and
+    only then the decision. An editor probing an already-decided approval
+    therefore gets 403, not 409, and an unauthorized reviewer never mutates an
+    expired row.
+
+    Approving re-queues the run with a conditional update: only a run still in
+    ``waiting_approval`` becomes ``queued``, so a concurrent cancel or expiry is
+    never overwritten and the wait is billed to ``paused_ms`` exactly once.
+    Rejecting fails the run with ``approval_rejected``. Both paths write the tool
+    reply the paused call owed, so the transcript never keeps an assistant tool
+    turn with an unanswered id.
     """
     if approval.tenant_id != actor.tenant_id:
         raise AppError("agent_run_not_found", "审批不存在", 404)
     run = await session.get(AgentRun, approval.run_id)
     if run is None or run.tenant_id != approval.tenant_id:
         raise AppError("agent_run_not_found", "运行不存在", 404)
-    if approval.status != "pending":
-        raise AppError(
-            "agent_approval_not_pending", "该审批已处理或已过期", 409
-        )
     if actor.id == run.user_id:
         raise AppError("forbidden", "不能审批自己发起的运行", 403)
     if actor.role not in APPROVAL_ROLES:
         raise AppError("forbidden", "只有管理员或所有者可以审批", 403)
     if decision not in {"approve", "reject"}:
         raise AppError("agent_approval_invalid", "审批决定不合法", 422)
+    if approval.status != "pending":
+        raise AppError(
+            "agent_approval_not_pending", "该审批已处理或已过期", 409
+        )
 
     now = _now()
     expires = _aware(approval.expires_at)
@@ -1088,21 +1197,43 @@ async def decide_approval(
             raise AppError(
                 "agent_approval_not_pending", "该审批已处理或已过期", 409
             )
-        if run.status == "waiting_approval":
-            # Time spent waiting for a human must not be billed to the run's
-            # wall-clock budget; record it so ``_elapsed_ms`` can subtract it.
-            usage = _usage(run)
-            paused_at = _aware(run.heartbeat_at) or now
-            usage["paused_ms"] += max(
-                0, int((now - min(paused_at, now)).total_seconds() * 1000)
+        # Time spent waiting for a human must not be billed to the run's
+        # wall-clock budget; record it so ``_elapsed_ms`` can subtract it.
+        usage = _usage(run)
+        paused_at = _aware(run.heartbeat_at) or now
+        usage["paused_ms"] += max(
+            0, int((now - min(paused_at, now)).total_seconds() * 1000)
+        )
+        usage["elapsed_ms"] = max(
+            0, _elapsed_since(run.started_at) - usage["paused_ms"]
+        )
+        requeued = await session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == run.id,
+                AgentRun.tenant_id == run.tenant_id,
+                AgentRun.status == "waiting_approval",
             )
-            run.usage = usage
-            run.status = "queued"
-            run.error_code = ""
-            run.error_message = ""
-            run.finished_at = None
-            run.heartbeat_at = now
+            .values(
+                status="queued",
+                usage=usage,
+                error_code="",
+                error_message="",
+                finished_at=None,
+                heartbeat_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if requeued.rowcount == 0:
+            # A cancel or expiry won the race: undo the approval decision so a
+            # stale "approved" row cannot outlive the run it belonged to, and
+            # write nothing else on the run.
+            await session.rollback()
+            raise AppError(
+                "agent_run_not_waiting", "运行状态已变化，无法继续", 409
+            )
         await session.commit()
+        await session.refresh(run)
         await _audit(
             session,
             run,
@@ -1126,8 +1257,10 @@ async def decide_approval(
     run.error_code = "approval_rejected"
     run.error_message = APPROVAL_REJECTED
     run.finished_at = now
-    _clear_pending(run)
     await _fail_pending_step(session, approval, APPROVAL_REJECTED)
+    await _answer_pending_decision(
+        session, run, summary=APPROVAL_REJECTED, data={"rejected": True}
+    )
     await session.commit()
     await _audit(
         session,
@@ -1140,19 +1273,34 @@ async def decide_approval(
 
 
 async def expire_approvals(
-    session: AsyncSession, *, tenant_id: str | None = None
+    session: AsyncSession,
+    *,
+    tenant_id: str | None = None,
+    settings: Settings | None = None,
 ) -> int:
     """Expire pending approvals whose TTL elapsed, failing their runs.
+
+    An approval stored without an ``expires_at`` (older rows, direct writes) is
+    treated as expiring ``settings.agent_approval_ttl_hours`` after its own
+    ``created_at``. Without that fallback such a row would stay pending forever
+    and its run would sit in ``waiting_approval`` for good.
 
     Called by the reconciliation job (Task 11) per tenant or for all tenants.
     Returns how many approvals this call expired; a losing race with a reviewer
     simply does not count.
     """
+    config = settings or get_settings()
     now = _now()
+    cutoff = now - timedelta(hours=config.agent_approval_ttl_hours)
     stmt = select(AgentApproval).where(
         AgentApproval.status == "pending",
-        AgentApproval.expires_at.is_not(None),
-        AgentApproval.expires_at < now,
+        or_(
+            AgentApproval.expires_at < now,
+            and_(
+                AgentApproval.expires_at.is_(None),
+                AgentApproval.created_at < cutoff,
+            ),
+        ),
     )
     if tenant_id is not None:
         stmt = stmt.where(AgentApproval.tenant_id == tenant_id)
@@ -1293,6 +1441,21 @@ async def _run_loop(
     artifacts = _merge_artifacts(
         list(stored_result.get("artifacts") or []), recovered
     )
+    if pending:
+        # Budgets are checked before the approved call is dispatched, exactly as
+        # the loop does before any other call: an approval must not buy an
+        # execution the run can no longer pay for.
+        stop = _budget_stop(run, budget)
+        if stop is not None:
+            _answer_pending_calls(
+                items,
+                {},
+                reason=BUDGET_OBSERVATION,
+                data={"budget_exhausted": True},
+            )
+            await _persist(session, run, items, pending_call=None)
+            await fail_run(session, run, BUDGET_ERROR, stop)
+            return
     try:
         resumed, resumed_artifacts = await _resume_pending(
             session,
@@ -1472,16 +1635,21 @@ async def _run_loop(
             if paused:
                 # Every call of this round must still be answered or the next
                 # provider request would be rejected; the paused call itself is
-                # answered on resume, the rest are marked as not executed.
+                # answered on resume (or by the pause itself when the run was no
+                # longer running), the rest are marked as not executed.
+                parking = run.status == "waiting_approval"
+                reason, flag = (
+                    (PAUSED_OBSERVATION, {"paused": True})
+                    if parking
+                    else (RUN_NOT_RUNNING_OBSERVATION, {"not_running": True})
+                )
                 for skipped in calls[position + 1 :]:
                     items.append(
                         {
                             "role": "tool",
                             "tool_call_id": skipped.id,
                             "content": wrap_observation(
-                                skipped.name,
-                                PAUSED_OBSERVATION,
-                                {"paused": True},
+                                skipped.name, reason, dict(flag)
                             ),
                         }
                     )

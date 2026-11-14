@@ -9,6 +9,7 @@ from app.agent.contracts import ToolResult, ToolSpec
 from app.agent.registry import ToolRegistry
 from app.agent.runtime import (
     INTERRUPTED_OBSERVATION,
+    _pause_for_approval,
     decide_approval,
     expire_approvals,
     run_agent,
@@ -17,7 +18,7 @@ from app.config import get_settings
 from app.errors import AppError
 from app.llm.tools import ToolCall, ToolTurn
 from app.llm.types import Usage
-from app.models.agent import AgentApproval, AgentRun, AgentStep
+from app.models.agent import AgentApproval, AgentPolicy, AgentRun, AgentStep
 from app.models.user import User
 from app.skills.registry import SkillRegistry
 from app.storage import get_storage
@@ -131,6 +132,22 @@ async def steps_of(db_session, run):
             .order_by(AgentStep.step_index)
         )
     ).scalars().all()
+
+
+def assert_round_answered(run):
+    """每个 assistant tool_calls id 必须恰有一个 tool 回复。"""
+    items = run.messages["items"]
+    declared = [
+        call["id"]
+        for item in items
+        if item["role"] == "assistant"
+        for call in item.get("tool_calls") or []
+    ]
+    answered = [
+        item["tool_call_id"] for item in items if item["role"] == "tool"
+    ]
+    assert sorted(declared) == sorted(answered)
+    assert len(answered) == len(set(answered))
 
 
 def draft_specs(calls):
@@ -252,8 +269,10 @@ async def test_approved_run_resumes_and_executes_once(db_session):
     assert calls == [{"text": "x"}]
     assert "pending_call" not in run.messages
     assert run.result["artifacts"] == [{"type": "publish_job", "id": "j1"}]
-    assert steps[1].kind == "approval"
+    # 续跑执行的是工具步骤：kind 由 approval 改写为 tool，索引不变。
+    assert steps[1].kind == "tool"
     assert steps[1].status == "ok"
+    assert [step.kind for step in steps] == ["llm", "tool", "llm"]
     tool_messages = [
         item for item in run.messages["items"] if item["role"] == "tool"
     ]
@@ -287,6 +306,36 @@ async def test_rejected_run_fails_and_closes_step(db_session):
     assert "pending_call" not in run.messages
     assert steps[1].status == "denied"
     assert steps[1].error == "审批已驳回"
+    # 驳回不再触发续跑，暂停调用也必须拿到回复，否则历史会留下孤立 tool_call。
+    assert_round_answered(run)
+    tool_messages = [
+        item for item in run.messages["items"] if item["role"] == "tool"
+    ]
+    assert "驳回" in tool_messages[0]["content"]
+
+
+async def test_rejected_run_answers_the_paused_call(db_session):
+    creator = await make_user(db_session, role="editor")
+    run, approval, _, _ = await pause_run(
+        db_session, await new_run(db_session, user_id=creator.id), []
+    )
+    admin = await make_user(db_session, role="owner")
+
+    await decide_approval(db_session, approval, actor=admin, decision="reject")
+    await db_session.refresh(run)
+
+    items = run.messages["items"]
+    declared = [
+        call["id"]
+        for item in items
+        if item["role"] == "assistant"
+        for call in item.get("tool_calls") or []
+    ]
+    replies = [item for item in items if item["role"] == "tool"]
+    assert declared == ["c1"]
+    assert [reply["tool_call_id"] for reply in replies] == ["c1"]
+    assert replies[0]["content"].startswith("以下为系统数据")
+    assert "驳回" in replies[0]["content"]
 
 
 async def test_second_decision_conflicts(db_session):
@@ -356,6 +405,11 @@ async def test_expire_approvals_fails_run(db_session):
     assert run.error_message == "审批已过期，运行已结束"
     assert steps[1].status == "denied"
     assert "pending_call" not in run.messages
+    assert_round_answered(run)
+    tool_messages = [
+        item for item in run.messages["items"] if item["role"] == "tool"
+    ]
+    assert "过期" in tool_messages[0]["content"]
 
 
 async def test_resume_reuses_already_finished_step(db_session):
@@ -448,6 +502,7 @@ async def test_expire_approvals_is_tenant_scoped(db_session):
     assert approval.status == "expired"
     assert run.status == "failed"
     assert run.error_code == "approval_expired"
+    assert_round_answered(run)
 
 
 async def test_interrupted_approved_call_is_not_replayed(db_session):
@@ -474,3 +529,259 @@ async def test_interrupted_approved_call_is_not_replayed(db_session):
         item for item in run.messages["items"] if item["role"] == "tool"
     ]
     assert INTERRUPTED_OBSERVATION in tool_messages[0]["content"]
+
+
+async def test_editor_cannot_decide_an_already_decided_approval(db_session):
+    creator = await make_user(db_session, role="editor")
+    _run, approval, _, _ = await pause_run(
+        db_session, await new_run(db_session, user_id=creator.id), []
+    )
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+    editor = await make_user(db_session, role="editor")
+
+    with pytest.raises(AppError) as exc:
+        await decide_approval(
+            db_session, approval, actor=editor, decision="approve"
+        )
+
+    # 鉴权先于状态：非管理员探测已决策审批只能看到 403，看不到 409。
+    assert exc.value.code == "forbidden"
+    assert exc.value.status == 403
+
+
+async def test_approve_does_not_requeue_a_cancelled_run(db_session):
+    creator = await make_user(db_session, role="editor")
+    run, approval, _, _ = await pause_run(
+        db_session, await new_run(db_session, user_id=creator.id), []
+    )
+    admin = await make_user(db_session, role="admin")
+    # 模拟取消在“挂起”和“审批”之间提交：运行已不是 waiting_approval。
+    run.status = "cancelled"
+    run.finished_at = datetime.now(UTC)
+    await db_session.commit()
+
+    with pytest.raises(AppError) as exc:
+        await decide_approval(
+            db_session, approval, actor=admin, decision="approve"
+        )
+
+    assert exc.value.code == "agent_run_not_waiting"
+    assert exc.value.status == 409
+    await db_session.refresh(run)
+    await db_session.refresh(approval)
+    assert run.status == "cancelled"
+    assert run.error_code == ""
+    assert run.usage.get("paused_ms", 0) == 0
+    assert approval.status == "pending"
+
+
+async def test_tightened_policy_denies_the_approved_call(db_session):
+    creator = await make_user(db_session, role="editor")
+    calls = []
+    run, approval, specs, _ = await pause_run(
+        db_session, await new_run(db_session, user_id=creator.id), calls
+    )
+    # 挂起后租户把工具收紧为 deny。
+    db_session.add(
+        AgentPolicy(tenant_id=TENANT_A, overrides={"tool:demo.high": "deny"})
+    )
+    await db_session.commit()
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+
+    await run_agent(db_session, run, **deps([turn("该操作已被禁用。")], specs))
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert calls == []
+    assert steps[1].status == "denied"
+    assert "策略禁止" in steps[1].error
+    tool_messages = [
+        item for item in run.messages["items"] if item["role"] == "tool"
+    ]
+    assert "策略禁止" in tool_messages[0]["content"]
+    assert run.result_text == "该操作已被禁用。"
+    assert run.status == "succeeded"
+    assert "pending_call" not in run.messages
+    assert_round_answered(run)
+
+
+async def test_confirm_policy_still_runs_after_approval(db_session):
+    creator = await make_user(db_session, role="editor")
+    calls = []
+    db_session.add(
+        AgentPolicy(tenant_id=TENANT_A, overrides={"tool:demo.high": "confirm"})
+    )
+    await db_session.commit()
+    run, approval, specs, _ = await pause_run(
+        db_session, await new_run(db_session, user_id=creator.id), calls
+    )
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+
+    await run_agent(db_session, run, **deps([turn("草稿已创建")], specs))
+    await db_session.refresh(run)
+
+    # confirm 仍然是 confirm：审批授权这一次执行。
+    assert calls == [{"text": "x"}]
+    assert run.status == "succeeded"
+
+
+async def test_resume_stops_when_the_step_budget_is_gone(db_session):
+    creator = await make_user(db_session, role="editor")
+    calls = []
+    run, approval, specs, _ = await pause_run(
+        db_session,
+        await new_run(
+            db_session,
+            user_id=creator.id,
+            budget={**BUDGET, "max_steps": 2},
+        ),
+        calls,
+    )
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+
+    environment = deps([turn("不应被调用")], specs)
+    await run_agent(db_session, run, **environment)
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert calls == []
+    assert environment["gateway"].calls == []
+    assert steps[1].status == "skipped"
+    assert run.status == "failed"
+    assert run.error_code == "agent_budget_exhausted"
+    assert run.error_message == "步数预算已用尽"
+    assert "pending_call" not in run.messages
+    assert_round_answered(run)
+
+
+async def test_paused_run_longer_than_max_seconds_still_resumes(db_session):
+    creator = await make_user(db_session, role="editor")
+    calls = []
+    run, approval, specs, _ = await pause_run(
+        db_session,
+        await new_run(
+            db_session, user_id=creator.id, budget={**BUDGET, "max_seconds": 1}
+        ),
+        calls,
+    )
+    # 审批人等待 30 秒，而整个运行的墙钟预算只有 1 秒。
+    run.heartbeat_at = datetime.now(UTC) - timedelta(seconds=30)
+    await db_session.commit()
+    admin = await make_user(db_session, role="admin")
+    await decide_approval(db_session, approval, actor=admin, decision="approve")
+    await db_session.refresh(run)
+    assert run.usage["paused_ms"] >= 29_000
+
+    await run_agent(db_session, run, **deps([turn("草稿已创建")], specs))
+    await db_session.refresh(run)
+
+    assert calls == [{"text": "x"}]
+    assert run.status == "succeeded"
+    assert run.usage["elapsed_ms"] < 1000
+
+
+async def test_pending_approval_without_expiry_is_swept_after_the_ttl(db_session):
+    creator = await make_user(db_session, role="editor")
+    run, approval, _, _ = await pause_run(
+        db_session, await new_run(db_session, user_id=creator.id), []
+    )
+    ttl = get_settings().agent_approval_ttl_hours
+    # 没有 TTL 的行按 created_at + 配置的审批 TTL 过期。
+    approval.expires_at = None
+    approval.created_at = datetime.now(UTC) - timedelta(hours=ttl + 1)
+    await db_session.commit()
+
+    assert await expire_approvals(db_session, tenant_id=TENANT_A) == 1
+    await db_session.refresh(run)
+    await db_session.refresh(approval)
+
+    assert approval.status == "expired"
+    assert run.status == "failed"
+    assert run.error_code == "approval_expired"
+    assert "pending_call" not in run.messages
+    assert_round_answered(run)
+
+
+async def test_cancelled_run_cannot_be_paused(db_session):
+    creator = await make_user(db_session, role="editor")
+    run = await new_run(db_session, user_id=creator.id)
+    specs = draft_specs([])[1]
+    step = AgentStep(
+        tenant_id=TENANT_A,
+        run_id=run.id,
+        step_index=1,
+        kind="approval",
+        tool_name="demo.high",
+        call_id="c1",
+        input={"text": "x"},
+        status="running",
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(step)
+    run.status = "cancelled"
+    await db_session.commit()
+
+    arguments = json.dumps({"text": "x"})
+    items = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "demo.high", "arguments": arguments},
+                }
+            ],
+        }
+    ]
+    _observation, _artifacts, paused = await _pause_for_approval(
+        db_session,
+        run,
+        ToolCall(id="c1", name="demo.high", arguments=arguments),
+        step,
+        spec=specs[0],
+        args={"text": "x"},
+        items=items,
+        settings=get_settings(),
+    )
+    await db_session.refresh(run)
+    await db_session.refresh(step)
+    approvals = (
+        await db_session.execute(
+            select(AgentApproval).where(AgentApproval.run_id == run.id)
+        )
+    ).scalars().all()
+
+    assert paused is True
+    assert approvals == []
+    assert run.status == "cancelled"
+    assert "pending_call" not in run.messages
+    assert step.status == "interrupted"
+    assert_round_answered(run)
+
+
+async def test_pending_arguments_are_scrubbed(db_session):
+    creator = await make_user(db_session, role="editor")
+    specs = draft_specs([])[1]
+    turns = [turn("", [("c1", "demo.high", {"text": "sk-secret1234"})])]
+    run = await new_run(db_session, user_id=creator.id)
+    await run_agent(db_session, run, **deps(turns, specs))
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+    approval = (
+        await db_session.execute(
+            select(AgentApproval).where(AgentApproval.run_id == run.id)
+        )
+    ).scalars().one()
+
+    pending = run.messages["pending_call"]
+    # 挂起调用保存的是脱敏后的参数，与 step.input / approval.payload 一致。
+    assert json.loads(pending["arguments"]) == {"text": "[已脱敏]"}
+    assert json.loads(pending["arguments"]) == steps[1].input
+    assert approval.payload == {"text": "[已脱敏]"}
+    assert "sk-secret1234" not in pending["arguments"]
