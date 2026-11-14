@@ -152,6 +152,58 @@ async def test_anthropic_complete_tool_calls_parses_blocks_and_converts_history(
 
 
 @respx.mock
+async def test_anthropic_merges_three_consecutive_tool_results_into_one_user_turn():
+    route = respx.post(ANTHROPIC_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 5, "output_tokens": 2},
+            },
+        )
+    )
+    messages = [
+        {"role": "user", "content": "看看画像"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": f"tu_{index}",
+                    "type": "function",
+                    "function": {"name": "profile.list", "arguments": "{}"},
+                }
+                for index in range(3)
+            ],
+        },
+        {"role": "tool", "tool_call_id": "tu_0", "content": "first"},
+        {"role": "tool", "tool_call_id": "tu_1", "content": "second"},
+        {"role": "tool", "tool_call_id": "tu_2", "content": "third"},
+    ]
+    await LLMGateway(_anthropic_config()).complete_tool_calls(messages, tools=TOOLS)
+    body = json.loads(route.calls[0].request.content)
+
+    assert [message["role"] for message in body["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    tool_result_turns = [
+        message
+        for message in body["messages"]
+        if isinstance(message["content"], list)
+        and any(block.get("type") == "tool_result" for block in message["content"])
+    ]
+    assert len(tool_result_turns) == 1
+    results = tool_result_turns[0]["content"]
+    assert [block["type"] for block in results] == ["tool_result"] * 3
+    assert [block["tool_use_id"] for block in results] == ["tu_0", "tu_1", "tu_2"]
+    assert [block["content"] for block in results] == ["first", "second", "third"]
+    assert "_tool_results" not in json.dumps(body)
+
+
+@respx.mock
 async def test_openai_invalid_arguments_are_passed_through():
     respx.post(OPENAI_URL).mock(
         return_value=httpx.Response(

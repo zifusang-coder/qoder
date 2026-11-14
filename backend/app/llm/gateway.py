@@ -195,7 +195,7 @@ class LLMGateway:
                 if (
                     previous is not None
                     and previous.get("role") == "user"
-                    and previous.pop("_tool_results", False)
+                    and previous.get("_tool_results")
                 ):
                     previous["content"].append(block)
                 else:
