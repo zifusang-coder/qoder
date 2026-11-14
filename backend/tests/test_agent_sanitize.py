@@ -166,3 +166,84 @@ def test_wrap_observation_shrinks_summary_into_valid_json():
     assert payload["tool"] == "profile.list"
     assert len(text) <= MAX_DATA_BYTES
     assert len(text.encode()) <= MAX_DATA_BYTES
+
+
+def test_compact_messages_respects_max_bytes_argument():
+    items = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c0",
+                    "type": "function",
+                    "function": {"name": "x", "arguments": json.dumps({"blob": "q" * 3000})},
+                }
+            ],
+        }
+    ]
+    assert len(json.dumps(items, ensure_ascii=False).encode()) > 2000
+
+    packed = compact_messages(items, max_bytes=2000)
+
+    stored = packed["items"]
+    assert stored, "compaction must never return an empty message list"
+    assert packed["truncated"] is True
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= 2000
+
+
+def test_compact_messages_caps_assistant_with_large_tool_calls():
+    calls = [
+        {
+            "id": f"c{index}",
+            "type": "function",
+            "function": {"name": "x", "arguments": json.dumps({"blob": "q" * 40_000})},
+        }
+        for index in range(8)
+    ]
+    items = [
+        {"role": "assistant", "content": "", "tool_calls": calls},
+        {"role": "tool", "tool_call_id": "c0", "content": "r" * 40_000},
+    ]
+    assert len(json.dumps(items, ensure_ascii=False).encode()) > MAX_MESSAGES_BYTES
+
+    packed = compact_messages(items)
+
+    stored = packed["items"]
+    assert stored, "compaction must never return an empty message list"
+    assert all(isinstance(item, dict) and "role" in item for item in stored)
+    assert packed["truncated"] is True
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
+
+
+def test_compact_messages_stubs_history_when_structure_alone_is_oversized():
+    calls = [
+        {
+            "id": f"c{index:05d}" + "i" * 40,
+            "type": "function",
+            "function": {"name": "x", "arguments": "{}"},
+        }
+        for index in range(4000)
+    ]
+    items = [{"role": "assistant", "content": "", "tool_calls": calls}]
+    assert len(json.dumps(items, ensure_ascii=False).encode()) > MAX_MESSAGES_BYTES
+
+    packed = compact_messages(items)
+
+    stored = packed["items"]
+    assert stored == [{"role": "user", "content": "[对话历史过长，已截断]"}]
+    assert packed["truncated"] is True
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
+
+
+def test_compact_messages_keeps_json_for_non_string_content():
+    items = [{"role": "user", "content": ["a" * 3000, "b" * 3000]}]
+    packed = compact_messages(items, max_bytes=2000)
+    stored = packed["items"]
+    assert len(stored) == 1
+    assert packed["truncated"] is True
+    content = stored[0]["content"]
+    assert isinstance(content, str)
+    assert content.startswith('["'), "list content must be JSON text, not a repr"
+    assert "'" not in content
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= 2000
