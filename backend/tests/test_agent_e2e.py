@@ -44,7 +44,7 @@ async def _copy_default_provider(session, tenant_id: str) -> None:
     finally:
         await engine.dispose()
     if provider is None:
-        pytest.skip("本地库没有该租户的默认 LLM 提供商，无法调用真实模型")
+        pytest.fail("RUN_AGENT_E2E=1 需要开发库中配置默认 LLM 提供商")
     session.add(
         LLMProvider(
             tenant_id=tenant_id,
@@ -152,7 +152,10 @@ async def test_agent_reaches_draft_with_real_llm(db_session):
     contents = (
         (
             await db_session.execute(
-                select(Content).where(Content.id.in_(content_ids))
+                select(Content).where(
+                    Content.id.in_(content_ids),
+                    Content.tenant_id == user.tenant_id,
+                )
             )
         )
         .scalars()
@@ -164,7 +167,8 @@ async def test_agent_reaches_draft_with_real_llm(db_session):
         (
             await db_session.execute(
                 select(ContentVersion).where(
-                    ContentVersion.content_id.in_(content_ids)
+                    ContentVersion.content_id.in_(content_ids),
+                    ContentVersion.tenant_id == user.tenant_id,
                 )
             )
         )
@@ -176,7 +180,10 @@ async def test_agent_reaches_draft_with_real_llm(db_session):
     jobs = (
         (
             await db_session.execute(
-                select(PublishJob).where(PublishJob.content_id.in_(content_ids))
+                select(PublishJob).where(
+                    PublishJob.content_id.in_(content_ids),
+                    PublishJob.tenant_id == user.tenant_id,
+                )
             )
         )
         .scalars()

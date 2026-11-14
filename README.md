@@ -114,15 +114,15 @@ GET  /api/projects/{project_id}/files/preview?path=media/<run_id>/video.mp4
 
 ### AI 助理与 Agent 运行时
 
-- **入口**：前端 `/assistant`；后端 `/api/agent`。editor 及以上可发起任务，viewer 可查看。
+- **入口**：前端 `/assistant`；后端 `/api/agent`。editor 及以上可发起并查看任务；viewer 仅能调用只读接口（前端入口对 editor 及以上可见）。
 - **运行方式**：`POST /api/agent/runs` 返回 `202` 并入队 arq 的 `run_agent_job`；运行状态为 `queued → running → succeeded / failed / cancelled`，命中审批时为 `waiting_approval`。
-- **预算**：请求可传 `max_steps` / `max_tokens` / `max_tool_calls` / `max_seconds`，服务端分别夹紧到 30 / 200000 / 40 / 900；默认值见 `.env.example`。
+- **预算**：请求可传 `max_steps` / `max_tokens` / `max_tool_calls` / `max_seconds`，服务端分别夹紧到 `AGENT_MAX_STEPS_CEILING`（默认 30）/ 200000 / 40 / 900；默认值见 `.env.example`。
 - **工具**：只读工具与低风险写工具默认可自动执行；`publish.create_draft_job` 只创建 `status=draft`、`scheduled_at=None` 的任务，不触发真实发布；本期不注册任何高风险工具。
 - **审批**：租户可把任意工具收紧为 `confirm` 或 `deny`（`PUT /api/agent/policy`），不能把默认确认的工具放宽。命中 `confirm` 时运行挂起，由发起人之外的管理员在 `/assistant` 或 `POST /api/agent/approvals/{id}/decide` 处理；超过 `AGENT_APPROVAL_TTL_HOURS` 自动过期并使运行失败。
 - **恢复**：worker 每分钟对账心跳超时的运行，未超过 2 次尝试则重新入队；步骤与写工具以 `(run_id, step_index)` 幂等，重启不产生重复产物。
 - **配额**：同一用户最多 2 个活跃运行；租户当日 token 超过 `AGENT_DAILY_TOKEN_QUOTA` 返回 `429 agent_daily_quota_exceeded`；队列不可用返回 `503 queue_unavailable`。
 
-真实模型验收（需要已配置 LLM 提供商）：
+真实模型验收（前置条件：可连接的开发 PostgreSQL，且该租户已配置默认 LLM 提供商；缺失时用例报错而非跳过）：
 
 ```bash
 cd backend && RUN_AGENT_E2E=1 uv run pytest tests/test_agent_e2e.py -q
