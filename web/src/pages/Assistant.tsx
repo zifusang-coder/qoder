@@ -53,7 +53,12 @@ export default function Assistant() {
   const runs = useQuery({
     queryKey: ["agent-runs"],
     queryFn: () => api<AgentRun[]>("/agent/runs?limit=50"),
-    refetchInterval: 3000,
+    // spec §11: 列表每 2 秒轮询，直到所有运行进入终态。
+    refetchInterval: (query) => {
+      const items = query.state.data;
+      if (!items) return false;
+      return items.some((item) => !isRunTerminal(item.status)) ? 2000 : false;
+    },
   });
 
   const activeId = selected ?? runs.data?.[0]?.id ?? null;
@@ -123,6 +128,9 @@ export default function Assistant() {
     ? (run.result.artifacts as Artifact[])
     : [];
   const canDecide = run && me ? canDecideApproval(run, me) : false;
+  const planSummary =
+    typeof run?.plan?.summary === "string" ? run.plan.summary.trim() : "";
+  const noteRequired = note.trim().length === 0;
 
   return (
     <div className="space-y-6">
@@ -203,6 +211,14 @@ export default function Assistant() {
                 <p className="whitespace-pre-wrap text-sm text-ink-700">
                   {run.goal}
                 </p>
+                {planSummary && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-ink-500">计划</p>
+                    <p className="whitespace-pre-wrap text-sm text-ink-700">
+                      {planSummary}
+                    </p>
+                  </div>
+                )}
                 {run.error_code && (
                   <p className="text-sm text-wine-600">
                     {run.error_message || run.error_code}
@@ -271,11 +287,14 @@ export default function Assistant() {
                     <>
                       <input
                         className="input w-full"
-                        placeholder="审批备注（可选）"
+                        placeholder="审批备注（通过可选，驳回必填）"
                         value={note}
                         maxLength={2000}
                         onChange={(event) => setNote(event.target.value)}
                       />
+                      <p className="text-xs text-ink-500">
+                        驳回需填写备注说明原因。
+                      </p>
                       <div className="flex gap-2">
                         <button
                           type="button"
@@ -290,7 +309,7 @@ export default function Assistant() {
                         <button
                           type="button"
                           className="btn-secondary"
-                          disabled={decide.isPending}
+                          disabled={decide.isPending || noteRequired}
                           onClick={() =>
                             decide.mutate({ id: pending.id, decision: "reject" })
                           }
@@ -324,22 +343,40 @@ export default function Assistant() {
                           ` · ${stepStatusLabel(group.llm.status)}`}
                       </p>
                     )}
-                    {group.actions.map((step) => (
-                      <div key={step.step_index} className="rounded bg-paper p-2">
-                        <div className="flex items-center justify-between gap-2 text-sm">
-                          <span>
-                            {stepKindLabel(step.kind)}
-                            {step.tool_name ? ` · ${step.tool_name}` : ""}
-                          </span>
-                          <span className="badge bg-sage-100 text-sage-700">
-                            {stepStatusLabel(step.status)}
-                          </span>
+                    {group.actions.map((step) => {
+                      const summary =
+                        typeof step.output?.summary === "string"
+                          ? step.output.summary.trim()
+                          : "";
+                      return (
+                        <div key={step.step_index} className="rounded bg-paper p-2">
+                          <div className="flex items-center justify-between gap-2 text-sm">
+                            <span>
+                              {stepKindLabel(step.kind)}
+                              {step.tool_name ? ` · ${step.tool_name}` : ""}
+                            </span>
+                            <span className="flex items-center gap-2">
+                              {step.duration_ms > 0 && (
+                                <span className="text-xs text-ink-500">
+                                  {step.duration_ms >= 1000
+                                    ? `${(step.duration_ms / 1000).toFixed(1)}s`
+                                    : `${step.duration_ms}ms`}
+                                </span>
+                              )}
+                              <span className="badge bg-sage-100 text-sage-700">
+                                {stepStatusLabel(step.status)}
+                              </span>
+                            </span>
+                          </div>
+                          {summary && (
+                            <p className="mt-1 text-xs text-ink-700">{summary}</p>
+                          )}
+                          {step.error && (
+                            <p className="mt-1 text-xs text-wine-600">{step.error}</p>
+                          )}
                         </div>
-                        {step.error && (
-                          <p className="mt-1 text-xs text-wine-600">{step.error}</p>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ))}
               </div>
