@@ -876,7 +876,7 @@ def test_worker_settings_wire_cron():
     assert publish_cron.minute is None
     assert publish_cron.second == 0
     assert publish_cron.keep_result_s == 0
-    # 每 30 秒做一次 Agent 运行对账与审批过期
+    # 每分钟第 30 秒做一次 Agent 运行对账与审批过期
     assert agent_cron.job_id == "agent-reconcile"
     assert agent_cron.coroutine is reconcile_agent_runs
     assert agent_cron.minute is None

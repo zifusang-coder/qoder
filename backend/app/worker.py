@@ -16,16 +16,21 @@ from typing import ClassVar
 
 from arq import cron
 from arq.connections import ArqRedis, RedisSettings
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.registry import ToolRegistry, get_tool_registry
-from app.agent.runtime import expire_approvals, fail_run, run_agent
+from app.agent.runtime import (
+    INTERNAL_ERROR,
+    _expire_approval,
+    fail_run,
+    run_agent,
+)
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
 from app.llm.gateway import LLMGateway, load_gateway_default
-from app.models.agent import AgentRun
+from app.models.agent import AgentApproval, AgentRun
 from app.models.project import Content
 from app.models.publish import PublishJob
 from app.models.tenant import Tenant
@@ -51,6 +56,15 @@ STALE_PUBLISH_SECONDS = 900  # > worker job_timeout(600s)，避免误伤仍在�
 STALE_PUBLISH_MESSAGE = "发布超时，结果未知；请到平台核对已有草稿后重试"
 # 单批上限保证整批耗时远低于 job_timeout(600s)，剩余任务留到下一次扫描
 MAX_BATCH_SIZE = 10
+# Agent 对账与审批过期同样分批执行，避免一次定时任务处理无上限的行；
+# 未处理完的留到下一次 cron。
+AGENT_RECONCILE_BATCH_SIZE = 50
+AGENT_APPROVAL_EXPIRY_BATCH_SIZE = 100
+AGENT_STALE_MESSAGE = "运行超时未完成，请重试"
+AGENT_INTERNAL_MESSAGE = "运行异常，请稍后重试"
+# 只有这两个状态属于「仍在执行」，兜底失败只能改写它们；等待审批/终态
+# 由对应的写入者负责，不能被崩溃兜底覆盖。
+ACTIVE_AGENT_STATUSES = {"queued", "running"}
 # 这些错误重试也不会成功，必须把任务落为失败，避免永远停留在 approved
 BLOCKED_ERROR_CODES = {
     "too_many_attempts",
@@ -291,6 +305,27 @@ async def process_media_job(_ctx: dict | None, job_id: str) -> None:
             logger.exception("媒体任务执行异常 job=%s", job_id)
 
 
+async def _fail_active_agent_run(
+    session: AsyncSession,
+    run_uuid: uuid.UUID,
+    run_id: str,
+) -> None:
+    """Best-effort terminal state for a crash outside the main run loop.
+
+    Only ``queued``/``running`` rows are rewritten: a run that paused for
+    approval or already reached a terminal state belongs to another writer and
+    must keep its state. Failures here are logged, never re-raised, so the job
+    itself ends cleanly.
+    """
+    try:
+        await session.rollback()
+        row = await session.get(AgentRun, run_uuid)
+        if row is not None and row.status in ACTIVE_AGENT_STATUSES:
+            await fail_run(session, row, INTERNAL_ERROR, AGENT_INTERNAL_MESSAGE)
+    except Exception:
+        logger.exception("agent run failure could not be recorded run=%s", run_id)
+
+
 async def run_agent_job(
     _ctx: dict | None,
     run_id: str,
@@ -311,19 +346,32 @@ async def run_agent_job(
     arq 至少一次投递下的幂等。``running`` 的运行不在这里重入，交给心跳对账
     决定重排或失败，避免重复执行与尝试次数被重复消耗。
 
-    任何逃逸异常都把运行落为 ``agent_internal_error``，绝不让行停留在
-    ``running``；租户已停用时同样落失败且不执行任何工具。
+    任何逃逸异常都把仍处于 ``queued``/``running`` 的运行落为
+    ``agent_internal_error``；等待审批或已终态的运行绝不被兜底改写。租户
+    已停用时同样落失败且不执行任何工具。
     """
     # arq 运行时把 Redis 连接放在 ctx["redis"]；生产路径必须把它交给工具，
     # 否则媒体类工具无法二次入队。
     worker_queue = queue or (_ctx or {}).get("redis")
+    try:
+        run_uuid = uuid.UUID(str(run_id))
+    except (AttributeError, TypeError, ValueError):
+        logger.warning("agent run id 不合法，跳过 run=%s", run_id)
+        return
     async with session_factory() as session:
-        run = await session.get(AgentRun, uuid.UUID(str(run_id)))
-        if run is None or run.status != "queued":
-            return
-        tenant = await session.get(Tenant, run.tenant_id)
-        if tenant is None or tenant.status != "active":
-            await fail_run(session, run, "tenant_suspended", "租户已停用")
+        # 租户校验、状态读取和网关解析都在主循环之前完成；任何非 AppError
+        # 的失败也必须把仍处于 queued 的运行落为内部错误，不能让它永远排队。
+        try:
+            run = await session.get(AgentRun, run_uuid)
+            if run is None or run.status != "queued":
+                return
+            tenant = await session.get(Tenant, run.tenant_id)
+            if tenant is None or tenant.status != "active":
+                await fail_run(session, run, "tenant_suspended", "租户已停用")
+                return
+        except Exception:
+            logger.exception("agent run setup failed run=%s", run_id)
+            await _fail_active_agent_run(session, run_uuid, run_id)
             return
         try:
             active_gateway = gateway or await load_gateway_default(
@@ -331,6 +379,10 @@ async def run_agent_job(
             )
         except AppError as exc:
             await fail_run(session, run, exc.code, exc.message)
+            return
+        except Exception:
+            logger.exception("agent gateway setup failed run=%s", run_id)
+            await _fail_active_agent_run(session, run_uuid, run_id)
             return
         try:
             await run_agent(
@@ -346,19 +398,149 @@ async def run_agent_job(
             )
         except Exception:
             logger.exception("agent run crashed run=%s", run.id)
+            await _fail_active_agent_run(session, run_uuid, run_id)
+
+
+async def _stale_agent_run_ids(
+    session: AsyncSession,
+    cutoff: datetime,
+    limit: int,
+) -> list[uuid.UUID]:
+    rows = await session.execute(
+        select(AgentRun.id)
+        .where(
+            AgentRun.status == "running",
+            or_(
+                AgentRun.heartbeat_at.is_(None),
+                AgentRun.heartbeat_at < cutoff,
+            ),
+        )
+        .order_by(AgentRun.heartbeat_at, AgentRun.created_at)
+        .limit(limit)
+    )
+    return list(rows.scalars().all())
+
+
+async def _reconcile_agent_run(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    moment: datetime,
+    cutoff: datetime,
+    queue: ArqRedis | None,
+) -> bool:
+    """Requeue or fail one stale run; return whether this sweep handled it.
+
+    The requeue is a compare-and-set (``WHERE status='running' AND heartbeat
+    still stale``): a user cancel or a fresh heartbeat that lands between the
+    scan and this UPDATE makes ``rowcount`` zero, in which case the row is left
+    untouched and nothing is enqueued.
+    """
+    run = await session.get(AgentRun, run_id)
+    if run is None or run.status != "running":
+        return False
+    stale = or_(
+        AgentRun.heartbeat_at.is_(None), AgentRun.heartbeat_at < cutoff
+    )
+    if queue is not None and run.attempts < 2:
+        requeued = await session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == run_id,
+                AgentRun.status == "running",
+                stale,
+                AgentRun.attempts < 2,
+            )
+            .values(
+                status="queued",
+                attempts=AgentRun.attempts + 1,
+                heartbeat_at=moment,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if requeued.rowcount == 0:
+            # 用户取消或新的心跳先到：不要覆盖既有状态，也不要入队。
             await session.rollback()
-            row = await session.get(AgentRun, uuid.UUID(str(run_id)))
-            if row is not None and row.status in {
-                "queued",
-                "running",
-                "waiting_approval",
-            }:
+            return False
+        await session.commit()
+        await session.refresh(run)
+        try:
+            await queue.enqueue_job("run_agent_job", str(run.id))
+        except Exception:
+            logger.exception("agent requeue failed run=%s", run.id)
+            await session.refresh(run)
+            if run.status == "queued":
                 await fail_run(
-                    session,
-                    row,
-                    "agent_internal_error",
-                    "运行异常，请稍后重试",
+                    session, run, "agent_stale", AGENT_STALE_MESSAGE
                 )
+        return True
+
+    conditions = [
+        AgentRun.id == run_id,
+        AgentRun.status == "running",
+        stale,
+    ]
+    if queue is not None:
+        # 队列存在但重排次数已用尽。
+        conditions.append(AgentRun.attempts >= 2)
+    claimed = await session.execute(
+        update(AgentRun)
+        .where(*conditions)
+        .values(status="failed")
+        .execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount == 0:
+        # 同一竞态：运行已不是待对账的 running 行，交给它的写入者。
+        await session.rollback()
+        return False
+    await session.refresh(run)
+    await fail_run(session, run, "agent_stale", AGENT_STALE_MESSAGE)
+    return True
+
+
+async def _expire_due_agent_approvals(
+    session: AsyncSession,
+    *,
+    moment: datetime,
+    limit: int = AGENT_APPROVAL_EXPIRY_BATCH_SIZE,
+) -> int:
+    """Expire a bounded batch of pending approvals, isolating each row.
+
+    Reuses the runtime's per-approval compare-and-set/orchestration instead of
+    duplicating its semantics; the worker only supplies the bounded selection
+    and the per-row error boundary.
+    """
+    settings = get_settings()
+    cutoff = moment - timedelta(hours=settings.agent_approval_ttl_hours)
+    targets = (
+        await session.execute(
+            select(AgentApproval.id)
+            .where(
+                AgentApproval.status == "pending",
+                or_(
+                    AgentApproval.expires_at < moment,
+                    and_(
+                        AgentApproval.expires_at.is_(None),
+                        AgentApproval.created_at < cutoff,
+                    ),
+                ),
+            )
+            .order_by(AgentApproval.expires_at, AgentApproval.created_at)
+            .limit(limit)
+        )
+    ).scalars().all()
+    expired = 0
+    for approval_id in targets:
+        try:
+            approval = await session.get(AgentApproval, approval_id)
+            if approval is None:
+                continue
+            if await _expire_approval(session, approval, moment):
+                expired += 1
+        except Exception:
+            logger.exception("agent approval expiry failed approval=%s", approval_id)
+            await session.rollback()
+    return expired
 
 
 async def reconcile_agent_runs(
@@ -378,6 +560,10 @@ async def reconcile_agent_runs(
     否则落 ``agent_stale``。``waiting_approval`` 是等人工决策，不在扫描范围；
     已取消/已完成的运行也不会被这里改写。对账跨租户扫描是 worker 的职责，
     但每条运行只写自己的行，不做跨租户写入。
+
+    arq 只会传入 ``ctx``，因此队列优先取 ``ctx["redis"]``（与 ``run_agent_job``
+    一致）；只有确实拿不到队列时才直接落 ``agent_stale``。运行对账与审批
+    过期各自使用独立会话和错误边界，任一阶段失败都不会阻断另一阶段。
     """
     settings = get_settings()
     moment = now or datetime.now(UTC)
@@ -387,50 +573,37 @@ async def reconcile_agent_runs(
         else stale_after_seconds
     )
     cutoff = moment - timedelta(seconds=stale_after)
-    async with session_factory() as session:
-        rows = (
-            await session.execute(
-                select(AgentRun).where(
-                    AgentRun.status == "running",
-                    or_(
-                        AgentRun.heartbeat_at.is_(None),
-                        AgentRun.heartbeat_at < cutoff,
-                    ),
-                )
+    worker_queue = queue or (_ctx or {}).get("redis")
+    handled = 0
+    try:
+        async with session_factory() as session:
+            targets = await _stale_agent_run_ids(
+                session, cutoff, AGENT_RECONCILE_BATCH_SIZE
             )
-        ).scalars().all()
-        targets = [row.id for row in rows]
-        handled = 0
-        for target_id in targets:
-            run = await session.get(AgentRun, target_id)
-            if run is None or run.status != "running":
-                continue
-            if run.attempts < 2 and queue is not None:
-                run.attempts += 1
-                run.status = "queued"
-                run.heartbeat_at = moment
-                await session.commit()
+            for run_id in targets:
                 try:
-                    await queue.enqueue_job("run_agent_job", str(run.id))
-                except Exception:
-                    logger.exception("agent requeue failed run=%s", run.id)
-                    await fail_run(
+                    if await _reconcile_agent_run(
                         session,
-                        run,
-                        "agent_stale",
-                        "运行超时未完成，请重试",
-                    )
-            else:
-                await fail_run(
-                    session,
-                    run,
-                    "agent_stale",
-                    "运行超时未完成，请重试",
-                )
-            handled += 1
-        # 审批过期与运行对账同一次定时任务完成：过期审批会终结等待中的运行。
-        await expire_approvals(session)
-        return handled
+                        run_id,
+                        moment=moment,
+                        cutoff=cutoff,
+                        queue=worker_queue,
+                    ):
+                        handled += 1
+                except Exception:
+                    # 单行失败不能中断其余运行；回滚后继续下一行。
+                    logger.exception("agent reconcile failed run=%s", run_id)
+                    await session.rollback()
+    except Exception:
+        logger.exception("agent reconciliation sweep failed")
+    # 审批过期是独立阶段：即使上面的扫描/重排抛出，也仍会执行；它自己的
+    # 异常也不会影响已经完成的运行对账。
+    try:
+        async with session_factory() as session:
+            await _expire_due_agent_approvals(session, moment=moment)
+    except Exception:
+        logger.exception("agent approval expiry sweep failed")
+    return handled
 
 
 async def archive_audit_logs(
