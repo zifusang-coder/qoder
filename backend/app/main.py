@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.api import (
     accounts,
+    agent,
     analytics,
     audit,
     auth,
@@ -81,6 +82,7 @@ app.add_middleware(
 )
 app.include_router(auth.router, prefix="/api")
 app.include_router(accounts.router, prefix="/api")
+app.include_router(agent.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
 app.include_router(calendar.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
