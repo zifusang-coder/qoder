@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import func, select
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
@@ -73,14 +75,14 @@ async def get_content(ctx: ToolContext, args: dict) -> ToolResult:
     )
 
 
-def _version_artifact(
-    version: ContentVersion, *, title: str
+def _content_artifact(
+    version: ContentVersion, *, content_id: uuid.UUID, title: str
 ) -> dict:
     return {
-        "type": "content_version",
-        "id": str(version.id),
+        "type": "content",
+        "id": str(content_id),
         "title": title,
-        "content_id": str(version.content_id),
+        "version_id": str(version.id),
         "version": version.version,
     }
 
@@ -102,7 +104,11 @@ async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
                 "content_id": str(existing.content_id),
                 "version": {"id": str(existing.id), "version": existing.version},
             },
-            artifacts=[_version_artifact(existing, title=existing.title)],
+            artifacts=[
+                _content_artifact(
+                    existing, content_id=existing.content_id, title=existing.title
+                )
+            ],
         )
     content = await owned_content(
         ctx.session, ctx.tenant_id, args.get("content_id")
@@ -141,7 +147,7 @@ async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
             "content_id": str(content.id),
             "version": {"id": str(version.id), "version": number},
         },
-        artifacts=[_version_artifact(version, title=title)],
+        artifacts=[_content_artifact(version, content_id=content.id, title=title)],
     )
 
 

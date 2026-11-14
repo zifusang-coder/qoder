@@ -143,6 +143,16 @@ async def test_content_create_version_advances_current_version(db_session):
     first = await _call("content.create_version", ctx, args)
     second = await _call("content.create_version", ctx, args)
     assert first.data["version"]["id"] == second.data["version"]["id"]
+    assert first.artifacts == [
+        {
+            "type": "content",
+            "id": str(seeded["content"].id),
+            "title": "新标题",
+            "version_id": first.data["version"]["id"],
+            "version": 2,
+        }
+    ]
+    assert second.artifacts == first.artifacts
     versions = (await db_session.execute(select(ContentVersion))).scalars().all()
     assert len(versions) == 2
 
@@ -150,6 +160,26 @@ async def test_content_create_version_advances_current_version(db_session):
     await db_session.refresh(content)
     assert content.current_version == 2
     assert content.title == "新标题"
+
+
+async def test_content_create_version_artifact_points_at_content(db_session):
+    seeded = await _seed(db_session)
+    result = await _call(
+        "content.create_version",
+        await _ctx(db_session),
+        {"content_id": str(seeded["content"].id), "title": "新标题", "body": "新正文"},
+    )
+    assert len(result.artifacts) == 1
+    artifact = result.artifacts[0]
+    assert isinstance(artifact, dict)
+    assert artifact["type"] == "content"
+    assert artifact["id"] == str(seeded["content"].id)
+    assert artifact["version"] == 2
+    version_id = result.data["version"]["id"]
+    assert artifact["version_id"] == version_id
+    version = await db_session.get(ContentVersion, uuid.UUID(version_id))
+    assert version is not None
+    assert version.content_id == seeded["content"].id
 
 
 async def test_media_generate_enqueues_and_is_idempotent(db_session):
