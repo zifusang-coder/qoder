@@ -57,7 +57,6 @@ const runFixture: AgentRun = {
   error_message: "",
   budget: { max_steps: 10 },
   usage: { prompt_tokens: 1, completion_tokens: 2, steps: 1 },
-  step_count: 1,
   created_at: "2026-11-13T10:00:00Z",
   started_at: "2026-11-13T10:00:01Z",
   finished_at: null,
@@ -71,7 +70,8 @@ const groupFixture: StepGroup = { llm: null, actions: [] };
 
 describe("exported types", () => {
   it("keep the shapes the assistant page builds on", () => {
-    expect(runFixture.step_count).toBe(1);
+    // The backend RunOut does not serialize step_count, so it is absent on the wire.
+    expect(runFixture.step_count).toBeUndefined();
     expect(runFixture.budget.max_steps).toBe(10);
     expect(runFixture.pending_approval).toBeNull();
     expect(detailFixture.steps).toHaveLength(1);
@@ -79,6 +79,13 @@ describe("exported types", () => {
     expect(agentStatusLabel(statusFixture)).toBe("待确认");
     expect(artifactLabel(artifactFixture.type ?? "")).toBe("内容");
     expect(groupFixture).toEqual({ llm: null, actions: [] });
+  });
+
+  it("accepts a fresh run with an empty usage object", () => {
+    const freshRun: AgentRun = { ...runFixture, usage: {} };
+    expect(freshRun.usage).toEqual({});
+    expect(freshRun.step_count).toBeUndefined();
+    expect(usageTokens(freshRun.usage)).toBe(0);
   });
 });
 
@@ -213,6 +220,7 @@ describe("permissions", () => {
     expect(canRetryRun("cancelled", "editor")).toBe(true);
     expect(canRetryRun("failed", "viewer")).toBe(false);
     expect(canRetryRun("running", "editor")).toBe(false);
+    expect(canRetryRun("waiting_approval", "editor")).toBe(false);
     expect(canRetryRun("succeeded", "owner")).toBe(false);
   });
 });
@@ -221,14 +229,20 @@ describe("usageTokens / budgetPercent", () => {
   it("sums prompt and completion tokens", () => {
     expect(usageTokens({ prompt_tokens: 120, completion_tokens: 30 })).toBe(150);
     expect(usageTokens({})).toBe(0);
+    // The backend may serialize numbers as strings; Number() coerces them safely.
+    expect(usageTokens({ prompt_tokens: "10" as unknown as number })).toBe(10);
+    expect(usageTokens({ prompt_tokens: "oops" as unknown as number })).toBe(0);
   });
 
   it("clamps the percentage into 0..100 and guards a zero cap", () => {
     expect(budgetPercent(3, 10)).toBe(30);
     expect(budgetPercent(15, 10)).toBe(100);
     expect(budgetPercent(-1, 10)).toBe(0);
+    expect(budgetPercent(0, 0)).toBe(0);
     expect(budgetPercent(5, 0)).toBe(0);
     expect(budgetPercent(5, Number.NaN)).toBe(0);
+    expect(budgetPercent(undefined as unknown as number, 10)).toBe(0);
+    expect(budgetPercent(Number.POSITIVE_INFINITY, 10)).toBe(0);
   });
 });
 
@@ -247,6 +261,20 @@ describe("formatElapsed", () => {
     expect(formatElapsed(base, at(3720))).toBe("1h2m");
   });
 
+  it("floors fractional seconds instead of rounding", () => {
+    expect(formatElapsed(base, at(59.6))).toBe("59s");
+    expect(formatElapsed(base, at(3599.6))).toBe("59m59s");
+  });
+
+  it("returns an empty string for invalid timestamps", () => {
+    expect(formatElapsed("not-a-date", null)).toBe("");
+    expect(formatElapsed(base, "not-a-date")).toBe("");
+  });
+
+  it("clamps a finish before the start to zero", () => {
+    expect(formatElapsed(at(60), at(10))).toBe("0s");
+  });
+
   it("uses the supplied now while a run is live", () => {
     expect(formatElapsed(base, null, Date.parse(base) + 42_000)).toBe("42s");
   });
@@ -261,11 +289,13 @@ describe("artifact helpers", () => {
     expect(artifactLabel("profile")).toBe("画像");
     expect(artifactLabel("skill")).toBe("技能");
     expect(artifactLabel("mystery")).toBe("mystery");
+    expect(artifactLabel("")).toBe("产物");
   });
 
-  it("links projects and profiles to their own pages", () => {
+  it("links projects to their own pages and content to the project list", () => {
     expect(artifactLink({ type: "project", id: "p1" })).toBe("/projects/p1");
-    expect(artifactLink({ type: "content", id: "p1" })).toBe("/projects/p1");
+    // A content id is not a project id, so it cannot deep-link to ProjectDetail.
+    expect(artifactLink({ type: "content", id: "c1" })).toBe("/projects");
     expect(artifactLink({ type: "profile", id: "u1" })).toBe("/profiles");
     expect(artifactLink({ type: "publish_job", id: "j1" })).toBe("/publish");
     expect(artifactLink({ type: "media_job", id: "m1" })).toBe("/projects");
@@ -278,5 +308,15 @@ describe("firstLine", () => {
     expect(firstLine("\n  第一行目标  \n第二行")).toBe("第一行目标");
     expect(firstLine("a".repeat(80))).toBe(`${"a".repeat(60)}…`);
     expect(firstLine("   ")).toBe("");
+  });
+
+  it("returns an empty string for non-positive limits", () => {
+    expect(firstLine("hello", 0)).toBe("");
+    expect(firstLine("hello", -3)).toBe("");
+  });
+
+  it("truncates by code points so an emoji is not split", () => {
+    expect(firstLine("a😀b", 2)).toBe("a😀…");
+    expect(firstLine("a😀b", 3)).toBe("a😀b");
   });
 });

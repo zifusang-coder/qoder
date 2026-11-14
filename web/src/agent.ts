@@ -51,8 +51,12 @@ export interface AgentRun {
   error_code: string;
   error_message: string;
   budget: Record<string, number>;
-  usage: Record<string, number>;
-  step_count: number;
+  /** 新运行只有 `{}`；后端可能回传数字字符串，读取时统一走 `Number`。 */
+  usage: Partial<
+    Record<"prompt_tokens" | "completion_tokens" | "steps", number>
+  >;
+  /** 后端 `RunOut` 目前不序列化该字段，因此线上可能缺省。 */
+  step_count?: number;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -180,12 +184,14 @@ export function canRetryRun(status: string, role: Role): boolean {
   return canWrite(role) && (status === "failed" || status === "cancelled");
 }
 
-export function usageTokens(usage: Record<string, number>): number {
+export function usageTokens(
+  usage: Partial<Record<"prompt_tokens" | "completion_tokens" | "steps", number>>,
+): number {
   return (Number(usage.prompt_tokens) || 0) + (Number(usage.completion_tokens) || 0);
 }
 
 export function budgetPercent(used: number, max: number): number {
-  if (!Number.isFinite(max) || max <= 0) return 0;
+  if (!Number.isFinite(used) || !Number.isFinite(max) || max <= 0) return 0;
   const raw = Math.round((used / max) * 100);
   return Math.min(100, Math.max(0, raw));
 }
@@ -201,7 +207,7 @@ export function formatElapsed(
   if (Number.isNaN(start)) return "";
   const end = finishedAt ? Date.parse(finishedAt) : now;
   if (Number.isNaN(end)) return "";
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  const seconds = Math.max(0, Math.floor((end - start) / 1000));
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) {
     return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
@@ -213,12 +219,12 @@ export function artifactLabel(type: string): string {
   return ARTIFACT_LABELS[type] ?? (type || "产物");
 }
 
-/** 产物跳转地址：项目/内容进项目详情，画像、发布、媒体回各自列表页。 */
+/**
+ * 产物跳转地址：只有项目 id 能命中项目详情路由，内容 id 不是项目 id，
+ * 因此内容回项目列表；画像、发布各回自己的列表页。
+ */
 export function artifactLink(artifact: Artifact): string {
-  if (
-    (artifact.type === "project" || artifact.type === "content") &&
-    artifact.id
-  ) {
+  if (artifact.type === "project" && artifact.id) {
     return `/projects/${encodeURIComponent(artifact.id)}`;
   }
   if (artifact.type === "profile") return "/profiles";
@@ -226,11 +232,15 @@ export function artifactLink(artifact: Artifact): string {
   return "/projects";
 }
 
+/** 取第一行非空文本；按码点截断，避免把 emoji 从代理对中间切开。 */
 export function firstLine(text: string, limit = 60): string {
+  if (!(limit > 0)) return "";
   const line =
     (text ?? "")
       .split("\n")
       .map((part) => part.trim())
       .find(Boolean) ?? "";
-  return line.length > limit ? `${line.slice(0, limit)}…` : line;
+  const chars = Array.from(line);
+  const max = Math.floor(limit);
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : line;
 }
