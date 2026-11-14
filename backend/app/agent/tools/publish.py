@@ -14,9 +14,7 @@ from app.models.profile import Profile
 from app.models.project import ContentVersion, Project
 from app.models.publish import PlatformAccount, PublishEvent, PublishJob
 from app.publish.registry import PlatformSpec, spec_for
-from app.publish.state import InvalidTransition
 from app.services.precheck import run_precheck
-from app.services.publish import apply_precheck
 
 
 def _job_row(job: PublishJob) -> dict:
@@ -218,16 +216,9 @@ async def precheck_job(ctx: ToolContext, args: dict) -> ToolResult:
     report = run_precheck(
         version.body, platform=job.platform, taboos=taboos, title=version.title
     )
-    try:
-        job = await apply_precheck(
-            ctx.session,
-            job.id,
-            report,
-            tenant_id=ctx.tenant_id,
-            actor=f"agent:{ctx.run_id}",
-        )
-    except InvalidTransition as exc:
-        raise AppError("invalid_state", str(exc), 409) from exc
+    # Read-only by contract (spec §6.2: "只返回结果"): the agent reports what the
+    # precheck found, the job stays draft and a human advances it on the publish
+    # page. Mutating it here would let the model move a job without a review.
     return ToolResult(
         summary=(
             f"检查通过，{report['warnings']} 个提醒"
@@ -278,7 +269,10 @@ SPECS = [
     ),
     ToolSpec(
         name="publish.precheck",
-        description="对发布草稿执行广告法与平台规则检查，并返回检查报告。",
+        description=(
+            "对发布草稿执行广告法与平台规则检查，只返回检查报告，"
+            "不改变任务状态。"
+        ),
         input_schema=schema(
             {"job_id": {"type": "string", "minLength": 1}}, ("job_id",)
         ),

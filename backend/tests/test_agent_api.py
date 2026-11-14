@@ -211,6 +211,32 @@ async def test_active_run_limit(api, queue, db_session):
     assert resp.json()["code"] == "agent_run_limit"
 
 
+async def test_waiting_approval_runs_do_not_count_against_the_cap(
+    api, queue, db_session
+):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    for goal in ("等待审批一", "等待审批二"):
+        db_session.add(
+            AgentRun(
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                goal=goal,
+                status="waiting_approval",
+                budget={},
+                policy={},
+            )
+        )
+    await db_session.commit()
+
+    # 挂起在人工审批上的运行不占并发额度（只有 queued/running 计数）。
+    resp = await create_run(http)
+
+    assert resp.status_code == 202, resp.text
+    assert queue.jobs == [("run_agent_job", resp.json()["id"])]
+
+
 async def test_daily_quota_exceeded(api, queue, db_session):
     http, state = api
     user = await make_user(db_session, role="editor")
@@ -230,6 +256,59 @@ async def test_daily_quota_exceeded(api, queue, db_session):
 
     assert resp.status_code == 429
     assert resp.json()["code"] == "agent_daily_quota_exceeded"
+
+
+async def test_zero_daily_quota_disables_the_limit(
+    api, queue, db_session, monkeypatch
+):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    db_session.add(
+        AgentRun(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            goal="今天的用量",
+            status="succeeded",
+            usage={"prompt_tokens": 10_000_000, "completion_tokens": 0},
+        )
+    )
+    await db_session.commit()
+    # spec §12：`0` 关闭日配额，任何历史用量都不再拦截。
+    monkeypatch.setattr(
+        agent_api, "get_settings", lambda: Settings(agent_daily_token_quota=0)
+    )
+
+    resp = await create_run(http)
+
+    assert resp.status_code == 202, resp.text
+
+
+async def test_daily_quota_of_one_still_blocks_any_usage(
+    api, queue, db_session, monkeypatch
+):
+    http, state = api
+    user = await make_user(db_session, role="editor")
+    state["user"] = user
+    db_session.add(
+        AgentRun(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            goal="已用满一个 token",
+            status="succeeded",
+            usage={"prompt_tokens": 1, "completion_tokens": 0},
+        )
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        agent_api, "get_settings", lambda: Settings(agent_daily_token_quota=1)
+    )
+
+    resp = await create_run(http)
+
+    assert resp.status_code == 429
+    assert resp.json()["code"] == "agent_daily_quota_exceeded"
+    assert queue.jobs == []
 
 
 async def test_budget_is_clamped(api, queue, db_session):
@@ -557,6 +636,51 @@ async def test_decide_rejection_returns_failed_run(api, queue, db_session):
     assert queue.jobs == []
     await db_session.refresh(run)
     assert run.error_message == "审批已驳回"
+
+
+async def test_reject_keeps_a_concurrently_cancelled_run_cancelled(
+    api, queue, db_session, monkeypatch
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    admin = await make_user(db_session, role="admin")
+    run, approval = await make_pending(db_session, creator=creator)
+    state["user"] = admin
+
+    original_owned_approval = agent_api._owned_approval
+
+    async def cancel_after_load(session, raw_id, user):
+        loaded = await original_owned_approval(session, raw_id, user)
+        # 取消在“读取审批”和“写运行状态”之间提交。
+        await session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == run.id,
+                AgentRun.status == "waiting_approval",
+            )
+            .values(status="cancelled", finished_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        return loaded
+
+    monkeypatch.setattr(agent_api, "_owned_approval", cancel_after_load)
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "reject", "note": "不合适"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+    stored = await db_session.get(AgentRun, run.id)
+    await db_session.refresh(stored)
+    # 驳回不得把已取消的运行改写成 failed。
+    assert stored.status == "cancelled"
+    assert stored.error_code == ""
+    # 审批自身的 CAS 独立生效。
+    await db_session.refresh(approval)
+    assert approval.status == "rejected"
 
 
 async def test_cannot_decide_own_run(api, queue, db_session):

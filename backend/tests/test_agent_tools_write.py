@@ -344,7 +344,7 @@ async def test_publish_create_draft_job_forces_draft_and_is_idempotent(db_sessio
     assert job.idempotency_key == "agent:run-7:1"
 
 
-async def test_publish_precheck_returns_report(db_session):
+async def test_publish_precheck_returns_report_without_touching_the_job(db_session):
     seeded = await _seed(db_session)
     ctx = await _ctx(db_session)
     created = await _call(
@@ -356,10 +356,12 @@ async def test_publish_precheck_returns_report(db_session):
         "publish.precheck", ctx, {"job_id": created.data["job"]["id"]}
     )
     assert "passed" in result.data["report"]
-    assert result.data["job"]["status"] in {"awaiting_review", "precheck_failed"}
+    # 工具只返回检查结果（spec §6.2），不推进任务状态。
+    assert result.data["job"]["status"] == "draft"
     job = await db_session.get(PublishJob, uuid.UUID(created.data["job"]["id"]))
     await db_session.refresh(job)
-    assert job.checks["passed"] == result.data["report"]["passed"]
+    assert job.status == "draft"
+    assert job.checks == {}
 
 
 async def test_skill_run_unknown_skill_returns_not_found(db_session):

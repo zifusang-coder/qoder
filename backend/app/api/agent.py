@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 ACTIVE_STATUSES = ("queued", "running", "waiting_approval")
+# Per-user create cap: a run parked on a human does not consume worker capacity,
+# so only queued/running count.
+LIMITED_STATUSES = ("queued", "running")
 RETRYABLE_STATUSES = ("failed", "cancelled")
 ACTIVE_RUNS_PER_USER = 2
 BUDGET_KEYS = ("max_steps", "max_tokens", "max_tool_calls", "max_seconds")
@@ -271,7 +274,7 @@ async def _ensure_limits(
             .where(
                 AgentRun.tenant_id == user.tenant_id,
                 AgentRun.user_id == user.id,
-                AgentRun.status.in_(ACTIVE_STATUSES),
+                AgentRun.status.in_(LIMITED_STATUSES),
             )
         )
     ).scalar_one()
@@ -298,7 +301,9 @@ async def _ensure_limits(
         if isinstance(usage, dict):
             used += int(usage.get("prompt_tokens") or 0)
             used += int(usage.get("completion_tokens") or 0)
-    if used >= settings.agent_daily_token_quota:
+    # spec §15: a zero quota disables the daily token limit.
+    quota = settings.agent_daily_token_quota
+    if quota > 0 and used >= quota:
         raise AppError(
             "agent_daily_quota_exceeded", "今日 token 配额已用尽", 429
         )
