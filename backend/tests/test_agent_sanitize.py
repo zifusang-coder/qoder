@@ -3,11 +3,35 @@ import json
 from app.agent.sanitize import (
     MAX_DATA_BYTES,
     MAX_MESSAGES_BYTES,
+    OBSERVATION_PREFIX,
     compact_messages,
     fit_bytes,
     scrub,
     wrap_observation,
 )
+
+
+def _tool_call(call_id: str) -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "x", "arguments": "{}"},
+    }
+
+
+def _orphan_tool_replies(items: list[dict]) -> list[dict]:
+    live_ids = {
+        call.get("id")
+        for item in items
+        if item.get("role") == "assistant"
+        for call in item.get("tool_calls") or []
+        if isinstance(call, dict)
+    }
+    return [
+        item
+        for item in items
+        if item.get("role") == "tool" and item.get("tool_call_id") not in live_ids
+    ]
 
 
 def test_scrub_drops_sensitive_keys_recursively():
@@ -90,3 +114,55 @@ def test_compact_messages_enforces_size_limit():
     size = len(json.dumps(packed, ensure_ascii=False).encode())
     assert size <= MAX_MESSAGES_BYTES
     assert packed["truncated"] is True
+
+
+def test_compact_messages_drops_tool_replies_orphaned_by_dropped_assistant():
+    items = [
+        {
+            "role": "assistant",
+            "content": "a" * 120_000,
+            "tool_calls": [_tool_call("c0"), _tool_call("c1")],
+        },
+        {"role": "tool", "tool_call_id": "c0", "content": "b" * 45_000},
+        {"role": "system", "content": "sys"},
+        {"role": "tool", "tool_call_id": "c1", "content": "d" * 45_000},
+    ]
+    assert len(json.dumps(items, ensure_ascii=False).encode()) > MAX_MESSAGES_BYTES
+
+    packed = compact_messages(items)
+
+    stored = packed["items"]
+    assert packed["truncated"] is True
+    assert stored, "compaction must never return an empty message list"
+    assert _orphan_tool_replies(stored) == []
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
+
+
+def test_compact_messages_truncates_single_oversized_message():
+    items = [{"role": "user", "content": "z" * (MAX_MESSAGES_BYTES + 10_000)}]
+    packed = compact_messages(items)
+    stored = packed["items"]
+    assert len(stored) == 1
+    assert stored[0]["role"] == "user"
+    assert len(json.dumps(stored, ensure_ascii=False).encode()) <= MAX_MESSAGES_BYTES
+    assert packed["truncated"] is True
+
+
+def test_fit_bytes_truncates_lone_oversized_dict_value():
+    trimmed, truncated = fit_bytes({"only": "x" * 30_000})
+    assert isinstance(trimmed, dict)
+    assert trimmed, "a non-empty dict must never be trimmed to {}"
+    assert list(trimmed) == ["only"]
+    assert isinstance(trimmed["only"], str)
+    assert len(json.dumps(trimmed, ensure_ascii=False).encode()) <= MAX_DATA_BYTES
+    assert truncated is True
+
+
+def test_wrap_observation_shrinks_summary_into_valid_json():
+    text = wrap_observation("profile.list", "s" * 5000, {"items": []})
+    assert text.startswith(OBSERVATION_PREFIX)
+    payload = json.loads(text[len(OBSERVATION_PREFIX) :])
+    assert payload["truncated"] is True
+    assert payload["tool"] == "profile.list"
+    assert len(text) <= MAX_DATA_BYTES
+    assert len(text.encode()) <= MAX_DATA_BYTES
