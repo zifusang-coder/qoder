@@ -14,9 +14,47 @@ def default_action(risk: Risk) -> str:
     return DEFAULTS[risk]
 
 
+def _clamp_action(action: object, tool: ToolSpec) -> str:
+    """把存储的动作收敛到该工具当前 risk 默认值允许的范围。
+
+    存储的覆盖可能是旧值：工具后来被重新分类、动作不是字符串，或动作未知。
+    这些情况一律回退到风险默认值，保证持久化数据永远不会放宽策略。
+    """
+    default = default_action(tool.risk)
+    if (
+        isinstance(action, str)
+        and action in RANK
+        and RANK[action] >= RANK[default]
+    ):
+        return action
+    return default
+
+
 def resolve_policy(overrides: dict, tool: ToolSpec) -> str:
-    action = overrides.get(f"{TOOL_PREFIX}{tool.name}")
-    return action if action in RANK else default_action(tool.risk)
+    return _clamp_action(overrides.get(f"{TOOL_PREFIX}{tool.name}"), tool)
+
+
+def clamped_overrides(
+    overrides: dict, specs: dict[str, ToolSpec]
+) -> dict[str, str]:
+    """返回按当前注册表校验后的有效覆盖。
+
+    丢弃不存在工具的键、非字符串或未知动作，以及低于当前风险默认值的条目，
+    因此返回值只包含真实生效的收紧策略，且一定是 ``dict[str, str]``。
+    """
+    if not isinstance(overrides, dict):
+        return {}
+    effective: dict[str, str] = {}
+    for key, action in overrides.items():
+        if not isinstance(key, str) or not key.startswith(TOOL_PREFIX):
+            continue
+        spec = specs.get(key[len(TOOL_PREFIX) :])
+        if spec is None:
+            continue
+        clamped = _clamp_action(action, spec)
+        if clamped == action:
+            effective[key] = clamped
+    return effective
 
 
 def validate_overrides(overrides: dict, specs: dict[str, ToolSpec]) -> dict[str, str]:
@@ -30,7 +68,7 @@ def validate_overrides(overrides: dict, specs: dict[str, ToolSpec]) -> dict[str,
         spec = specs.get(name)
         if spec is None:
             raise AppError("policy_invalid", f"未知工具: {name}", 422)
-        if action not in RANK:
+        if not isinstance(action, str) or action not in RANK:
             raise AppError("policy_invalid", f"未知策略动作: {action}", 422)
         if RANK[action] < RANK[default_action(spec.risk)]:
             raise AppError(

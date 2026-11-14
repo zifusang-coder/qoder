@@ -1,8 +1,11 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.policy import (
+    clamped_overrides,
     default_action,
     load_overrides,
     save_overrides,
@@ -19,7 +22,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 class PolicyIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    overrides: dict[str, str] = {}
+    overrides: dict[str, Any] = {}
 
 
 class PolicyOut(BaseModel):
@@ -34,7 +37,9 @@ async def get_policy(
 ) -> PolicyOut:
     registry = get_tool_registry()
     specs = {spec.name: spec for spec in registry.all()}
-    overrides = await load_overrides(session, user.tenant_id)
+    overrides = clamped_overrides(
+        await load_overrides(session, user.tenant_id), specs
+    )
     defaults = {
         f"tool:{name}": default_action(spec.risk) for name, spec in specs.items()
     }

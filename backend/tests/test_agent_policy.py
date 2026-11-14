@@ -3,6 +3,7 @@ from sqlalchemy import select
 
 from app.agent.contracts import ToolSpec
 from app.agent.policy import (
+    RANK,
     default_action,
     resolve_policy,
     snapshot_policy,
@@ -82,6 +83,39 @@ def test_resolve_policy_falls_back_on_corrupt_stored_action():
     assert resolve_policy({"tool:demo.read": "always"}, read_tool) == "auto"
 
 
+def test_resolve_policy_clamps_stale_override_after_reclassification():
+    # 工具曾为 read 时写入 auto；后来被重分类为 high，存储值必须在解析时收紧
+    high_tool = _spec("demo.high", "high")
+    assert resolve_policy({"tool:demo.high": "auto"}, high_tool) == "confirm"
+
+
+def test_snapshot_never_loosens_a_tool_default():
+    specs = {
+        "a.read": _spec("a.read", "read"),
+        "b.low": _spec("b.low", "low"),
+        "c.high": _spec("c.high", "high"),
+    }
+    overrides = {
+        "tool:a.read": "always",  # 未知动作
+        "tool:b.low": ["deny"],  # 非字符串动作
+        "tool:c.high": "auto",  # 旧值，已低于当前默认
+        "tool:gone": "deny",  # 已移除的工具
+    }
+    snapshot = snapshot_policy(overrides, specs)
+    assert snapshot == {"a.read": "auto", "b.low": "auto", "c.high": "confirm"}
+    for name, action in snapshot.items():
+        assert RANK[action] >= RANK[default_action(specs[name].risk)]
+
+
+def test_non_string_action_is_policy_invalid():
+    read_tool = _spec("demo.read", "read")
+    with pytest.raises(AppError) as exc:
+        validate_overrides({"tool:demo.read": ["auto"]}, {"demo.read": read_tool})
+    assert exc.value.code == "policy_invalid"
+    assert exc.value.status == 422
+    assert resolve_policy({"tool:demo.read": ["auto"]}, read_tool) == "auto"
+
+
 async def test_policy_api_roundtrip(auth_client, auth_headers):
     reg = build_registry()
     assert reg.names(), "Task 7 完成后注册表不应为空"
@@ -99,14 +133,16 @@ async def test_policy_api_roundtrip(auth_client, auth_headers):
     assert f"tool:{reg.names()[0]}" in body["defaults"]
 
 
-async def test_policy_api_defaults_to_empty_overrides(auth_client, auth_headers):
+async def test_policy_api_defaults_match_registry_risk(auth_client, auth_headers):
     got = await auth_client.get("/api/agent/policy", headers=auth_headers)
     assert got.status_code == 200
     body = got.json()
     assert body["overrides"] == {}
     reg = build_registry()
-    assert set(body["defaults"]) == {f"tool:{name}" for name in reg.names()}
-    assert all(action == "auto" for action in body["defaults"].values())
+    expected = {
+        f"tool:{spec.name}": default_action(spec.risk) for spec in reg.all()
+    }
+    assert body["defaults"] == expected
 
 
 async def test_policy_api_persists_plain_dict(auth_client, auth_headers, db_session):
@@ -182,6 +218,54 @@ async def test_policy_api_rejects_unknown_tool(auth_client, auth_headers):
     )
     assert resp.status_code == 422
     assert resp.json()["code"] == "policy_invalid"
+
+
+async def test_policy_api_rejects_non_string_action(auth_client, auth_headers):
+    reg = build_registry()
+    assert reg.names(), "Task 7 完成后注册表不应为空"
+    resp = await auth_client.put(
+        "/api/agent/policy",
+        json={"overrides": {f"tool:{reg.names()[0]}": 5}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "policy_invalid"
+
+
+async def test_policy_api_get_clamps_stale_overrides(
+    auth_client, auth_headers, db_session, monkeypatch
+):
+    registry = ToolRegistry()
+    registry.register(_spec("demo.read", "read"))
+    registry.register(_spec("demo.low", "low"))
+    registry.register(_spec("demo.high", "high"))
+    monkeypatch.setattr("app.api.agent.get_tool_registry", lambda: registry)
+
+    db_session.add(
+        AgentPolicy(
+            tenant_id=DEFAULT_TENANT_ID,
+            overrides={
+                # 工具曾为 read 时写入 auto，之后被重分类为 high
+                "tool:demo.high": "auto",
+                # 非字符串值，不能 500 PolicyOut
+                "tool:demo.read": ["confirm"],
+                # 已被移除的工具
+                "tool:ghost": "deny",
+                # 合法收紧，应保留
+                "tool:demo.low": "deny",
+            },
+        )
+    )
+
+    got = await auth_client.get("/api/agent/policy", headers=auth_headers)
+    assert got.status_code == 200
+    body = got.json()
+    assert body["overrides"] == {"tool:demo.low": "deny"}
+    assert body["defaults"] == {
+        "tool:demo.read": "auto",
+        "tool:demo.low": "auto",
+        "tool:demo.high": "confirm",
+    }
 
 
 async def test_policy_api_rejects_unknown_action(auth_client, auth_headers, db_session):
