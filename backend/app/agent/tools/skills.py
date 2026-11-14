@@ -1,15 +1,54 @@
+import re
+from pathlib import Path
+
 import jsonschema
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
 from app.agent.tools._common import owned_project, parse_uuid, schema
 from app.errors import AppError
 from app.services.media import MEDIA_SKILLS
-from app.services.outputs import prepare_inputs, public_output_data
+from app.services.outputs import prepare_inputs
 from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import ManifestError
 from app.skills.runner import ScriptError
+
+_ABSOLUTE_PATH_RE = re.compile(r"/[^\s\"'<>|,，。；、）)]+")
+
+
+def _relative_to_root(candidate: str, outputs_root: Path) -> str | None:
+    try:
+        path = Path(candidate)
+        if not path.is_absolute():
+            return None
+        rel = path.resolve().relative_to(outputs_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return "." if str(rel) == "." else str(rel)
+
+
+def _sanitize_string(value: str, outputs_root: Path) -> str:
+    direct = _relative_to_root(value, outputs_root)
+    if direct is not None:
+        return direct
+
+    def replace(match: re.Match[str]) -> str:
+        relative = _relative_to_root(match.group(0), outputs_root)
+        return relative if relative is not None else match.group(0)
+
+    return _ABSOLUTE_PATH_RE.sub(replace, value)
+
+
+def _sanitize_outputs(value, outputs_root: Path):
+    """递归去掉输出中的部署绝对路径，仅保留 outputs 目录下的相对路径。"""
+    if isinstance(value, dict):
+        return {key: _sanitize_outputs(item, outputs_root) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_outputs(item, outputs_root) for item in value]
+    if isinstance(value, str):
+        return _sanitize_string(value, outputs_root)
+    return value
 
 
 async def run_skill(ctx: ToolContext, args: dict) -> ToolResult:
@@ -74,7 +113,7 @@ async def run_skill(ctx: ToolContext, args: dict) -> ToolResult:
             "skill_id": result.skill_id,
             "run_id": result.run_id,
             "text": result.text[:8000],
-            "data": public_output_data(result.data, ctx.settings.outputs_dir),
+            "data": _sanitize_outputs(result.data, ctx.settings.outputs_dir),
             "llm_fallback": result.llm_fallback,
         },
         artifacts=[

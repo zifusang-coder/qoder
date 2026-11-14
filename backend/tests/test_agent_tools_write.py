@@ -1,7 +1,10 @@
+import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.contracts import ToolContext
@@ -129,6 +132,9 @@ async def test_project_create_is_idempotent_per_step(db_session):
     assert first.data["project"]["id"] == second.data["project"]["id"]
     rows = (await db_session.execute(select(Project))).scalars().all()
     assert len(rows) == 1
+    # 重放命中的是同一条持久化行，不是新建的第二行
+    assert first.data["project"]["id"] == str(rows[0].id)
+    assert second.artifacts == first.artifacts
 
     other_step = await _call(
         "project.create", await _ctx(db_session, step_index=2), {"title": "新选题"}
@@ -155,6 +161,11 @@ async def test_content_create_version_advances_current_version(db_session):
     assert second.artifacts == first.artifacts
     versions = (await db_session.execute(select(ContentVersion))).scalars().all()
     assert len(versions) == 2
+    new_versions = [row for row in versions if row.version == 2]
+    assert len(new_versions) == 1
+    # 串行重放命中同一条已持久化的版本行
+    assert first.data["version"]["id"] == str(new_versions[0].id)
+    assert second.data["version"]["id"] == str(new_versions[0].id)
 
     content = await db_session.get(Content, seeded["content"].id)
     await db_session.refresh(content)
@@ -180,6 +191,54 @@ async def test_content_create_version_artifact_points_at_content(db_session):
     version = await db_session.get(ContentVersion, uuid.UUID(version_id))
     assert version is not None
     assert version.content_id == seeded["content"].id
+
+
+async def test_content_create_version_conflict_is_error_clean(db_session, monkeypatch):
+    seeded = await _seed(db_session)
+    content_id = seeded["content"].id
+    db_session.add(
+        ContentVersion(
+            tenant_id=TENANT,
+            content_id=content_id,
+            version=2,
+            title="并发版本",
+            body="并发写入的正文",
+            source="manual",
+        )
+    )
+    await db_session.commit()
+
+    # 模拟版本号竞态：max 查询读到旧值 1，实际要写入的 v2 已存在
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "app.agent.tools.contents.func",
+            SimpleNamespace(max=lambda _column: 1),
+        )
+        with pytest.raises(AppError) as exc:
+            await _call(
+                "content.create_version",
+                await _ctx(db_session),
+                {
+                    "content_id": str(content_id),
+                    "title": "新标题",
+                    "body": "新正文",
+                },
+            )
+    assert exc.value.code == "conflict"
+    assert exc.value.status == 409
+
+    # 冲突回滚后会话仍可用，原 content 未被脏写
+    content = await db_session.get(Content, content_id)
+    assert content.current_version == 1
+    rows = (await db_session.execute(select(ContentVersion))).scalars().all()
+    assert len(rows) == 2
+
+    retried = await _call(
+        "content.create_version",
+        await _ctx(db_session, step_index=2),
+        {"content_id": str(content_id), "title": "新标题", "body": "新正文"},
+    )
+    assert retried.data["version"]["version"] == 3
 
 
 async def test_media_generate_enqueues_and_is_idempotent(db_session):
@@ -217,6 +276,59 @@ async def test_media_generate_without_queue_marks_failed(db_session):
     job = (await db_session.execute(select(MediaJob))).scalars().one()
     assert job.status == "failed"
     assert job.error_code == "queue_unavailable"
+
+
+async def test_media_generate_persists_agent_key_on_creation(db_session):
+    seeded = await _seed(db_session)
+    queue = FakeQueue()
+    result = await _call(
+        "media.generate",
+        await _ctx(db_session, queue=queue),
+        {
+            "project_id": str(seeded["project"].id),
+            "skill_id": "short-video",
+            "payload": {"topic": "效率技巧", "platform": "douyin"},
+        },
+    )
+    db_session.expire_all()
+    job = (await db_session.execute(select(MediaJob))).scalars().one()
+    assert str(job.id) == result.data["job"]["id"]
+    # agent_key 必须和任务行在同一次提交里落库，而不是第二次 UPDATE
+    assert job.agent_key == "run-7:1"
+    assert len(queue.calls) == 1
+
+
+async def test_media_generate_replays_transient_queue_failure(db_session):
+    seeded = await _seed(db_session)
+    args = {
+        "project_id": str(seeded["project"].id),
+        "skill_id": "short-video",
+        "payload": {"topic": "效率技巧", "platform": "douyin"},
+    }
+    with pytest.raises(AppError) as exc:
+        await _call("media.generate", await _ctx(db_session, queue=None), args)
+    assert exc.value.code == "queue_unavailable"
+    failed = (await db_session.execute(select(MediaJob))).scalars().one()
+    assert failed.status == "failed"
+    assert failed.error_code == "queue_unavailable"
+
+    queue = FakeQueue()
+    replayed = await _call(
+        "media.generate", await _ctx(db_session, queue=queue), args
+    )
+    assert replayed.data["job"]["id"] == str(failed.id)
+    assert replayed.data["job"]["status"] == "queued"
+    assert queue.calls == [("process_media_job", str(failed.id))]
+    await db_session.refresh(failed)
+    assert failed.status == "queued"
+    assert failed.error_code == ""
+
+    # 已重新入队的任务再次重放不会重复入队
+    again = await _call(
+        "media.generate", await _ctx(db_session, queue=queue), args
+    )
+    assert again.data["job"]["id"] == str(failed.id)
+    assert len(queue.calls) == 1
 
 
 async def test_publish_create_draft_job_forces_draft_and_is_idempotent(db_session):
@@ -368,35 +480,65 @@ async def test_write_tools_stamp_tenant_on_created_rows(db_session):
 async def test_write_artifact_shape_carries_title(db_session):
     seeded = await _seed(db_session)
     queue = FakeQueue()
-    ctx = await _ctx(db_session, queue=queue)
+    ctx = await _ctx(db_session, queue=queue, gateway=FakeGateway("生成结果"))
 
     results = [
-        await _call("project.create", ctx, {"title": "选题"}),
-        await _call(
-            "content.create_version",
-            ctx,
-            {"content_id": str(seeded["content"].id), "title": "新标题", "body": "新正文"},
+        (
+            await _call("project.create", ctx, {"title": "选题"}),
+            "选题",
         ),
-        await _call(
-            "media.generate",
-            ctx,
-            {
-                "project_id": str(seeded["project"].id),
-                "skill_id": "short-video",
-                "payload": {"topic": "效率", "platform": "douyin"},
-            },
+        (
+            await _call(
+                "content.create_version",
+                ctx,
+                {
+                    "content_id": str(seeded["content"].id),
+                    "title": "新标题",
+                    "body": "新正文",
+                },
+            ),
+            "新标题",
         ),
-        await _call(
-            "publish.create_draft_job",
-            ctx,
-            {"content_id": str(seeded["content"].id), "platform": "wechat"},
+        (
+            await _call(
+                "media.generate",
+                ctx,
+                {
+                    "project_id": str(seeded["project"].id),
+                    "skill_id": "short-video",
+                    "payload": {"topic": "效率", "platform": "douyin"},
+                },
+            ),
+            "竖版短视频",
+        ),
+        (
+            await _call(
+                "publish.create_draft_job",
+                ctx,
+                {"content_id": str(seeded["content"].id), "platform": "wechat"},
+            ),
+            "新标题",
+        ),
+        (
+            await _call(
+                "skill.run",
+                ctx,
+                {
+                    "skill_id": "copywriting",
+                    "inputs": {"topic": "效率", "platform": "douyin"},
+                },
+            ),
+            "平台短文案",
         ),
     ]
-    for result in results:
+    for result, expected_title in results:
         assert len(result.artifacts) == 1
         artifact = result.artifacts[0]
         assert {"type", "id", "title"} <= set(artifact)
         assert all(isinstance(artifact[key], str) and artifact[key] for key in ("type", "id", "title"))
+        # title 必须是人类可读名称，不能把技能/工具 id 当标题
+        assert artifact["title"] == expected_title
+        assert artifact["title"] not in {"short-video", "tts-voiceover", "copywriting"}
 
 
 async def test_publish_create_draft_job_rejects_bad_platforms(db_session):
@@ -448,6 +590,47 @@ async def test_publish_create_draft_job_writes_one_create_event(db_session):
         for event in events
     ] == [(TENANT, "created", "draft", "create")]
     assert events[0].actor == "agent:run-7"
+
+
+async def test_publish_create_draft_job_requires_non_empty_current_version(db_session):
+    seeded = await _seed(db_session)
+    args = {"content_id": str(seeded["content"].id), "platform": "wechat"}
+
+    version = (await db_session.execute(select(ContentVersion))).scalars().one()
+    version.body = "  \n "
+    await db_session.commit()
+    with pytest.raises(AppError) as blank:
+        await _call("publish.create_draft_job", await _ctx(db_session), args)
+    assert blank.value.code == "empty_content"
+    assert blank.value.status == 409
+
+    content = await db_session.get(Content, seeded["content"].id)
+    content.current_version = 2
+    await db_session.commit()
+    with pytest.raises(AppError) as missing:
+        await _call("publish.create_draft_job", await _ctx(db_session), args)
+    assert missing.value.code == "empty_content"
+    assert missing.value.status == 409
+    assert (await db_session.execute(select(PublishJob))).scalars().all() == []
+
+
+async def test_publish_create_draft_job_conflict_without_replay_row(db_session, monkeypatch):
+    seeded = await _seed(db_session)
+
+    async def _fail_flush(_session):
+        raise IntegrityError("INSERT INTO publish_jobs", {}, Exception("duplicate"))
+
+    monkeypatch.setattr(AsyncSession, "flush", _fail_flush)
+    with pytest.raises(AppError) as exc:
+        await _call(
+            "publish.create_draft_job",
+            await _ctx(db_session),
+            {"content_id": str(seeded["content"].id), "platform": "wechat"},
+        )
+    assert exc.value.code == "conflict"
+    assert exc.value.status == 409
+    # 回滚后会话仍可用，且没有留下半成品任务
+    assert (await db_session.execute(select(PublishJob))).scalars().all() == []
 
 
 async def test_skill_run_records_run_and_returns_its_id(db_session):
@@ -505,3 +688,38 @@ async def test_skill_run_rejects_media_skills(db_session):
     assert exc.value.code == "invalid_arguments"
     assert exc.value.status == 422
     assert (await db_session.execute(select(SkillRun))).scalars().all() == []
+
+
+async def test_skill_run_sanitizes_nested_output_paths(db_session, tmp_path):
+    outputs_root = tmp_path / "outputs"
+    run_dir = outputs_root / "adhoc" / TENANT / "run-1"
+    payload = {
+        "titles": [
+            {
+                "text": "标题",
+                "style": "信息型",
+                "reason": f"封面见 {run_dir / 'cover.png'}",
+            }
+        ],
+        "outputs_dir": str(run_dir),
+        "files": [{"path": str(run_dir / "cover.png")}],
+        "nested": {"deep": [str(run_dir / "video.mp4"), 3]},
+        "outside": "/opt/secret/config.yaml",
+    }
+    ctx = await _ctx(
+        db_session, gateway=FakeGateway(json.dumps(payload, ensure_ascii=False))
+    )
+    ctx.settings = SimpleNamespace(outputs_dir=outputs_root)
+    result = await _call(
+        "skill.run",
+        ctx,
+        {"skill_id": "title-hook", "inputs": {"topic": "效率"}},
+    )
+    data = result.data["data"]
+    assert data["outputs_dir"] == f"adhoc/{TENANT}/run-1"
+    assert data["files"] == [{"path": f"adhoc/{TENANT}/run-1/cover.png"}]
+    assert data["titles"][0]["reason"] == f"封面见 adhoc/{TENANT}/run-1/cover.png"
+    assert data["nested"]["deep"] == [f"adhoc/{TENANT}/run-1/video.mp4", 3]
+    # outputs 目录之外的绝对路径无法相对化，保持原样
+    assert data["outside"] == "/opt/secret/config.yaml"
+    assert str(outputs_root) not in json.dumps(data, ensure_ascii=False)

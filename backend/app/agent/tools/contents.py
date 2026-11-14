@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
 from app.agent.tools._common import int_arg, owned_content, owned_project, schema
@@ -87,6 +88,26 @@ def _content_artifact(
     }
 
 
+def _version_result(version: ContentVersion, *, replay: bool) -> ToolResult:
+    summary = (
+        f"版本已存在：v{version.version}"
+        if replay
+        else f"已追加「{version.title}」v{version.version}"
+    )
+    return ToolResult(
+        summary=summary,
+        data={
+            "content_id": str(version.content_id),
+            "version": {"id": str(version.id), "version": version.version},
+        },
+        artifacts=[
+            _content_artifact(
+                version, content_id=version.content_id, title=version.title
+            )
+        ],
+    )
+
+
 async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
     key = f"{ctx.run_id}:{ctx.step_index}"
     existing = (
@@ -98,18 +119,7 @@ async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
         )
     ).scalars().first()
     if existing is not None:
-        return ToolResult(
-            summary=f"版本已存在：v{existing.version}",
-            data={
-                "content_id": str(existing.content_id),
-                "version": {"id": str(existing.id), "version": existing.version},
-            },
-            artifacts=[
-                _content_artifact(
-                    existing, content_id=existing.content_id, title=existing.title
-                )
-            ],
-        )
+        return _version_result(existing, replay=True)
     content = await owned_content(
         ctx.session, ctx.tenant_id, args.get("content_id")
     )
@@ -126,9 +136,10 @@ async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
     ).scalar()
     number = int(latest or 0) + 1
     title = str(args.get("title") or content.title).strip()[:300]
+    content_id = content.id
     version = ContentVersion(
         tenant_id=ctx.tenant_id,
-        content_id=content.id,
+        content_id=content_id,
         version=number,
         title=title,
         body=body,
@@ -139,16 +150,27 @@ async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
     content.current_version = number
     if title:
         content.title = title
-    await ctx.session.commit()
+    try:
+        await ctx.session.commit()
+    except IntegrityError:
+        # 版本号竞态：回滚后按幂等键回读，命中即复放，否则返回可重试冲突
+        await ctx.session.rollback()
+        existing = (
+            await ctx.session.execute(
+                select(ContentVersion).where(
+                    ContentVersion.tenant_id == ctx.tenant_id,
+                    ContentVersion.content_id == content_id,
+                    ContentVersion.meta["agent_key"].as_string() == key,
+                )
+            )
+        ).scalars().first()
+        if existing is None:
+            raise AppError(
+                "conflict", "内容版本已被其他操作更新，请重试", 409
+            ) from None
+        return _version_result(existing, replay=True)
     await ctx.session.refresh(version)
-    return ToolResult(
-        summary=f"已追加「{title}」v{number}",
-        data={
-            "content_id": str(content.id),
-            "version": {"id": str(version.id), "version": number},
-        },
-        artifacts=[_content_artifact(version, content_id=content.id, title=title)],
-    )
+    return _version_result(version, replay=False)
 
 
 SPECS = [

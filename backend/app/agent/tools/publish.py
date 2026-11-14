@@ -105,6 +105,17 @@ async def create_draft_job(ctx: ToolContext, args: dict) -> ToolResult:
             data={"job": _job_row(existing)},
             artifacts=[_job_artifact(existing, title)],
         )
+    version = (
+        await ctx.session.execute(
+            select(ContentVersion).where(
+                ContentVersion.tenant_id == ctx.tenant_id,
+                ContentVersion.content_id == content.id,
+                ContentVersion.version == content.current_version,
+            )
+        )
+    ).scalar_one_or_none()
+    if version is None or not version.body.strip():
+        raise AppError("empty_content", "当前版本正文为空，无法发布", 409)
     account_id = None
     if args.get("account_id"):
         account_id = parse_uuid(args["account_id"], "账号不存在")
@@ -148,7 +159,7 @@ async def create_draft_job(ctx: ToolContext, args: dict) -> ToolResult:
             )
         )
         await ctx.session.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await ctx.session.rollback()
         job = (
             await ctx.session.execute(
@@ -157,7 +168,11 @@ async def create_draft_job(ctx: ToolContext, args: dict) -> ToolResult:
                     PublishJob.idempotency_key == key,
                 )
             )
-        ).scalar_one()
+        ).scalar_one_or_none()
+        if job is None:
+            raise AppError(
+                "conflict", "发布草稿创建冲突，请重试", 409
+            ) from exc
     await ctx.session.refresh(job)
     return ToolResult(
         summary=f"已创建发布草稿（{spec.label}），等待人工排期与审核",

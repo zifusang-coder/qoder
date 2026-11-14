@@ -246,6 +246,7 @@ async def create_media_job(
     skill_id: str,
     payload: dict,
     created_by: uuid.UUID | None = None,
+    agent_key: str = "",
 ) -> MediaJob:
     skill = _resolve_skill(registry, skill_id)
     await require_enabled(session, tenant_id, skill_id)
@@ -257,6 +258,7 @@ async def create_media_job(
         status="queued",
         payload=payload,
         created_by=created_by,
+        agent_key=agent_key,
     )
     session.add(job)
     await session.commit()
