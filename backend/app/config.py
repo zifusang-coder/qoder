@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     login_rate_limit_ip: int = 20
     login_rate_limit_window_seconds: int = 300
     audit_retention_days: int = 180
+    agent_max_steps_default: int = 12
+    agent_max_steps_ceiling: int = 30
+    agent_max_tool_calls: int = 20
+    agent_max_seconds: int = 300
+    agent_token_budget_default: int = 60000
+    agent_daily_token_quota: int = 500000
+    agent_approval_ttl_hours: int = 24
+    agent_run_stale_seconds: int = 300
 
     @model_validator(mode="after")
     def _reject_dev_secrets_outside_dev(self) -> "Settings":

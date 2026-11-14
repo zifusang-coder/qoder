@@ -33,6 +33,7 @@ class MediaJob(TenantScoped):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    agent_key: Mapped[str] = mapped_column(String(200), default="", index=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), nullable=True
     )
