@@ -1,8 +1,10 @@
-"""arq 定时发布 worker。
+"""arq worker：定时发布、媒体任务、Agent 运行与心跳对账。
 
 定时执行覆盖「平台 + 内容类型」能力为自动发布的任务：公众号图文、
 抖音视频、头条视频。人工导出平台与待接入平台不进入扫描。worker 作为
 系统进程跨租户扫描到期任务是有意为之，与按当前用户过滤的 API 端点不同。
+Agent 运行由 API 以 ``run_agent_job`` 入队执行，心跳对账与审批过期由定时
+任务兜底。
 """
 
 import logging
@@ -13,13 +15,17 @@ from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
 from arq import cron
-from arq.connections import RedisSettings
+from arq.connections import ArqRedis, RedisSettings
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.registry import ToolRegistry, get_tool_registry
+from app.agent.runtime import expire_approvals, fail_run, run_agent
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
+from app.llm.gateway import LLMGateway, load_gateway_default
+from app.models.agent import AgentRun
 from app.models.project import Content
 from app.models.publish import PublishJob
 from app.models.tenant import Tenant
@@ -36,7 +42,7 @@ from app.services.publish import (
     apply_action,
     execute_job,
 )
-from app.skills.registry import get_registry
+from app.skills.registry import SkillRegistry, get_registry
 from app.storage import StorageBackend, get_storage
 
 logger = logging.getLogger(__name__)
@@ -285,6 +291,148 @@ async def process_media_job(_ctx: dict | None, job_id: str) -> None:
             logger.exception("媒体任务执行异常 job=%s", job_id)
 
 
+async def run_agent_job(
+    _ctx: dict | None,
+    run_id: str,
+    *,
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ] = SessionLocal,
+    gateway: LLMGateway | None = None,
+    tool_registry: ToolRegistry | None = None,
+    skill_registry: SkillRegistry | None = None,
+    storage: StorageBackend | None = None,
+    queue: ArqRedis | None = None,
+) -> None:
+    """执行一个已入队的 Agent 运行。
+
+    只有 ``queued`` 的运行会被执行：``run_agent`` 内部以 ``queued → running``
+    的条件更新抢占，重复投递或已被其他执行者接手的运行在这里直接返回，保证
+    arq 至少一次投递下的幂等。``running`` 的运行不在这里重入，交给心跳对账
+    决定重排或失败，避免重复执行与尝试次数被重复消耗。
+
+    任何逃逸异常都把运行落为 ``agent_internal_error``，绝不让行停留在
+    ``running``；租户已停用时同样落失败且不执行任何工具。
+    """
+    # arq 运行时把 Redis 连接放在 ctx["redis"]；生产路径必须把它交给工具，
+    # 否则媒体类工具无法二次入队。
+    worker_queue = queue or (_ctx or {}).get("redis")
+    async with session_factory() as session:
+        run = await session.get(AgentRun, uuid.UUID(str(run_id)))
+        if run is None or run.status != "queued":
+            return
+        tenant = await session.get(Tenant, run.tenant_id)
+        if tenant is None or tenant.status != "active":
+            await fail_run(session, run, "tenant_suspended", "租户已停用")
+            return
+        try:
+            active_gateway = gateway or await load_gateway_default(
+                session, run.tenant_id
+            )
+        except AppError as exc:
+            await fail_run(session, run, exc.code, exc.message)
+            return
+        try:
+            await run_agent(
+                session,
+                run,
+                gateway=active_gateway,
+                tool_registry=tool_registry or get_tool_registry(),
+                skill_registry=skill_registry or get_registry(),
+                storage=storage or get_storage(),
+                queue=worker_queue,
+                settings=get_settings(),
+                session_factory=session_factory,
+            )
+        except Exception:
+            logger.exception("agent run crashed run=%s", run.id)
+            await session.rollback()
+            row = await session.get(AgentRun, uuid.UUID(str(run_id)))
+            if row is not None and row.status in {
+                "queued",
+                "running",
+                "waiting_approval",
+            }:
+                await fail_run(
+                    session,
+                    row,
+                    "agent_internal_error",
+                    "运行异常，请稍后重试",
+                )
+
+
+async def reconcile_agent_runs(
+    _ctx: dict | None = None,
+    *,
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ] = SessionLocal,
+    queue: ArqRedis | None = None,
+    now: datetime | None = None,
+    stale_after_seconds: int | None = None,
+) -> int:
+    """心跳对账：重排超时运行、终结无望运行、过期审批。
+
+    扫描 ``running`` 且心跳早于 ``agent_run_stale_seconds`` 的运行，``attempts``
+    未达 2 次时重排（``attempts`` 记录对账重入队次数）并再次入队 ``run_agent_job``，
+    否则落 ``agent_stale``。``waiting_approval`` 是等人工决策，不在扫描范围；
+    已取消/已完成的运行也不会被这里改写。对账跨租户扫描是 worker 的职责，
+    但每条运行只写自己的行，不做跨租户写入。
+    """
+    settings = get_settings()
+    moment = now or datetime.now(UTC)
+    stale_after = (
+        settings.agent_run_stale_seconds
+        if stale_after_seconds is None
+        else stale_after_seconds
+    )
+    cutoff = moment - timedelta(seconds=stale_after)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(AgentRun).where(
+                    AgentRun.status == "running",
+                    or_(
+                        AgentRun.heartbeat_at.is_(None),
+                        AgentRun.heartbeat_at < cutoff,
+                    ),
+                )
+            )
+        ).scalars().all()
+        targets = [row.id for row in rows]
+        handled = 0
+        for target_id in targets:
+            run = await session.get(AgentRun, target_id)
+            if run is None or run.status != "running":
+                continue
+            if run.attempts < 2 and queue is not None:
+                run.attempts += 1
+                run.status = "queued"
+                run.heartbeat_at = moment
+                await session.commit()
+                try:
+                    await queue.enqueue_job("run_agent_job", str(run.id))
+                except Exception:
+                    logger.exception("agent requeue failed run=%s", run.id)
+                    await fail_run(
+                        session,
+                        run,
+                        "agent_stale",
+                        "运行超时未完成，请重试",
+                    )
+            else:
+                await fail_run(
+                    session,
+                    run,
+                    "agent_stale",
+                    "运行超时未完成，请重试",
+                )
+            handled += 1
+        # 审批过期与运行对账同一次定时任务完成：过期审批会终结等待中的运行。
+        await expire_approvals(session)
+        return handled
+
+
 async def archive_audit_logs(
     _ctx: dict | None = None,
     *,
@@ -313,9 +461,14 @@ async def archive_audit_logs(
 
 
 class WorkerSettings:
-    functions: ClassVar[list] = [process_media_job]
+    functions: ClassVar[list] = [process_media_job, run_agent_job]
     cron_jobs: ClassVar[list] = [
         cron(publish_due_jobs, second=0, job_id="publish-due-jobs"),
+        cron(
+            reconcile_agent_runs,
+            second=30,
+            job_id="agent-reconcile",
+        ),
         cron(archive_audit_logs, hour=3, minute=15, job_id="audit-archive"),
     ]
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
