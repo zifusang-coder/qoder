@@ -1,11 +1,14 @@
+import asyncio
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
 from app.agent.contracts import ToolResult, ToolSpec
 from app.agent.registry import ToolRegistry
 from app.agent.runtime import INTERRUPTED_OBSERVATION, SYSTEM_PROMPT, run_agent
+from app.agent.sanitize import MAX_MESSAGES_BYTES
 from app.config import get_settings
 from app.errors import AppError
 from app.llm.tools import ToolCall, ToolTurn
@@ -50,18 +53,24 @@ def turn(content="", calls=(), prompt=10, completion=5):
     )
 
 
-def tool(name, handler, risk="read"):
+def tool(name, handler, risk="read", timeout=60.0, schema=None):
     return ToolSpec(
         name=name,
         description="测试工具",
-        input_schema={
+        input_schema=schema
+        or {
             "type": "object",
             "properties": {"text": {"type": "string"}},
             "additionalProperties": False,
         },
         risk=risk,
         handler=handler,
+        timeout_seconds=timeout,
     )
+
+
+def body_size(value) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str).encode())
 
 
 def deps(turns, specs):
@@ -108,6 +117,7 @@ async def test_multi_step_run_succeeds(db_session):
     seen = []
 
     async def read_handler(ctx, args):
+        await asyncio.sleep(0.02)
         seen.append((args["text"], ctx.run_id, ctx.step_index))
         return ToolResult(
             summary="找到画像",
@@ -146,7 +156,9 @@ async def test_multi_step_run_succeeds(db_session):
     assert [step.kind for step in steps] == ["llm", "tool", "llm", "tool", "llm"]
     assert steps[1].status == "ok"
     assert steps[1].output["summary"] == "找到画像"
-    assert steps[1].duration_ms >= 0
+    assert steps[1].started_at is not None
+    assert steps[1].finished_at is not None
+    assert steps[1].duration_ms >= 10
     assert run.usage["prompt_tokens"] == 30
     assert run.usage["completion_tokens"] == 15
     assert run.usage["tool_calls"] == 2
@@ -475,3 +487,394 @@ async def test_high_risk_policy_cannot_be_loosened(db_session):
 
     assert steps[1].status == "denied"
     assert "需要人工确认" in steps[1].error
+
+
+async def test_tool_secrets_never_reach_history(db_session):
+    """工具返回的数据先脱敏再入观测与 run.result，敏感键的值不会泄漏。"""
+
+    async def handler(ctx, args):
+        return ToolResult(
+            summary="返回含秘钥",
+            data={"api_key": "sk-secret", "text": "ok"},
+        )
+
+    turns = [turn("", [("c1", "demo.read", {"text": "a"})]), turn("完成")]
+    run = await new_run(db_session)
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    persisted = json.dumps(
+        {
+            "messages": run.messages,
+            "result": run.result,
+            "outputs": [step.output for step in steps],
+            "errors": [step.error for step in steps],
+        },
+        ensure_ascii=False,
+    )
+    assert "sk-secret" not in persisted
+    assert steps[1].output["data"] == {"text": "ok"}
+    tool_messages = [item for item in run.messages["items"] if item["role"] == "tool"]
+    assert "ok" in tool_messages[0]["content"]
+
+
+async def test_schema_error_does_not_echo_argument_values(db_session):
+    """jsonschema 的 message 会回显参数值，落库只保留路径与关键字。"""
+
+    async def handler(ctx, args):
+        raise AssertionError("schema 不通过时不应执行")
+
+    schema = {
+        "type": "object",
+        "properties": {"count": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+    turns = [
+        turn("", [("c1", "demo.read", {"count": "sk-secret"})]),
+        turn("参数有误。"),
+    ]
+    run = await new_run(db_session)
+    await run_agent(
+        db_session, run, **deps(turns, [tool("demo.read", handler, schema=schema)])
+    )
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert steps[1].status == "error"
+    assert "参数不合法" in steps[1].error
+    assert "type" in steps[1].error
+    assert "$.count" in steps[1].error
+    assert "sk-secret" not in steps[1].error
+    tool_messages = [item for item in run.messages["items"] if item["role"] == "tool"]
+    assert "sk-secret" not in tool_messages[0]["content"]
+
+
+async def test_tool_exception_message_is_scrubbed(db_session):
+    async def handler(ctx, args):
+        raise RuntimeError("调用失败 api_key=sk-secret")
+
+    turns = [turn("", [("c1", "demo.read", {})]), turn("工具失败。")]
+    run = await new_run(db_session)
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert steps[1].status == "error"
+    assert "RuntimeError" in steps[1].error
+    assert "sk-secret" not in steps[1].error
+    assert "***" in steps[1].error
+    tool_messages = [item for item in run.messages["items"] if item["role"] == "tool"]
+    assert "sk-secret" not in tool_messages[0]["content"]
+
+
+async def test_long_call_id_is_truncated_consistently(db_session):
+    async def handler(ctx, args):
+        return ToolResult(summary="ok")
+
+    long_id = "x" * 300
+    turns = [turn("", [(long_id, "demo.read", {"text": "a"})]), turn("完成")]
+    run = await new_run(db_session)
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assistant_calls = [
+        call
+        for item in run.messages["items"]
+        if item["role"] == "assistant"
+        for call in item.get("tool_calls") or []
+    ]
+    tool_messages = [item for item in run.messages["items"] if item["role"] == "tool"]
+    assert len(assistant_calls[0]["id"]) == 100
+    assert steps[1].call_id == assistant_calls[0]["id"]
+    assert tool_messages[0]["tool_call_id"] == assistant_calls[0]["id"]
+    assert run.status == "succeeded"
+
+
+async def test_empty_and_duplicate_call_ids_are_synthesised(db_session):
+    async def handler(ctx, args):
+        return ToolResult(summary="ok")
+
+    calls = [
+        ("", "demo.read", {"text": "a"}),
+        ("dup", "demo.read", {"text": "b"}),
+        ("dup", "demo.read", {"text": "c"}),
+    ]
+    turns = [turn("", calls), turn("完成")]
+    run = await new_run(db_session)
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+
+    items = run.messages["items"]
+    declared = [
+        call["id"]
+        for item in items
+        if item["role"] == "assistant"
+        for call in item.get("tool_calls") or []
+    ]
+    answered = [item["tool_call_id"] for item in items if item["role"] == "tool"]
+    assert len(declared) == len(set(declared)) == 3
+    assert all(declared)
+    assert sorted(answered) == sorted(declared)
+    assert run.status == "succeeded"
+
+
+async def test_more_than_four_calls_are_skipped(db_session):
+    calls = []
+
+    async def handler(ctx, args):
+        calls.append(args["text"])
+        return ToolResult(summary="ok")
+
+    tool_calls = [(f"c{i}", "demo.read", {"text": f"t{i}"}) for i in range(5)]
+    turns = [turn("", tool_calls), turn("完成")]
+    run = await new_run(db_session)
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+
+    tool_messages = [item for item in run.messages["items"] if item["role"] == "tool"]
+    assert calls == ["t0", "t1", "t2", "t3"]
+    assert len(tool_messages) == 5
+    assert "单轮最多执行" in tool_messages[-1]["content"]
+    assert run.status == "succeeded"
+
+
+async def test_max_seconds_stop_happens_before_the_next_llm_call(db_session):
+    turns = [turn("不应被调用")]
+    deps_map = deps(turns, [])
+    run = await new_run(db_session, budget={**BUDGET, "max_seconds": 1})
+    run.started_at = datetime.now(UTC) - timedelta(seconds=5)
+    await db_session.commit()
+
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+
+    assert run.status == "failed"
+    assert run.error_code == "agent_budget_exhausted"
+    assert run.error_message == "运行时间预算已用尽"
+    assert deps_map["gateway"].calls == []
+    assert run.usage["steps"] == run.step_count
+
+
+async def test_tool_running_past_the_deadline_stops_the_run(db_session):
+    async def slow_handler(ctx, args):
+        await asyncio.sleep(1.0)
+        return ToolResult(summary="太晚了")
+
+    turns = [turn("", [("c1", "demo.read", {"text": "a"})]), turn("不应被调用")]
+    deps_map = deps(turns, [tool("demo.read", slow_handler)])
+    run = await new_run(db_session, budget={**BUDGET, "max_seconds": 2})
+    run.started_at = datetime.now(UTC) - timedelta(seconds=1.5)
+    await db_session.commit()
+
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert run.status == "failed"
+    assert run.error_code == "agent_budget_exhausted"
+    assert run.error_message == "运行时间预算已用尽"
+    assert len(deps_map["gateway"].calls) == 1
+    assert steps[-1].kind == "tool"
+    assert steps[-1].status == "error"
+    assert "运行时间预算已用尽" in steps[-1].error
+    items = run.messages["items"]
+    declared = {
+        call["id"]
+        for item in items
+        if item["role"] == "assistant"
+        for call in item.get("tool_calls") or []
+    }
+    answered = {item["tool_call_id"] for item in items if item["role"] == "tool"}
+    assert declared == answered
+
+
+async def test_per_tool_timeout_is_reported(db_session):
+    async def slow_handler(ctx, args):
+        await asyncio.sleep(0.2)
+        return ToolResult(summary="超时了")
+
+    turns = [turn("", [("c1", "demo.read", {"text": "a"})]), turn("工具超时，继续。")]
+    run = await new_run(db_session)
+    await run_agent(
+        db_session,
+        run,
+        **deps(turns, [tool("demo.read", slow_handler, timeout=0.05)]),
+    )
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert steps[1].status == "error"
+    assert "工具执行超时" in steps[1].error
+    assert run.status == "succeeded"
+
+
+async def test_artifacts_survive_recovery_once(db_session):
+    artifact = {"type": "profile", "id": "p1", "title": "画像"}
+    run = await new_run(
+        db_session,
+        messages={
+            "items": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": "写一篇新文章并创建草稿"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c0",
+                            "type": "function",
+                            "function": {"name": "demo.read", "arguments": "{}"},
+                        },
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "demo.read", "arguments": "{}"},
+                        },
+                    ],
+                },
+            ]
+        },
+    )
+    run.step_count = 3
+    for index, call_id in ((2, "c0"), (3, "c1")):
+        db_session.add(
+            AgentStep(
+                tenant_id=TENANT_A,
+                run_id=run.id,
+                step_index=index,
+                kind="tool",
+                tool_name="demo.read",
+                call_id=call_id,
+                status="ok",
+                output={"summary": "找到画像", "data": {}, "artifacts": [artifact]},
+            )
+        )
+    await db_session.commit()
+
+    async def handler(ctx, args):
+        raise AssertionError("已完成的步骤不应被重放")
+
+    turns = [turn("已完成。")]
+    await run_agent(db_session, run, **deps(turns, [tool("demo.read", handler)]))
+    await db_session.refresh(run)
+
+    assert run.status == "succeeded"
+    assert run.result["artifacts"] == [artifact]
+
+
+async def test_long_history_is_compacted_in_loop(db_session):
+    items = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": "写一篇新文章并创建草稿"},
+    ]
+    for index in range(30):
+        items.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"h{index}",
+                        "type": "function",
+                        "function": {"name": "demo.read", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        items.append(
+            {"role": "tool", "tool_call_id": f"h{index}", "content": "x" * 12_000}
+        )
+    run = await new_run(db_session, messages={"items": items})
+
+    async def handler(ctx, args):
+        return ToolResult(summary="ok")
+
+    turns = [turn("", [("n1", "demo.read", {"text": "a"})]), turn("完成")]
+    deps_map = deps(turns, [tool("demo.read", handler)])
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+
+    gateway = deps_map["gateway"]
+    assert body_size(gateway.calls[0]) > MAX_MESSAGES_BYTES
+    assert body_size(gateway.calls[1]) <= MAX_MESSAGES_BYTES
+    compacted = gateway.calls[1]
+    declared = {
+        call["id"]
+        for item in compacted
+        if item["role"] == "assistant"
+        for call in item.get("tool_calls") or []
+    }
+    tool_ids = {item["tool_call_id"] for item in compacted if item["role"] == "tool"}
+    assert tool_ids <= declared
+    assert any(
+        str(item.get("content") or "").startswith("[已压缩] ")
+        for item in compacted
+        if item["role"] == "tool"
+    )
+    assert len(compacted) == len(run.messages["items"]) - 1
+
+
+async def test_loop_detection_ignores_argument_key_order(db_session):
+    calls = []
+
+    async def handler(ctx, args):
+        calls.append(args)
+        return ToolResult(summary="ok")
+
+    schema = {
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+    turns = [
+        turn("", [("c1", "demo.read", {"a": 1, "b": 2})]),
+        turn("", [("c2", "demo.read", {"b": 2, "a": 1})]),
+        turn("", [("c3", "demo.read", {"a": 1, "b": 2})]),
+    ]
+    run = await new_run(db_session)
+    await run_agent(
+        db_session, run, **deps(turns, [tool("demo.read", handler, schema=schema)])
+    )
+    await db_session.refresh(run)
+
+    assert run.status == "failed"
+    assert run.error_code == "agent_loop_detected"
+    assert len(calls) == 2
+
+
+async def test_explicit_zero_budget_is_honoured(db_session):
+    turns = [turn("不应被调用")]
+    deps_map = deps(turns, [])
+    run = await new_run(db_session, budget={**BUDGET, "max_steps": 0})
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+
+    assert run.status == "failed"
+    assert run.error_code == "agent_budget_exhausted"
+    assert run.error_message == "步数预算已用尽"
+    assert deps_map["gateway"].calls == []
+    assert run.usage["steps"] == 0
+
+
+class BoomGateway:
+    async def complete_tool_calls(self, messages, *, tools):
+        raise RuntimeError("provider down api_key=sk-secret")
+
+
+async def test_gateway_crash_marks_run_failed(db_session):
+    run = await new_run(db_session)
+    deps_map = deps([], [])
+    deps_map["gateway"] = BoomGateway()
+
+    await run_agent(db_session, run, **deps_map)
+    await db_session.refresh(run)
+    steps = await steps_of(db_session, run)
+
+    assert run.status == "failed"
+    assert run.error_code == "agent_internal_error"
+    assert run.error_message == "运行发生内部错误，请稍后重试"
+    assert run.finished_at is not None
+    assert steps[0].status == "error"
+    assert steps[0].error == "LLM 调用失败"
