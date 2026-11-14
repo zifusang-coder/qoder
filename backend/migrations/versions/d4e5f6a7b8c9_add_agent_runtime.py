@@ -7,6 +7,7 @@ Create Date: 2026-11-13
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "d4e5f6a7b8c9"
 down_revision = "c3d4e5f6a7b8"
@@ -21,15 +22,15 @@ def upgrade() -> None:
         sa.Column("goal", sa.Text(), nullable=False),
         sa.Column("mode", sa.String(length=16), nullable=False),
         sa.Column("status", sa.String(length=24), nullable=False),
-        sa.Column("plan", sa.JSON(), nullable=False),
-        sa.Column("messages", sa.JSON(), nullable=False),
+        sa.Column("plan", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
+        sa.Column("messages", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
         sa.Column("result_text", sa.Text(), nullable=False),
-        sa.Column("result", sa.JSON(), nullable=False),
+        sa.Column("result", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
         sa.Column("error_code", sa.String(length=100), nullable=False),
         sa.Column("error_message", sa.Text(), nullable=False),
-        sa.Column("budget", sa.JSON(), nullable=False),
-        sa.Column("usage", sa.JSON(), nullable=False),
-        sa.Column("policy", sa.JSON(), nullable=False),
+        sa.Column("budget", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
+        sa.Column("usage", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
+        sa.Column("policy", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
         sa.Column("step_count", sa.Integer(), nullable=False),
         sa.Column("attempts", sa.Integer(), nullable=False),
         sa.Column("idempotency_key", sa.String(length=64), nullable=True),
@@ -72,8 +73,8 @@ def upgrade() -> None:
         sa.Column("tool_name", sa.String(length=100), nullable=False),
         sa.Column("call_id", sa.String(length=100), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
-        sa.Column("input", sa.JSON(), nullable=False),
-        sa.Column("output", sa.JSON(), nullable=False),
+        sa.Column("input", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
+        sa.Column("output", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
         sa.Column("error", sa.Text(), nullable=False),
         sa.Column("prompt_tokens", sa.Integer(), nullable=False),
         sa.Column("completion_tokens", sa.Integer(), nullable=False),
@@ -109,7 +110,7 @@ def upgrade() -> None:
         sa.Column("step_id", sa.Uuid(as_uuid=True), nullable=False),
         sa.Column("tool_name", sa.String(length=100), nullable=False),
         sa.Column("risk", sa.String(length=16), nullable=False),
-        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("payload", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("decided_by", sa.Uuid(as_uuid=True), nullable=True),
         sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
@@ -148,7 +149,7 @@ def upgrade() -> None:
 
     op.create_table(
         "agent_policies",
-        sa.Column("overrides", sa.JSON(), nullable=False),
+        sa.Column("overrides", sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql"), nullable=False),
         sa.Column("id", sa.Uuid(as_uuid=True), nullable=False),
         sa.Column("tenant_id", sa.String(length=36), nullable=False),
         sa.Column(
@@ -168,9 +169,19 @@ def upgrade() -> None:
     )
     op.create_index("ix_agent_policies_tenant_id", "agent_policies", ["tenant_id"])
 
+    # Add the column without a server default so the DB schema matches the model
+    # (client-side default only). The table may already hold rows, so add it
+    # nullable, backfill, then enforce NOT NULL.
     op.add_column(
         "media_jobs",
-        sa.Column("agent_key", sa.String(length=200), nullable=False, server_default=""),
+        sa.Column("agent_key", sa.String(length=200), nullable=True),
+    )
+    op.execute("UPDATE media_jobs SET agent_key = '' WHERE agent_key IS NULL")
+    op.alter_column(
+        "media_jobs",
+        "agent_key",
+        existing_type=sa.String(length=200),
+        nullable=False,
     )
     op.create_index("ix_media_jobs_agent_key", "media_jobs", ["agent_key"])
 
