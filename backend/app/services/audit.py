@@ -29,7 +29,7 @@ def _normalize_key(key: str) -> str:
     return "".join(char for char in key.lower() if char.isalnum())
 
 
-def _is_blocked_key(key: str) -> bool:
+def is_sensitive_key(key: str) -> bool:
     normalized = _normalize_key(key)
     return any(part in normalized for part in BLOCKED_KEY_PARTS)
 
@@ -48,12 +48,12 @@ def sanitize_detail(detail: dict | None) -> dict:
 
     cleaned: dict[str, Any] = {}
     for key, value in detail.items():
-        if not isinstance(key, str) or _is_blocked_key(key):
+        if not isinstance(key, str) or is_sensitive_key(key):
             continue
         if isinstance(value, dict):
             nested: dict[str, Any] = {}
             for nested_key, nested_value in value.items():
-                if not isinstance(nested_key, str) or _is_blocked_key(nested_key):
+                if not isinstance(nested_key, str) or is_sensitive_key(nested_key):
                     continue
                 scalar = _clean_scalar(nested_value)
                 if scalar is not _UNSUPPORTED:
