@@ -23,12 +23,6 @@ pytestmark = pytest.mark.skipif(
     reason="设置 RUN_AGENT_E2E=1 且配置可用 LLM 提供商后才调用真实模型",
 )
 
-GOAL = (
-    "先调用 project.create 建一个标题为「E2E 秋季护肤」的项目；"
-    "再调用 content.create_version 为它写一版小红书图文；"
-    "最后调用 publish.create_draft_job 创建一条发布草稿。"
-)
-
 
 async def _copy_default_provider(session, tenant_id: str) -> None:
     """把本地库中已配置的默认提供商只读复制进测试会话，不改动原配置。"""
@@ -75,11 +69,36 @@ async def test_agent_reaches_draft_with_real_llm(db_session):
     settings = get_settings()
     await _copy_default_provider(db_session, user.tenant_id)
     gateway = await load_gateway_default(db_session, user.tenant_id)
+
+    # 工具集没有创建内容的入口（规格只列 15 个工具，不含 content.create），
+    # 因此先为租户种一条既有项目与既有内容，让 content.create_version 有落点。
+    seeded_project = Project(
+        tenant_id=user.tenant_id, title="E2E 既有项目", topic="演示"
+    )
+    db_session.add(seeded_project)
+    await db_session.flush()
+    seeded_content = Content(
+        tenant_id=user.tenant_id,
+        project_id=seeded_project.id,
+        platform="xiaohongshu",
+        kind="article",
+        title="E2E 既有内容",
+    )
+    db_session.add(seeded_content)
+    await db_session.commit()
+    seeded_content_id = seeded_content.id
+
+    goal = (
+        "先调用 project.create 建一个标题为「E2E 秋季护肤」的项目；"
+        f"再为已有内容 {seeded_content_id} 调用 content.create_version "
+        "写一版小红书图文；"
+        "最后调用 publish.create_draft_job 用该内容的当前版本创建一条发布草稿。"
+    )
     run = AgentRun(
         id=uuid.uuid4(),
         tenant_id=user.tenant_id,
         user_id=user.id,
-        goal=GOAL,
+        goal=goal,
         status="queued",
         plan={},
         messages={"items": []},
@@ -127,17 +146,19 @@ async def test_agent_reaches_draft_with_real_llm(db_session):
     project = await db_session.get(Project, uuid.UUID(project_id))
     assert project is not None and project.tenant_id == user.tenant_id
 
+    content_ids = [
+        uuid.UUID(item["id"]) for item in artifacts if item["type"] == "content"
+    ]
     contents = (
         (
             await db_session.execute(
-                select(Content).where(Content.project_id == project.id)
+                select(Content).where(Content.id.in_(content_ids))
             )
         )
         .scalars()
         .all()
     )
     assert contents, "应至少生成一条内容"
-    content_ids = [item.id for item in contents]
 
     versions = (
         (

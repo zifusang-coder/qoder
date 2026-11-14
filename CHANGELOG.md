@@ -47,7 +47,7 @@
 - 真实 PostgreSQL：迁移到 `c3d4e5f6a7b8`，默认租户与管理员回填正确。
 - 真实环境验收：租户创建与强制改密、双租户隔离、角色矩阵、停用会话失效、租户停用、审计脱敏全部通过。
 - 主题：前端 `npm test` 与 `npm run build` 通过；桌面与移动宽度下逐页视觉验收通过，无旧色板残留。
-- Agent 运行时：`uv run pytest -q` 932 passed、3 skipped，`uv run ruff check .` 通过；`npm test` 156 passed、`npm run build` 通过。`RUN_AGENT_E2E=1` 真实模型用例未通过：模型能创建项目，但工具集没有创建内容的入口（`content.create_version` 只能为已有内容追加版本），运行最终以 `agent_budget_exhausted`（步数预算已用尽）失败，产物只含项目。
+- Agent 运行时：`uv run pytest -q` 932 passed、3 skipped，`uv run ruff check .` 通过；`npm test` 156 passed、`npm run build` 通过。`RUN_AGENT_E2E=1` 真实模型用例通过：`project.create` → `content.create_version` → `publish.create_draft_job` 依次成功，共 7 步，产出项目、内容版本与发布草稿三类产物（草稿为 `draft` 且未排期），耗时 15.55s，远低于 10 分钟上限。
 
 ### 已知限制
 
