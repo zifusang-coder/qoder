@@ -54,6 +54,12 @@ class AgentRun(TenantScoped):
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True, index=True
+    )
+    workflow_node_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

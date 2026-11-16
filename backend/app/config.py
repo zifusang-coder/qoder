@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     agent_daily_token_quota: int = 500000
     agent_approval_ttl_hours: int = 24
     agent_run_stale_seconds: int = 300
+    workflow_max_parallel_nodes: int = 3
+    workflow_time_slice_seconds: int = 480
+    workflow_max_seconds: int = 3600
+    workflow_approval_ttl_hours: int = 24
+    workflow_max_active_runs_per_user: int = 2
+    workflow_run_stale_seconds: int = 300
 
     @model_validator(mode="after")
     def _reject_dev_secrets_outside_dev(self) -> "Settings":
