@@ -140,7 +140,7 @@ export default function Workflows() {
                     {workflow.name}
                   </Link>
                   {workflow.has_unpublished && (
-                    <span className="badge ml-2 bg-wine-50 text-wine-600">有未发布修改</span>
+                    <span className="badge ml-2 bg-wine-50 text-wine-700">有未发布修改</span>
                   )}
                   {workflow.description && (
                     <p className="mt-1 text-xs text-ink-500">{workflow.description}</p>
