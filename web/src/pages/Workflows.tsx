@@ -53,10 +53,13 @@ export default function Workflows() {
 
   const instantiate = useMutation({
     mutationFn: () =>
-      api<WorkflowSummary>(`/workflows/templates/${templateKey}/instantiate`, {
-        method: "POST",
-        body: JSON.stringify({ name: templateName.trim() }),
-      }),
+      api<WorkflowSummary>(
+        `/workflows/templates/${encodeURIComponent(templateKey)}/instantiate`,
+        {
+          method: "POST",
+          body: JSON.stringify({ name: templateName.trim() }),
+        },
+      ),
     onSuccess: (workflow) => {
       void queryClient.invalidateQueries({ queryKey: ["workflows"] });
       navigate(`/workflows/${workflow.id}`);
@@ -99,9 +102,9 @@ export default function Workflows() {
         </p>
       </header>
 
-      {error && <p className="text-sm text-wine-700">{error}</p>}
+      {error && <p className="text-sm text-wine-600">{error}</p>}
       {workflows.isError && (
-        <p className="text-sm text-wine-700">{errorText(workflows.error)}</p>
+        <p className="text-sm text-wine-600">{errorText(workflows.error)}</p>
       )}
 
       <section className="card overflow-hidden">
@@ -116,6 +119,13 @@ export default function Workflows() {
             </tr>
           </thead>
           <tbody>
+            {workflows.isLoading && (
+              <tr>
+                <td className="px-4 py-6 text-ink-500" colSpan={5}>
+                  加载中…
+                </td>
+              </tr>
+            )}
             {workflows.data?.length === 0 && (
               <tr>
                 <td className="px-4 py-6 text-ink-500" colSpan={5}>
@@ -130,7 +140,7 @@ export default function Workflows() {
                     {workflow.name}
                   </Link>
                   {workflow.has_unpublished && (
-                    <span className="badge ml-2 bg-wine-50 text-wine-700">有未发布修改</span>
+                    <span className="badge ml-2 bg-wine-50 text-wine-600">有未发布修改</span>
                   )}
                   {workflow.description && (
                     <p className="mt-1 text-xs text-ink-500">{workflow.description}</p>
@@ -212,6 +222,9 @@ export default function Workflows() {
                 ))}
               </select>
             </label>
+            {templates.isError && (
+              <p className="text-sm text-wine-600">{errorText(templates.error)}</p>
+            )}
             {selected && (
               <p className="text-xs text-ink-500">{selected.description}</p>
             )}
