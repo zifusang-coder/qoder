@@ -18,6 +18,7 @@ from app.models.workflow import (
     WorkflowVersion,
 )
 from app.workflow import lifecycle
+from app.workflow.lifecycle import _fail_approval_run
 
 NOW = datetime.now(UTC)
 
@@ -128,6 +129,44 @@ async def add_waiting_child(db_session, run):
         payload={},
     )
     db_session.add(approval)
+    await db_session.commit()
+    return child, step, approval
+
+
+async def add_running_child(db_session, run, *, with_approval=True):
+    child = AgentRun(
+        tenant_id=run.tenant_id,
+        user_id=uuid.uuid4(),
+        goal="节点任务",
+        mode="node",
+        status="running",
+        workflow_run_id=run.id,
+        workflow_node_id="agent",
+        budget={},
+        policy={},
+    )
+    db_session.add(child)
+    await db_session.flush()
+    step = AgentStep(
+        tenant_id=run.tenant_id,
+        run_id=child.id,
+        step_index=0,
+        kind="tool",
+        status="running",
+    )
+    db_session.add(step)
+    await db_session.flush()
+    approval = None
+    if with_approval:
+        approval = AgentApproval(
+            tenant_id=run.tenant_id,
+            run_id=child.id,
+            step_id=step.id,
+            tool_name="content.save",
+            risk="high",
+            payload={},
+        )
+        db_session.add(approval)
     await db_session.commit()
     return child, step, approval
 
@@ -394,3 +433,75 @@ async def test_fail_active_run_closes_in_flight_work_only(db_session):
     )
     await db_session.refresh(waiting)
     assert waiting.status == "waiting_approval"
+
+
+async def test_reconcile_expiry_cleans_up_children_and_running_nodes(
+    factory, db_session
+):
+    run = await make_run(db_session, status="waiting_approval")
+    overdue = await add_workflow_approval(
+        db_session, run, expires_at=NOW - timedelta(hours=1)
+    )
+    pending_other = await add_workflow_approval(
+        db_session, run, node_id="other", expires_at=NOW + timedelta(hours=1)
+    )
+    waiting_node = await add_node_run(db_session, run, "review", "waiting")
+    running_node = await add_node_run(db_session, run, "parallel", "running")
+    child, step, child_approval = await add_running_child(db_session, run)
+    counts = await lifecycle.reconcile(
+        factory, settings=get_settings(), now=NOW
+    )
+    for row in (
+        run,
+        overdue,
+        pending_other,
+        waiting_node,
+        running_node,
+        child,
+        step,
+        child_approval,
+    ):
+        await db_session.refresh(row)
+    assert run.status == "failed"
+    assert run.error_code == "approval_expired"
+    assert overdue.status == "expired"
+    assert pending_other.status == "expired"
+    assert waiting_node.status == "denied"
+    assert running_node.status == "interrupted"
+    assert child.status == "cancelled"
+    assert child_approval.status == "expired"
+    assert step.status == "interrupted"
+    assert counts["approval_expired"] == 1
+
+
+async def test_reconcile_orphan_waiting_run_closes_children(factory, db_session):
+    run = await make_run(db_session, status="waiting_approval")
+    node = await add_node_run(db_session, run, "parallel", "running")
+    child, step, _approval = await add_running_child(
+        db_session, run, with_approval=False
+    )
+    counts = await lifecycle.reconcile(
+        factory, settings=get_settings(), now=NOW
+    )
+    for row in (run, node, child, step):
+        await db_session.refresh(row)
+    assert run.status == "failed"
+    assert run.error_code == "approval_expired"
+    assert node.status == "interrupted"
+    assert child.status == "cancelled"
+    assert step.status == "interrupted"
+    assert counts["approval_expired"] == 1
+
+
+async def test_fail_approval_run_lost_cas_writes_nothing(db_session):
+    # running 状态让 waiting_approval → failed 的 CAS 必然失败
+    run = await make_run(db_session, status="running")
+    approval = await add_workflow_approval(db_session, run)
+    node = await add_node_run(db_session, run, "review", "waiting")
+    assert await _fail_approval_run(db_session, run.id, NOW) == 0
+    await db_session.refresh(approval)
+    await db_session.refresh(node)
+    assert approval.status == "pending"
+    assert approval.decided_at is None
+    assert node.status == "waiting"
+    assert node.finished_at is None

@@ -454,8 +454,31 @@ async def settle_stale_run(
 async def _fail_approval_run(
     session: AsyncSession, run_id: uuid.UUID, moment: datetime
 ) -> int:
-    run = await session.get(WorkflowRun, run_id)
-    if run is None or run.status != "waiting_approval":
+    """把审批过期导致的挂起运行落为失败，并清理在途状态。
+
+    清理范围与 ``fail_waiting_run`` 一致：先 CAS 运行行，再过期剩余审批、
+    deny ``waiting`` 节点、取消子运行并中断在途节点。先动运行行是为了与
+    ``decide_approval`` 的 ``workflow_runs → 审批`` 锁序一致，避免对账与
+    审批决策交叉持锁成环；CAS 未命中说明别的执行者已经改写了运行，回滚
+    且不写任何清理。
+    """
+    failed = await session.execute(
+        update(WorkflowRun)
+        .where(
+            WorkflowRun.id == run_id,
+            WorkflowRun.status == "waiting_approval",
+        )
+        .values(
+            status="failed",
+            error_code="approval_expired",
+            error_message=APPROVAL_EXPIRED_MESSAGE,
+            finished_at=moment,
+            heartbeat_at=moment,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if failed.rowcount == 0:
+        await session.rollback()
         return 0
     await session.execute(
         update(WorkflowApproval)
@@ -479,23 +502,11 @@ async def _fail_approval_run(
         )
         .execution_options(synchronize_session=False)
     )
-    failed = await session.execute(
-        update(WorkflowRun)
-        .where(
-            WorkflowRun.id == run_id,
-            WorkflowRun.status == "waiting_approval",
-        )
-        .values(
-            status="failed",
-            error_code="approval_expired",
-            error_message=APPROVAL_EXPIRED_MESSAGE,
-            finished_at=moment,
-            heartbeat_at=moment,
-        )
-        .execution_options(synchronize_session=False)
-    )
+    await _close_children(session, run_id, moment, APPROVAL_EXPIRED_MESSAGE)
+    # waiting 节点已经落 denied；这里兜底可能残留的 running 节点。
+    await _interrupt_nodes(session, run_id)
     await session.commit()
-    return 1 if failed.rowcount else 0
+    return 1
 
 
 async def _expire_overdue(session: AsyncSession, moment: datetime) -> int:
