@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { defaultPath } from "./auth";
 import { ProtectedLayout, RequireRole, useAuth } from "./auth-context";
@@ -18,8 +19,9 @@ import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
 import Team from "./pages/Team";
 import Tenants from "./pages/Tenants";
-import WorkflowEditor from "./pages/WorkflowEditor";
 import Workflows from "./pages/Workflows";
+
+const WorkflowEditor = lazy(() => import("./pages/WorkflowEditor"));
 
 function HomeRedirect() {
   const { user } = useAuth();
@@ -63,7 +65,13 @@ export default function App() {
             path="/workflows/:id"
             element={
               <RequireRole minRole="editor">
-                <WorkflowEditor />
+                <Suspense
+                  fallback={
+                    <p className="p-6 text-center text-sm text-ink-500">加载中…</p>
+                  }
+                >
+                  <WorkflowEditor />
+                </Suspense>
               </RequireRole>
             }
           />

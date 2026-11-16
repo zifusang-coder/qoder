@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../auth-context";
 import { ApiError, api } from "../client";
 import { errorText } from "../types";
@@ -15,6 +15,7 @@ import type {
   WorkflowDetail,
   WorkflowRun,
   WorkflowSchedule,
+  WorkflowVersionDetail,
   WorkflowVersionSummary,
 } from "../types/workflow";
 import {
@@ -73,17 +74,44 @@ function issuesFromDetail(detail: unknown): ValidationIssue[] {
   return Array.isArray(issues) ? (issues as ValidationIssue[]) : [];
 }
 
-function valuesFromSchedule(
-  schedule: WorkflowSchedule,
-  fields: InputField[],
-): InputValues {
+/** 直接读存储值，不依赖字段清单：编辑表单在固定版本图加载前也要保留原值。 */
+function valuesFromSchedule(schedule: WorkflowSchedule): InputValues {
   const values: InputValues = {};
-  for (const field of fields) {
-    const raw = schedule.inputs[field.key];
-    if (field.type === "boolean") values[field.key] = Boolean(raw);
-    else if (raw !== undefined && raw !== null) values[field.key] = String(raw);
+  for (const [key, raw] of Object.entries(schedule.inputs ?? {})) {
+    if (typeof raw === "boolean") values[key] = raw;
+    else if (raw !== undefined && raw !== null) values[key] = String(raw);
   }
   return values;
+}
+
+/** 必填的字符串/数字字段留空时返回其标签；布尔字段 false 视为已填写。 */
+function missingRequiredLabels(
+  fields: InputField[],
+  values: InputValues,
+): string[] {
+  const missing: string[] = [];
+  for (const field of fields) {
+    if (!field.required || field.type === "boolean") continue;
+    const raw = values[field.key];
+    if (raw === undefined || raw === "") missing.push(field.label || field.key);
+  }
+  return missing;
+}
+
+/** 定时固定的是发布版本：新建取最新发布，编辑取定时钉住的版本号。 */
+function schedulePinnedVersion(
+  form: ScheduleForm | null,
+  detail: WorkflowDetail | null,
+  versions: WorkflowVersionSummary[] | undefined,
+): number | null {
+  if (!form) return null;
+  if (!form.id) return detail?.latest_published?.version ?? null;
+  const schedule = detail?.schedules.find((item) => item.id === form.id) ?? null;
+  if (!schedule) return null;
+  const pinned = (versions ?? []).find(
+    (item) => item.id === schedule.workflow_version_id,
+  );
+  return pinned?.version ?? null;
 }
 
 export default function WorkflowEditor() {
@@ -104,6 +132,7 @@ export default function WorkflowEditor() {
   const [drawer, setDrawer] = useState<"none" | "issues">("none");
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState("");
+  const [modalError, setModalError] = useState("");
   const [notice, setNotice] = useState("");
   const [showVersions, setShowVersions] = useState(false);
   const [showPublish, setShowPublish] = useState(false);
@@ -131,8 +160,38 @@ export default function WorkflowEditor() {
   const versionsQuery = useQuery({
     queryKey: ["workflow-versions", id],
     queryFn: () => api<WorkflowVersionSummary[]>(`/workflows/${id}/versions`),
-    enabled: Boolean(id) && (showVersions || showPublish),
+    enabled: Boolean(id) && (showVersions || showPublish || tab === "schedule"),
   });
+
+  const latest = detail?.latest_published ?? null;
+  const ready = detailQuery.isSuccess && detail !== null;
+
+  const runVersionNumber = latest?.version ?? null;
+  const runVersionQuery = useQuery({
+    queryKey: ["workflow-version", id, runVersionNumber],
+    queryFn: () =>
+      api<WorkflowVersionDetail>(`/workflows/${id}/versions/${runVersionNumber}`),
+    enabled: Boolean(id) && showRun && runVersionNumber !== null,
+  });
+
+  const pinnedVersion = schedulePinnedVersion(
+    scheduleForm,
+    detail,
+    versionsQuery.data,
+  );
+  const scheduleVersionQuery = useQuery({
+    queryKey: ["workflow-version", id, pinnedVersion],
+    queryFn: () =>
+      api<WorkflowVersionDetail>(`/workflows/${id}/versions/${pinnedVersion}`),
+    enabled: Boolean(id) && pinnedVersion !== null,
+  });
+
+  const runFields = runVersionQuery.data
+    ? inputFields(normalizeGraph(runVersionQuery.data.graph))
+    : [];
+  const scheduleFields = scheduleVersionQuery.data
+    ? inputFields(normalizeGraph(scheduleVersionQuery.data.graph))
+    : [];
 
   const bump = () => setVersion((value) => value + 1);
 
@@ -257,6 +316,7 @@ export default function WorkflowEditor() {
     onSuccess: (published) => {
       setShowPublish(false);
       setPublishNote("");
+      setModalError("");
       setNotice(`已发布 v${published.version}`);
       void queryClient.invalidateQueries({ queryKey: ["workflow", id] });
       void queryClient.invalidateQueries({ queryKey: ["workflow-versions", id] });
@@ -264,17 +324,25 @@ export default function WorkflowEditor() {
     },
     onError: (err) => {
       if (err instanceof ApiError && err.code === "workflow_invalid") {
-        setIssues(issuesFromDetail(err.detail));
-        setDrawer("issues");
-        setShowPublish(false);
+        const found = issuesFromDetail(err.detail);
+        setIssues(found);
+        if (found.length > 0) {
+          setDrawer("issues");
+          setShowPublish(false);
+          setPublishNote("");
+          setModalError("");
+        } else {
+          setModalError(errorText(err));
+        }
         return;
       }
       if (err instanceof ApiError && err.code === "workflow_conflict") {
         setConflict(true);
         setShowPublish(false);
+        setPublishNote("");
         return;
       }
-      setError(errorText(err));
+      setModalError(errorText(err));
     },
   });
 
@@ -286,9 +354,10 @@ export default function WorkflowEditor() {
       }),
     onSuccess: (run) => {
       setShowRun(false);
+      setModalError("");
       navigate(`/workflows/${id}/runs/${run.id}`);
     },
-    onError: (err) => setError(errorText(err)),
+    onError: (err) => setModalError(errorText(err)),
   });
 
   const restore = useMutation({
@@ -311,7 +380,8 @@ export default function WorkflowEditor() {
   });
 
   const saveSchedule = useMutation({
-    mutationFn: (form: ScheduleForm) => {
+    mutationFn: (input: { form: ScheduleForm; fields: InputField[] }) => {
+      const { form, fields } = input;
       const cadence: Cadence = {
         kind: form.kind,
         weekdays: form.kind === "weekly" ? form.weekdays.slice().sort() : [],
@@ -320,7 +390,7 @@ export default function WorkflowEditor() {
       };
       const body = JSON.stringify({
         cadence,
-        inputs: inputPayload(inputFields(graph), form.values),
+        inputs: inputPayload(fields, form.values),
       });
       if (form.id) {
         return api<WorkflowSchedule>(`/workflows/${id}/schedules/${form.id}`, {
@@ -335,10 +405,11 @@ export default function WorkflowEditor() {
     },
     onSuccess: () => {
       setScheduleForm(null);
+      setModalError("");
       void queryClient.invalidateQueries({ queryKey: ["workflow", id] });
       void queryClient.invalidateQueries({ queryKey: ["workflows"] });
     },
-    onError: (err) => setError(errorText(err)),
+    onError: (err) => setModalError(errorText(err)),
   });
 
   const toggleSchedule = useMutation({
@@ -367,6 +438,7 @@ export default function WorkflowEditor() {
   });
 
   async function validateDraft() {
+    if (!ready) return;
     setError("");
     setNotice("");
     try {
@@ -378,17 +450,91 @@ export default function WorkflowEditor() {
   }
 
   async function confirmPublish() {
+    if (!ready) return;
     setError("");
+    setModalError("");
     let currentRevision = revision;
     if (dirty) {
       try {
         const saved = await save.mutateAsync();
         currentRevision = saved.draft_revision;
-      } catch {
+      } catch (err) {
+        if (!(err instanceof ApiError && err.code === "workflow_conflict")) {
+          setModalError(errorText(err));
+        }
         return;
       }
     }
     publish.mutate({ revision: currentRevision, note: publishNote });
+  }
+
+  function openPublish() {
+    setError("");
+    setModalError("");
+    setPublishNote("");
+    setShowPublish(true);
+  }
+
+  function closePublish() {
+    setShowPublish(false);
+    setPublishNote("");
+    setModalError("");
+  }
+
+  function openRun() {
+    setError("");
+    setModalError("");
+    setRunValues({});
+    setShowRun(true);
+  }
+
+  function closeRun() {
+    setShowRun(false);
+    setModalError("");
+  }
+
+  function openSchedule(form: ScheduleForm) {
+    setError("");
+    setModalError("");
+    setScheduleForm(form);
+  }
+
+  function closeSchedule() {
+    setScheduleForm(null);
+    setModalError("");
+  }
+
+  function openVersions() {
+    setError("");
+    setShowVersions(true);
+  }
+
+  function submitRun() {
+    if (!latest || !runVersionQuery.isSuccess) return;
+    const missing = missingRequiredLabels(runFields, runValues);
+    if (missing.length > 0) {
+      setModalError(`请填写：${missing.join("、")}`);
+      return;
+    }
+    if (dirty && !window.confirm("有未保存的修改，运行将离开当前页面，确定继续？")) {
+      return;
+    }
+    setModalError("");
+    startRun.mutate({
+      inputs: inputPayload(runFields, runValues),
+      version: latest.version,
+    });
+  }
+
+  function submitSchedule() {
+    if (!scheduleForm || !scheduleVersionQuery.isSuccess) return;
+    const missing = missingRequiredLabels(scheduleFields, scheduleForm.values);
+    if (missing.length > 0) {
+      setModalError(`请填写：${missing.join("、")}`);
+      return;
+    }
+    setModalError("");
+    saveSchedule.mutate({ form: scheduleForm, fields: scheduleFields });
   }
 
   function reloadConflict() {
@@ -400,9 +546,7 @@ export default function WorkflowEditor() {
   }
 
   const hasInput = graph.nodes.some((node) => node.type === "input");
-  const fields = inputFields(graph);
   const selected = graph.nodes.find((node) => node.id === selectedId) ?? null;
-  const latest = detail?.latest_published ?? null;
   const runnable = me ? canRunWorkflow(me.role, Boolean(latest)) : false;
   const scale = graphScale(graph);
 
@@ -420,7 +564,7 @@ export default function WorkflowEditor() {
             <p className="text-xs text-ink-500">
               revision {revision} · {scale.text}
               {scale.level !== "ok" && (
-                <span className={scale.level === "over" ? "text-wine-700" : "text-warm-600"}>
+                <span className={scale.level === "over" ? "text-wine-600" : "text-warm-600"}>
                   {" "}
                   · {scale.level === "over" ? "已超过规模上限" : "接近规模上限"}
                 </span>
@@ -432,15 +576,20 @@ export default function WorkflowEditor() {
               <>
                 <button
                   className="btn-secondary"
-                  disabled={save.isPending}
+                  disabled={!ready || save.isPending}
+                  title={ready ? "" : "加载中…"}
                   type="button"
-                  onClick={() => save.mutate()}
+                  onClick={() => {
+                    if (!ready) return;
+                    save.mutate();
+                  }}
                 >
                   {save.isPending ? "保存中…" : dirty ? "保存草稿 *" : "保存草稿"}
                 </button>
                 <button
                   className="btn-secondary"
-                  disabled={validateMutation.isPending}
+                  disabled={!ready || validateMutation.isPending}
+                  title={ready ? "" : "加载中…"}
                   type="button"
                   onClick={() => void validateDraft()}
                 >
@@ -448,8 +597,10 @@ export default function WorkflowEditor() {
                 </button>
                 <button
                   className="btn-primary"
+                  disabled={!ready}
+                  title={ready ? "" : "加载中…"}
                   type="button"
-                  onClick={() => setShowPublish(true)}
+                  onClick={openPublish}
                 >
                   发布
                 </button>
@@ -460,29 +611,22 @@ export default function WorkflowEditor() {
               disabled={!runnable}
               title={runnable ? "" : "发布后才能运行"}
               type="button"
-              onClick={() => {
-                setRunValues({});
-                setShowRun(true);
-              }}
+              onClick={openRun}
             >
               运行{latest ? ` v${latest.version}` : ""}
             </button>
-            <button
-              className="btn-secondary"
-              type="button"
-              onClick={() => setShowVersions(true)}
-            >
+            <button className="btn-secondary" type="button" onClick={openVersions}>
               版本历史
             </button>
           </div>
         </div>
         {(error || detailQuery.isError) && (
-          <p className="text-sm text-wine-700">
+          <p className="text-sm text-wine-600">
             {error || errorText(detailQuery.error)}
           </p>
         )}
         {conflict && (
-          <div className="flex items-center gap-3 rounded-lg bg-wine-50 px-3 py-2 text-sm text-wine-700">
+          <div className="flex items-center gap-3 rounded-lg bg-wine-50 px-3 py-2 text-sm text-wine-600">
             <span>草稿已被其他人更新，保存冲突。</span>
             <button className="btn-secondary" type="button" onClick={reloadConflict}>
               重新加载
@@ -632,10 +776,12 @@ export default function WorkflowEditor() {
                 <h2 className="font-semibold">定时</h2>
                 {editable && (
                   <button
-                    className="text-xs text-sage-700"
+                    className="text-xs text-sage-700 disabled:text-ink-300"
+                    disabled={!latest}
+                    title={latest ? "" : "发布后才能创建定时"}
                     type="button"
                     onClick={() =>
-                      setScheduleForm({
+                      openSchedule({
                         id: null,
                         kind: "daily",
                         weekdays: [1],
@@ -682,7 +828,7 @@ export default function WorkflowEditor() {
                         className="text-sage-700"
                         type="button"
                         onClick={() =>
-                          setScheduleForm({
+                          openSchedule({
                             id: schedule.id,
                             kind: schedule.cadence.kind === "weekly" ? "weekly" : "daily",
                             weekdays: schedule.cadence.weekdays?.length
@@ -690,7 +836,7 @@ export default function WorkflowEditor() {
                               : [1],
                             time: schedule.cadence.time ?? "09:00",
                             timezone: schedule.cadence.timezone ?? "Asia/Shanghai",
-                            values: valuesFromSchedule(schedule, fields),
+                            values: valuesFromSchedule(schedule),
                           })
                         }
                       >
@@ -729,7 +875,7 @@ export default function WorkflowEditor() {
               </button>
             </div>
             {versionsQuery.isError && (
-              <p className="text-sm text-wine-700">{errorText(versionsQuery.error)}</p>
+              <p className="text-sm text-wine-600">{errorText(versionsQuery.error)}</p>
             )}
             {(versionsQuery.data ?? []).length === 0 && (
               <p className="text-sm text-ink-500">还没有发布版本。</p>
@@ -778,8 +924,9 @@ export default function WorkflowEditor() {
                 onChange={(event) => setPublishNote(event.target.value)}
               />
             </label>
+            {modalError && <p className="text-sm text-wine-600">{modalError}</p>}
             <div className="flex justify-end gap-2">
-              <button className="btn-secondary" type="button" onClick={() => setShowPublish(false)}>
+              <button className="btn-secondary" type="button" onClick={closePublish}>
                 取消
               </button>
               <button
@@ -799,49 +946,54 @@ export default function WorkflowEditor() {
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-ink-900/20 p-4">
           <div className="w-full max-w-md space-y-3 rounded-xl bg-surface p-6">
             <h2 className="text-lg font-semibold">运行 v{latest.version}</h2>
-            {fields.length === 0 && (
+            {runVersionQuery.isPending && (
+              <p className="text-sm text-ink-500">加载中…</p>
+            )}
+            {runVersionQuery.isError && (
+              <p className="text-sm text-wine-600">
+                {errorText(runVersionQuery.error)}
+              </p>
+            )}
+            {runVersionQuery.isSuccess && runFields.length === 0 && (
               <p className="text-sm text-ink-500">这个工作流没有声明入参。</p>
             )}
-            {fields.map((field) => (
-              <label key={field.key} className="block space-y-1 text-sm text-ink-500">
-                <span>
-                  {field.label || field.key}
-                  {field.required ? " *" : ""}
-                </span>
-                {field.type === "boolean" ? (
-                  <input
-                    type="checkbox"
-                    checked={Boolean(runValues[field.key])}
-                    onChange={(event) =>
-                      setRunValues({ ...runValues, [field.key]: event.target.checked })
-                    }
-                  />
-                ) : (
-                  <input
-                    className="input"
-                    type={field.type === "number" ? "number" : "text"}
-                    value={String(runValues[field.key] ?? "")}
-                    onChange={(event) =>
-                      setRunValues({ ...runValues, [field.key]: event.target.value })
-                    }
-                  />
-                )}
-              </label>
-            ))}
+            {runVersionQuery.isSuccess &&
+              runFields.map((field) => (
+                <label key={field.key} className="block space-y-1 text-sm text-ink-500">
+                  <span>
+                    {field.label || field.key}
+                    {field.required ? " *" : ""}
+                  </span>
+                  {field.type === "boolean" ? (
+                    <input
+                      type="checkbox"
+                      checked={Boolean(runValues[field.key])}
+                      onChange={(event) =>
+                        setRunValues({ ...runValues, [field.key]: event.target.checked })
+                      }
+                    />
+                  ) : (
+                    <input
+                      className="input"
+                      type={field.type === "number" ? "number" : "text"}
+                      value={String(runValues[field.key] ?? "")}
+                      onChange={(event) =>
+                        setRunValues({ ...runValues, [field.key]: event.target.value })
+                      }
+                    />
+                  )}
+                </label>
+              ))}
+            {modalError && <p className="text-sm text-wine-600">{modalError}</p>}
             <div className="flex justify-end gap-2">
-              <button className="btn-secondary" type="button" onClick={() => setShowRun(false)}>
+              <button className="btn-secondary" type="button" onClick={closeRun}>
                 取消
               </button>
               <button
                 className="btn-primary"
-                disabled={startRun.isPending}
+                disabled={startRun.isPending || !runVersionQuery.isSuccess}
                 type="button"
-                onClick={() =>
-                  startRun.mutate({
-                    inputs: inputPayload(fields, runValues),
-                    version: latest.version,
-                  })
-                }
+                onClick={submitRun}
               >
                 开始运行
               </button>
@@ -917,10 +1069,18 @@ export default function WorkflowEditor() {
                 />
               </label>
             </div>
-            {fields.length > 0 && (
+            {scheduleVersionQuery.isPending && (
+              <p className="text-sm text-ink-500">加载中…</p>
+            )}
+            {scheduleVersionQuery.isError && (
+              <p className="text-sm text-wine-600">
+                {errorText(scheduleVersionQuery.error)}
+              </p>
+            )}
+            {scheduleVersionQuery.isSuccess && scheduleFields.length > 0 && (
               <div className="space-y-2">
                 <p className="text-xs text-ink-500">运行入参</p>
-                {fields.map((field) => (
+                {scheduleFields.map((field) => (
                   <label key={field.key} className="block space-y-1 text-sm text-ink-500">
                     <span>{field.label || field.key}</span>
                     {field.type === "boolean" ? (
@@ -957,19 +1117,20 @@ export default function WorkflowEditor() {
                 ))}
               </div>
             )}
+            {modalError && <p className="text-sm text-wine-600">{modalError}</p>}
             <div className="flex justify-end gap-2">
               <button
                 className="btn-secondary"
                 type="button"
-                onClick={() => setScheduleForm(null)}
+                onClick={closeSchedule}
               >
                 取消
               </button>
               <button
                 className="btn-primary"
-                disabled={saveSchedule.isPending}
+                disabled={saveSchedule.isPending || !scheduleVersionQuery.isSuccess}
                 type="button"
-                onClick={() => saveSchedule.mutate(scheduleForm)}
+                onClick={submitSchedule}
               >
                 保存
               </button>
