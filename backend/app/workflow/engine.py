@@ -29,7 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.contracts import ToolContext
 from app.agent.policy import resolve_policy
+from app.agent.quota import ensure_daily_quota
 from app.agent.registry import ToolRegistry
+from app.agent.runtime import run_agent
 from app.agent.sanitize import fit_bytes, scrub
 from app.config import Settings
 from app.errors import AppError
@@ -78,6 +80,11 @@ MAX_RETRY = 3
 RETRY_BACKOFF = (2.0, 4.0, 8.0)
 SKIPPED_MESSAGE = "上游分支未选中"
 MAX_RESULT_ITEMS = 50
+# 子运行预算留出的时间片余量（Ruling 11）
+SLICE_GUARD_SECONDS = 5
+BUDGET_KEYS = frozenset(
+    {"max_steps", "max_tokens", "max_tool_calls", "max_seconds"}
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +97,8 @@ class EngineDeps:
     settings: Settings
     # 测试注入 no-op，生产保持真实退避
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    # 生产 worker 必须传入：子运行靠它发心跳，否则会被第 1 层对账误杀
+    session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 @dataclass
@@ -340,12 +349,8 @@ def _estimate(node: GraphNode, deps: EngineDeps) -> float:
         spec = deps.tool_registry.get(str(node.data.get("tool") or ""))
         return float(spec.timeout_seconds or 0) if spec is not None else 0.0
     if node.kind == "agent":
-        budget = node.data.get("budget")
-        value = budget.get("max_seconds") if isinstance(budget, dict) else None
-        try:
-            return max(0.0, float(value or 60))
-        except (TypeError, ValueError):
-            return 60.0
+        budget = _agent_budget(node, deps.settings)
+        return float(budget.get("max_seconds") or 0)
     return 0.0
 
 
@@ -798,17 +803,16 @@ async def _execute_node(
         return await _execute_tool(
             session, run, node, node_run, state, deps, resume=resume
         )
+    if node.kind == "agent":
+        return await _execute_agent(
+            session, run, node, node_run, state, deps, resume=resume
+        )
     if node.kind == "condition":
         return await _execute_condition(session, node, node_run, state)
     if node.kind == "review":
         return await _execute_review(session, run, node, node_run, state, deps)
     if node.kind == "output":
         return await _execute_output(session, node, node_run, state)
-    if node.kind == "agent":
-        # Task 7 会把这里换成真正的子运行执行器。
-        raise AppError(
-            "workflow_internal_error", f"Agent 节点执行器尚未接入: {node.id}", 500
-        )
     raise AppError("workflow_internal_error", f"未知节点类型: {node.kind}", 500)
 
 
@@ -827,6 +831,186 @@ def _resolve_args(node: GraphNode, state: RunState) -> dict:
             "invalid_arguments", f"节点 {node.id} 工具参数必须是对象", 422
         )
     return resolved
+
+
+def _agent_budget(node: GraphNode, settings: Settings) -> dict[str, int]:
+    raw = node.data.get("budget")
+    if not isinstance(raw, dict):
+        raw = {}
+    budget = {
+        key: value
+        for key, value in raw.items()
+        if key in BUDGET_KEYS
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value > 0
+    }
+    cap = int(settings.workflow_time_slice_seconds or 0)
+    if cap > 0:
+        # 整次执行（含重试与退避）得装进一个时间片，否则引擎会在开跑前判死。
+        # 于是每个尝试只分到（时间片 - 守卫 - 全部退避）/ 尝试次数；
+        # retry=0 时正好退化为 Ruling 11 的「时间片 - 5」。
+        attempts = _retry_budget(node) + 1
+        backoffs = int(sum(_backoff(index) for index in range(attempts - 1)))
+        ceiling = max(1, (cap - SLICE_GUARD_SECONDS - backoffs) // attempts)
+        budget["max_seconds"] = min(budget.get("max_seconds", ceiling), ceiling)
+    return budget
+
+
+def _agent_goal(node: GraphNode, state: RunState) -> str:
+    raw = node.data.get("goal") or ""
+    try:
+        resolved = resolve_value(
+            raw, inputs=state.inputs, outputs=_raw_outputs(state)
+        )
+    except VariableError as exc:
+        raise AppError(
+            "invalid_arguments", f"Agent 目标解析失败：{exc}", 422
+        ) from None
+    if not isinstance(resolved, str) or not resolved.strip():
+        raise AppError("invalid_arguments", "Agent 目标不能为空", 422)
+    return resolved[:4000]
+
+
+async def _abort_node(
+    session: AsyncSession,
+    run: WorkflowRun,
+    node_run: WorkflowNodeRun,
+    code: str,
+    message: str,
+) -> None:
+    node_run.status = "error"
+    node_run.error = message[:500]
+    node_run.finished_at = _now()
+    node_run.duration_ms = _duration(node_run.started_at, node_run.finished_at)
+    await _fail_run(session, run, code, message)
+    await session.commit()
+
+
+async def _agent_succeeded(
+    session: AsyncSession, node_run: WorkflowNodeRun, child: AgentRun
+) -> str:
+    payload = {
+        "result_text": child.result_text,
+        "result": child.result if isinstance(child.result, dict) else {},
+    }
+    node_run.output = _safe_dict(payload)
+    node_run.raw_output = _raw_payload(payload)
+    node_run.status = "ok"
+    node_run.finished_at = _now()
+    node_run.duration_ms = _duration(node_run.started_at, node_run.finished_at)
+    await session.commit()
+    return "ok"
+
+
+async def _agent_failed(
+    session: AsyncSession,
+    run: WorkflowRun,
+    node_run: WorkflowNodeRun,
+    child: AgentRun,
+) -> str:
+    code = child.error_code or "node_failed"
+    message = (child.error_message or "Agent 节点执行失败")[:500]
+    node_run.finished_at = _now()
+    node_run.duration_ms = _duration(node_run.started_at, node_run.finished_at)
+    if code == "approval_rejected":
+        node_run.status = "denied"
+        node_run.error = message
+        await _fail_run(session, run, "approval_rejected", message)
+        await session.commit()
+        return "error"
+    if code in {"agent_daily_quota_exceeded", "llm_not_configured"}:
+        node_run.status = "error"
+        node_run.error = message
+        await _fail_run(session, run, code, message)
+        await session.commit()
+        return "error"
+    # 其余失败交给 _run_node 的重试循环，耗尽后落 node_failed
+    raise AppError("service_unavailable", f"Agent 子运行失败：{message}")
+
+
+async def _execute_agent(
+    session: AsyncSession,
+    run: WorkflowRun,
+    node: GraphNode,
+    node_run: WorkflowNodeRun,
+    state: RunState,
+    deps: EngineDeps,
+    *,
+    resume: bool = False,
+) -> str:
+    if deps.gateway is None:
+        await _abort_node(
+            session, run, node_run, "llm_not_configured", "未配置可用的大模型"
+        )
+        return "error"
+    try:
+        await ensure_daily_quota(session, run.tenant_id, deps.settings)
+    except AppError as exc:
+        await _abort_node(session, run, node_run, exc.code, exc.message)
+        return "error"
+
+    patterns = [str(item) for item in (node.data.get("tools") or [])]
+    child: AgentRun | None = None
+    if resume and node_run.agent_run_id is not None:
+        child = await session.get(AgentRun, node_run.agent_run_id)
+    if child is None:
+        goal = _agent_goal(node, state)
+        child = AgentRun(
+            tenant_id=run.tenant_id,
+            user_id=run.triggered_by or state.creator_id,
+            goal=goal,
+            mode="node",
+            status="queued",
+            budget=_agent_budget(node, deps.settings),
+            policy=dict(run.policy or {}),
+            workflow_run_id=run.id,
+            workflow_node_id=node.id,
+        )
+        session.add(child)
+        await session.commit()
+        await session.refresh(child)
+        node_run.agent_run_id = child.id
+        node_run.input = _safe_dict({"goal": goal, "tools": patterns})
+        node_run.status = "running"
+        await session.commit()
+    elif child.status == "succeeded":
+        return await _agent_succeeded(session, node_run, child)
+    elif child.status in {"failed", "cancelled"}:
+        return await _agent_failed(session, run, node_run, child)
+    elif child.status not in {"queued", "waiting_approval"}:
+        await _abort_node(
+            session,
+            run,
+            node_run,
+            "workflow_internal_error",
+            f"子运行状态异常: {child.status}",
+        )
+        return "error"
+
+    await run_agent(
+        session,
+        child,
+        gateway=deps.gateway,
+        tool_registry=deps.tool_registry.subset(patterns),
+        skill_registry=deps.skill_registry,
+        storage=deps.storage,
+        queue=deps.queue,
+        settings=deps.settings,
+        session_factory=deps.session_factory,
+    )
+    await session.refresh(child)
+    if child.status == "succeeded":
+        return await _agent_succeeded(session, node_run, child)
+    if child.status == "waiting_approval":
+        node_run.status = "waiting"
+        # 与工具/审核节点同一套挂起口径：盖心跳并接受并行分支已挂起的状态。
+        if not await _park(session, run, _now()):
+            await session.rollback()
+            return "stopped"
+        await session.commit()
+        return "waiting"
+    return await _agent_failed(session, run, node_run, child)
 
 
 async def _park(
@@ -1134,12 +1318,6 @@ async def _resume_waiting(
             if item.status != "waiting":
                 continue
             node = state.graph.nodes.get(item.node_id)
-            node_run = await _latest_node_run(
-                session,
-                tenant_id=run.tenant_id,
-                run_id=run.id,
-                node_id=item.node_id,
-            )
             if node is None:
                 await _fail_run(
                     session,
@@ -1149,7 +1327,16 @@ async def _resume_waiting(
                 )
                 await session.commit()
                 return "stopped"
-
+            if node.kind == "agent":
+                # 子运行的审批在 agent_approvals，没有 workflow_approvals 行
+                active.append(item.node_id)
+                continue
+            node_run = await _latest_node_run(
+                session,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                node_id=item.node_id,
+            )
             approval = await approvals.node_approval(
                 session,
                 tenant_id=run.tenant_id,

@@ -67,6 +67,28 @@ class ToolRegistry:
             for spec in self.all()
         ]
 
+    def subset(self, patterns: Iterable[str] | None) -> "ToolRegistry":
+        """按精确名或 ``前缀.*`` 收窄视图；空列表表示全集。"""
+        selected = [str(item) for item in patterns or [] if str(item)]
+        if not selected:
+            return self
+        allowed: set[str] = set()
+        for pattern in selected:
+            if pattern.endswith(".*"):
+                allowed.update(
+                    name
+                    for name in self._specs
+                    if name.startswith(pattern[:-1])
+                )
+            else:
+                allowed.add(pattern)
+        subset = ToolRegistry()
+        for name in sorted(allowed):
+            spec = self._specs.get(name)
+            if spec is not None:
+                subset.register(spec)
+        return subset
+
 
 def build_registry() -> ToolRegistry:
     from app.agent.tools import (
