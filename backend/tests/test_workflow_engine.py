@@ -1,9 +1,10 @@
+import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.agent.contracts import ToolResult, ToolSpec
@@ -20,7 +21,8 @@ from app.models.workflow import (
 from app.skills.registry import SkillRegistry
 from app.storage import get_storage
 from app.workflow import approvals
-from app.workflow.engine import EngineDeps, run_workflow
+from app.workflow.engine import EngineDeps, _full_estimate, run_workflow
+from app.workflow.graph import GraphNode
 
 
 async def no_sleep(_seconds: float) -> None:
@@ -50,6 +52,11 @@ async def engine(db_session):
     async def bad(ctx, args):
         stats["calls"].append((str(ctx.run_id), ctx.step_index, args))
         raise AppError("invalid_arguments", "参数不合法", 422)
+
+    async def slow(ctx, args):
+        stats["calls"].append((str(ctx.run_id), ctx.step_index, args))
+        await asyncio.sleep(0.8)
+        return ToolResult(summary="慢节点", data={"ok": True})
 
     registry = ToolRegistry()
     registry.register_all(
@@ -92,6 +99,19 @@ async def engine(db_session):
                 risk="read",
                 handler=bad,
                 timeout_seconds=30,
+            ),
+            ToolSpec(
+                name="demo.slow",
+                description="耗时 0.8 秒",
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+                risk="read",
+                handler=slow,
+                timeout_seconds=1.5,
             ),
         ]
     )
@@ -169,7 +189,7 @@ def condition_graph():
     }
 
 
-def join_graph():
+def join_graph(tool="demo.echo"):
     return {
         "nodes": [
             node(
@@ -177,8 +197,8 @@ def join_graph():
                 "input",
                 fields=[{"key": "topic", "type": "string", "required": True}],
             ),
-            node("a", "tool", tool="demo.echo", args={"text": "A"}),
-            node("b", "tool", tool="demo.echo", args={"text": "B"}),
+            node("a", "tool", tool=tool, args={"text": "A"}),
+            node("b", "tool", tool=tool, args={"text": "B"}),
             node("out", "output"),
         ],
         "edges": [
@@ -389,6 +409,24 @@ async def test_wall_clock_limit_fails_before_execution(engine, db_session):
 
 
 async def test_time_slice_requeues_when_next_node_cannot_fit(engine, db_session):
+    # 单节点预计 1.5 秒能装进 2 秒时间片；首节点实跑 0.8 秒后余量不足，第二个必须顺延。
+    deps = replace(
+        engine.deps,
+        settings=engine.deps.settings.model_copy(
+            update={"workflow_time_slice_seconds": 2}
+        ),
+    )
+    run = await make_run(db_session, join_graph(tool="demo.slow"))
+    assert await run_workflow(engine.factory, run.id, deps=deps) == "queued"
+    await db_session.refresh(run)
+    assert run.status == "queued"
+    rows = await node_rows(db_session, run.id)
+    assert sorted(row.node_id for row in rows) == ["a", "in"]
+    assert len(engine.stats["calls"]) == 1
+    assert engine.stats["calls"][0][2] == {"text": "A"}
+
+
+async def test_node_longer_than_slice_fails_instead_of_requeueing(engine, db_session):
     deps = replace(
         engine.deps,
         settings=engine.deps.settings.model_copy(
@@ -396,9 +434,44 @@ async def test_time_slice_requeues_when_next_node_cannot_fit(engine, db_session)
         ),
     )
     run = await make_run(db_session, linear_graph())
-    assert await run_workflow(engine.factory, run.id, deps=deps) == "queued"
+    assert await run_workflow(engine.factory, run.id, deps=deps) == "failed"
     await db_session.refresh(run)
-    assert run.status == "queued"
-    rows = await node_rows(db_session, run.id)
-    assert [row.node_id for row in rows] == ["in"]
+    assert run.error_code == "node_failed"
+    assert "时间片" in run.error_message
     assert engine.stats["calls"] == []
+
+
+async def test_cancel_during_retry_backoff_does_not_execute_again(engine, db_session):
+    run = await make_run(db_session, linear_graph(tool="demo.flaky", retry=1))
+
+    async def cancel_during_backoff(_seconds: float) -> None:
+        async with engine.factory() as session:
+            await session.execute(
+                update(WorkflowRun)
+                .where(
+                    WorkflowRun.id == run.id,
+                    WorkflowRun.status.in_({"running", "queued"}),
+                )
+                .values(status="cancelled")
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+
+    deps = replace(engine.deps, sleep=cancel_during_backoff)
+    assert await run_workflow(engine.factory, run.id, deps=deps) == "cancelled"
+    assert len(engine.stats["calls"]) == 1
+    attempts = [
+        row for row in await node_rows(db_session, run.id) if row.node_id == "echo"
+    ]
+    assert [row.attempt for row in attempts] == [1]
+
+
+async def test_full_estimate_counts_retries_and_backoff(engine):
+    def tool_node(retry):
+        data = {"tool": "demo.echo"} | ({"retry": retry} if retry else {})
+        return GraphNode(id="echo", kind="tool", data=data, position={})
+
+    # demo.echo 单次上限 30 秒；退避 2/4/8 秒也计入时间片。
+    assert _full_estimate(tool_node(0), engine.deps) == 30.0
+    assert _full_estimate(tool_node(1), engine.deps) == 62.0
+    assert _full_estimate(tool_node(3), engine.deps) == 134.0

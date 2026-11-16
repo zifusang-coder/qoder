@@ -74,6 +74,8 @@ RUN_LEVEL_CODES = frozenset(
     {"workflow_internal_error", "llm_not_configured", "agent_daily_quota_exceeded"}
 )
 MAX_RETRY = 3
+# 第 index 次重试前的退避秒数（累计计入时间片判定的完整耗时）
+RETRY_BACKOFF = (2.0, 4.0, 8.0)
 SKIPPED_MESSAGE = "上游分支未选中"
 MAX_RESULT_ITEMS = 50
 
@@ -319,15 +321,16 @@ def _is_serial(factory: async_sessionmaker[AsyncSession]) -> bool:
     return bind is not None and bind.dialect.name == "sqlite"
 
 
-def _slice_deadline(deps: EngineDeps) -> float | None:
+def _slice_window(deps: EngineDeps) -> tuple[float, float | None]:
+    """返回 (时间片秒数, 本次推进的截止时刻)；``<= 0`` 表示关闭时间片。"""
     seconds = float(deps.settings.workflow_time_slice_seconds or 0)
     if seconds <= 0:
-        return None
-    return asyncio.get_running_loop().time() + seconds
+        return 0.0, None
+    return seconds, asyncio.get_running_loop().time() + seconds
 
 
 def _estimate(node: GraphNode, deps: EngineDeps) -> float:
-    """节点最大可能耗时，用于判断剩余时间片是否够跑下一个节点。"""
+    """节点单次尝试的最大可能耗时。"""
     if node.kind == "tool":
         spec = deps.tool_registry.get(str(node.data.get("tool") or ""))
         return float(spec.timeout_seconds or 0) if spec is not None else 0.0
@@ -341,19 +344,33 @@ def _estimate(node: GraphNode, deps: EngineDeps) -> float:
     return 0.0
 
 
+def _full_estimate(node: GraphNode, deps: EngineDeps) -> float:
+    """整次节点执行（全部尝试 + 退避）的最大可能耗时；时间片按这个值比较。"""
+    retries = _retry_budget(node)
+    return _estimate(node, deps) * (retries + 1) + sum(RETRY_BACKOFF[:retries])
+
+
+def _fits(
+    node_id: str,
+    state: RunState,
+    deps: EngineDeps,
+    deadline: float | None,
+) -> bool:
+    """剩余时间片是否装得下该节点整次执行（含重试与退避）。"""
+    if deadline is None:
+        return True
+    remaining = deadline - asyncio.get_running_loop().time()
+    return _full_estimate(state.graph.nodes[node_id], deps) <= remaining
+
+
 def _fitting(
     state: RunState,
     ready: list[str],
     deps: EngineDeps,
     deadline: float | None,
 ) -> list[str]:
-    if deadline is None:
-        return ready
-    remaining = deadline - asyncio.get_running_loop().time()
     return [
-        node_id
-        for node_id in ready
-        if _estimate(state.graph.nodes[node_id], deps) <= remaining
+        node_id for node_id in ready if _fits(node_id, state, deps, deadline)
     ]
 
 
@@ -391,7 +408,7 @@ async def run_workflow(
     await _seed_input(factory, state)
 
     serial = _is_serial(factory)
-    deadline = _slice_deadline(deps)
+    slice_seconds, deadline = _slice_window(deps)
 
     while True:
         state = await _load(factory, run_id)
@@ -439,14 +456,31 @@ async def run_workflow(
                 )
             return await _finalize(factory, run_id, deps=deps)
 
-        runnable = _fitting(state, ready, deps, deadline)
-        if not runnable:
-            return await _requeue(factory, run_id, deps=deps)
+        if deadline is not None:
+            # 装不进整个时间片的节点永远等不到余量，重排队就是死循环，直接判失败。
+            overdue = [
+                node_id
+                for node_id in ready
+                if _full_estimate(state.graph.nodes[node_id], deps) > slice_seconds
+            ]
+            if overdue:
+                estimate = _full_estimate(state.graph.nodes[overdue[0]], deps)
+                return await _fail(
+                    factory,
+                    run_id,
+                    "node_failed",
+                    f"节点 {overdue[0]} 预计耗时 {estimate:g} 秒（含重试与退避）"
+                    f"超过时间片 {slice_seconds:g} 秒，无法在单个时间片内完成",
+                )
+            runnable = _fitting(state, ready, deps, deadline)
+            if not runnable:
+                return await _requeue(factory, run_id, deps=deps)
+            ready = runnable
 
         if serial:
-            await _run_serial(factory, state, runnable, deps=deps)
+            await _run_serial(factory, state, ready, deps=deps, deadline=deadline)
         else:
-            await _run_parallel(factory, state, runnable, deps=deps)
+            await _run_parallel(factory, state, ready, deps=deps, deadline=deadline)
 
 
 async def _run_serial(
@@ -455,10 +489,14 @@ async def _run_serial(
     node_ids: list[str],
     *,
     deps: EngineDeps,
+    deadline: float | None = None,
 ) -> None:
     """SQLite 测试夹具：一个会话里逐节点执行，避免并行 session 抢同一连接。"""
     async with factory() as session:
         for node_id in node_ids:
+            # 前一个节点实跑完可能已吃掉余量：不再启动后续节点，交回外层重排队。
+            if not _fits(node_id, state, deps, deadline):
+                break
             outcome = await _run_node(
                 factory, state, node_id, deps=deps, session=session
             )
@@ -472,14 +510,23 @@ async def _run_parallel(
     node_ids: list[str],
     *,
     deps: EngineDeps,
+    deadline: float | None = None,
 ) -> None:
-    gate = asyncio.Semaphore(max(1, int(deps.settings.workflow_max_parallel_nodes)))
+    limit = max(1, int(deps.settings.workflow_max_parallel_nodes))
 
-    async def guarded(node_id: str) -> str:
-        async with gate:
-            return await _run_node(factory, state, node_id, deps=deps)
+    async def run_chunk(chunk: list[str]) -> None:
+        gate = asyncio.Semaphore(limit)
 
-    await asyncio.gather(*(guarded(node_id) for node_id in node_ids))
+        async def guarded(node_id: str) -> None:
+            async with gate:
+                # 排队等槽位期间余量可能已耗尽：不执行，交给外层重新入队。
+                if _fits(node_id, state, deps, deadline):
+                    await _run_node(factory, state, node_id, deps=deps)
+
+        await asyncio.gather(*(guarded(node_id) for node_id in chunk))
+
+    for start in range(0, len(node_ids), limit):
+        await run_chunk(node_ids[start : start + limit])
 
 
 async def _seed_input(
@@ -681,7 +728,13 @@ async def _run_node(
             if run is None or not _node_can_run(run.status):
                 return "stopped"
             if _retryable(exc) and index < retry:
-                await deps.sleep(2 ** (index + 1))
+                await deps.sleep(RETRY_BACKOFF[index])
+                # 退避期间运行可能被取消：上一次尝试的回滚已过期本会话实例，
+                # 重读后才能决定是否还要写新尝试行并执行工具。
+                session.expire_all()
+                run = await session.get(WorkflowRun, state.id)
+                if run is None or not _node_can_run(run.status):
+                    return "stopped"
                 continue
             await _fail_run(session, run, _run_error_code(exc), _error_message(exc))
             await session.commit()
