@@ -97,6 +97,7 @@ export interface WorkflowRun {
   error_message: string;
   usage: Partial<
     Record<
+      | "nodes"
       | "steps"
       | "tool_calls"
       | "prompt_tokens"
@@ -156,6 +157,7 @@ export interface ValidationIssue {
   code: string;
   node_id?: string;
   message: string;
+  severity?: string;
 }
 
 export interface ValidationResult {

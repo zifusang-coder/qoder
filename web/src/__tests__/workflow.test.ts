@@ -104,6 +104,25 @@ describe("图结构纯函数", () => {
   it("收集上游节点集合（不含自身）", () => {
     expect([...upstreamNodeIds(graph, "b")].sort()).toEqual(["a", "in"]);
     expect(upstreamNodeIds(graph, "in").size).toBe(0);
+
+    const diamond: Graph = {
+      nodes: [
+        { id: "s", type: "input", data: {} },
+        { id: "p1", type: "tool", data: {} },
+        { id: "p2", type: "tool", data: {} },
+        { id: "t", type: "output", data: {} },
+      ],
+      edges: [
+        { id: "d1", source: "s", target: "p1" },
+        { id: "d2", source: "s", target: "p2" },
+        { id: "d3", source: "p1", target: "t" },
+        { id: "d4", source: "p2", target: "t" },
+      ],
+    };
+    const parents = upstreamNodeIds(diamond, "t");
+    expect([...parents].sort()).toEqual(["p1", "p2", "s"]);
+    expect(parents.size).toBe(3);
+    expect(parents.has("t")).toBe(false);
   });
 
   it("拓扑序满足依赖，有环时返回 null", () => {
@@ -111,6 +130,21 @@ describe("图结构纯函数", () => {
     expect(order).not.toBeNull();
     expect(order!.indexOf("in")).toBeLessThan(order!.indexOf("a"));
     expect(order!.indexOf("b")).toBeLessThan(order!.indexOf("cond"));
+
+    const withGhost: Graph = {
+      ...graph,
+      edges: [
+        ...graph.edges,
+        { id: "g1", source: "ghost", target: "a" },
+        { id: "g2", source: "out", target: "ghost" },
+      ],
+    };
+    const ghostOrder = topoOrder(withGhost);
+    expect(ghostOrder).not.toBeNull();
+    expect([...ghostOrder!].sort()).toEqual(
+      graph.nodes.map((node) => node.id).sort(),
+    );
+    expect(ghostOrder!.indexOf("b")).toBeLessThan(ghostOrder!.indexOf("cond"));
 
     const cyclic: Graph = {
       ...graph,

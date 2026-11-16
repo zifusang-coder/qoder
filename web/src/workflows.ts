@@ -99,7 +99,12 @@ export function nodeLabel(node: GraphNode): string {
 function isInputField(value: unknown): value is InputField {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
-  return typeof record.key === "string" && record.key.length > 0;
+  if (typeof record.key !== "string" || record.key.length === 0) return false;
+  return (
+    record.type === "string" ||
+    record.type === "number" ||
+    record.type === "boolean"
+  );
 }
 
 export function inputFields(graph: Graph): InputField[] {
