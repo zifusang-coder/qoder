@@ -20,6 +20,7 @@ from app.api import (
     publish,
     skills,
     tenants,
+    workflow_runs,
     workflows,
 )
 from app.api import settings as settings_api
@@ -96,6 +97,7 @@ app.include_router(tenants.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(workflows.router, prefix="/api")
+app.include_router(workflow_runs.router, prefix="/api")
 
 
 @app.get("/health")
