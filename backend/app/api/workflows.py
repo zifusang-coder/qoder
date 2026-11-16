@@ -23,10 +23,12 @@ from app.models.workflow import (
 from app.permissions import admin_access, viewer_access
 from app.services.audit import record_best_effort
 from app.skills.registry import get_registry as get_skill_registry
+from app.workflow.schedule import next_run_at, parse_cadence
 from app.workflow.templates import TEMPLATES, get_template
 from app.workflow.validate import (
     ValidationResult,
     check_structure,
+    validate_inputs,
     validate_publish,
 )
 
@@ -118,6 +120,23 @@ class InstantiateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=120)
+
+
+class ScheduleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cadence: dict
+    inputs: dict = Field(default_factory=dict)
+    enabled: bool = True
+    version: int | None = None
+
+
+class SchedulePatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cadence: dict | None = None
+    inputs: dict | None = None
+    enabled: bool | None = None
 
 
 class ValidateOut(BaseModel):
@@ -284,6 +303,50 @@ async def _validate(
         skill_ids=set(get_skill_registry().skills),
         overrides=await load_overrides(session, user.tenant_id),
     )
+
+
+async def _version_by_number(
+    session: AsyncSession, workflow_id: uuid.UUID, version: int
+) -> WorkflowVersion | None:
+    return (
+        await session.execute(
+            select(WorkflowVersion).where(
+                WorkflowVersion.workflow_id == workflow_id,
+                WorkflowVersion.version == version,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _check_inputs(graph_raw: Any, inputs: dict) -> None:
+    issues = validate_inputs(graph_raw, inputs)
+    if issues:
+        raise AppError(
+            "workflow_schedule_invalid",
+            "入参与工作流不匹配",
+            422,
+            detail={"issues": [issue.as_dict() for issue in issues]},
+        )
+
+
+async def _owned_schedule(
+    session: AsyncSession,
+    workflow: Workflow,
+    schedule_id: str,
+    user: User,
+) -> WorkflowSchedule:
+    row = (
+        await session.execute(
+            select(WorkflowSchedule).where(
+                WorkflowSchedule.id == _parse_id(schedule_id),
+                WorkflowSchedule.workflow_id == workflow.id,
+                WorkflowSchedule.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise AppError("workflow_not_found", "定时不存在", 404)
+    return row
 
 
 @router.get("/templates", response_model=list[TemplateOut])
@@ -597,6 +660,149 @@ async def list_versions(
         .all()
     )
     return [_version_out(item) for item in rows]
+
+
+@router.get(
+    "/{workflow_id}/schedules", response_model=list[ScheduleOut]
+)
+async def list_schedules(
+    workflow_id: str,
+    user: User = Depends(viewer_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> list[ScheduleOut]:
+    row = await _owned(session, workflow_id, user)
+    rows = (
+        (
+            await session.execute(
+                select(WorkflowSchedule)
+                .where(WorkflowSchedule.workflow_id == row.id)
+                .order_by(
+                    WorkflowSchedule.created_at, WorkflowSchedule.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_schedule_out(item) for item in rows]
+
+
+@router.post(
+    "/{workflow_id}/schedules",
+    response_model=ScheduleOut,
+    status_code=201,
+)
+async def create_schedule(
+    workflow_id: str,
+    payload: ScheduleIn,
+    user: User = Depends(admin_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ScheduleOut:
+    row = await _owned(session, workflow_id, user)
+    if payload.version is None:
+        version = await _latest_version(session, row.id)
+        if version is None:
+            raise AppError(
+                "workflow_not_published",
+                "工作流尚未发布，无法创建定时",
+                409,
+            )
+    else:
+        version = await _version_by_number(
+            session, row.id, payload.version
+        )
+        if version is None:
+            raise AppError("workflow_not_found", "版本不存在", 404)
+    cadence = parse_cadence(payload.cadence)
+    _check_inputs(version.graph, payload.inputs)
+    schedule = WorkflowSchedule(
+        tenant_id=row.tenant_id,
+        workflow_id=row.id,
+        workflow_version_id=version.id,
+        cadence=cadence.to_json(),
+        inputs=payload.inputs,
+        enabled=payload.enabled,
+        next_run_at=next_run_at(cadence, _now()) if payload.enabled else None,
+        created_by=user.id,
+    )
+    session.add(schedule)
+    await session.commit()
+    await session.refresh(schedule)
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="workflow.schedule.create",
+        actor=user,
+        resource_type="workflow",
+        resource_id=str(row.id),
+        detail={"schedule": str(schedule.id), "version": version.version},
+    )
+    return _schedule_out(schedule)
+
+
+@router.patch(
+    "/{workflow_id}/schedules/{schedule_id}", response_model=ScheduleOut
+)
+async def update_schedule(
+    workflow_id: str,
+    schedule_id: str,
+    payload: SchedulePatchIn,
+    user: User = Depends(admin_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ScheduleOut:
+    row = await _owned(session, workflow_id, user)
+    schedule = await _owned_schedule(session, row, schedule_id, user)
+    if payload.cadence is not None:
+        schedule.cadence = parse_cadence(payload.cadence).to_json()
+    if payload.inputs is not None:
+        version = await session.get(
+            WorkflowVersion, schedule.workflow_version_id
+        )
+        graph_raw = version.graph if version is not None else {}
+        _check_inputs(graph_raw, payload.inputs)
+        schedule.inputs = payload.inputs
+    if payload.enabled is not None:
+        schedule.enabled = payload.enabled
+    cadence = parse_cadence(schedule.cadence)
+    schedule.next_run_at = (
+        next_run_at(cadence, _now()) if schedule.enabled else None
+    )
+    await session.commit()
+    await session.refresh(schedule)
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="workflow.schedule.update",
+        actor=user,
+        resource_type="workflow",
+        resource_id=str(row.id),
+        detail={"schedule": str(schedule.id)},
+    )
+    return _schedule_out(schedule)
+
+
+@router.delete(
+    "/{workflow_id}/schedules/{schedule_id}", status_code=204
+)
+async def delete_schedule(
+    workflow_id: str,
+    schedule_id: str,
+    user: User = Depends(admin_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> None:
+    row = await _owned(session, workflow_id, user)
+    schedule = await _owned_schedule(session, row, schedule_id, user)
+    await session.delete(schedule)
+    await session.commit()
+    await record_best_effort(
+        session,
+        tenant_id=user.tenant_id,
+        action="workflow.schedule.delete",
+        actor=user,
+        resource_type="workflow",
+        resource_id=str(row.id),
+        detail={"schedule": schedule_id},
+    )
 
 
 @router.get(

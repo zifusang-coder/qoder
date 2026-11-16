@@ -450,3 +450,142 @@ async def test_agent_tools_endpoint_exposes_risk_and_schema(api, db_session):
 
     state["user"] = await make_user(db_session, role="viewer")
     assert (await http.get("/api/agent/tools")).status_code == 403
+
+
+WEEKLY = {"kind": "weekly", "weekdays": [1, 4], "time": "08:30", "timezone": "Asia/Shanghai"}
+DAILY = {"kind": "daily", "time": "09:00", "timezone": "Asia/Shanghai"}
+
+
+async def publish_once(http, workflow_id, revision=0):
+    return await http.post(
+        f"/api/workflows/{workflow_id}/publish", json={"revision": revision}
+    )
+
+
+async def test_schedule_requires_published_version(api, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="admin")
+    workflow_id = (await create_via_api(http)).json()["id"]
+
+    resp = await http.post(
+        f"/api/workflows/{workflow_id}/schedules",
+        json={"cadence": DAILY, "inputs": {"days": 7}},
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "workflow_not_published"
+
+
+async def test_schedule_crud_and_next_run(api, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="admin")
+    workflow_id = (await create_via_api(http)).json()["id"]
+    assert (await publish_once(http, workflow_id)).status_code == 201
+
+    created = await http.post(
+        f"/api/workflows/{workflow_id}/schedules",
+        json={"cadence": DAILY, "inputs": {"days": 7}},
+    )
+
+    assert created.status_code == 201, created.text
+    schedule = created.json()
+    assert schedule["enabled"] is True
+    assert schedule["next_run_at"] is not None
+    assert schedule["cadence"]["kind"] == "daily"
+
+    listed = await http.get(f"/api/workflows/{workflow_id}/schedules")
+    assert [item["id"] for item in listed.json()] == [schedule["id"]]
+
+    disabled = await http.patch(
+        f"/api/workflows/{workflow_id}/schedules/{schedule['id']}",
+        json={"cadence": WEEKLY, "enabled": False},
+    )
+
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["next_run_at"] is None
+    assert disabled.json()["cadence"]["weekdays"] == [1, 4]
+
+    enabled = await http.patch(
+        f"/api/workflows/{workflow_id}/schedules/{schedule['id']}",
+        json={"enabled": True},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["next_run_at"] is not None
+
+    bad_cadence = await http.patch(
+        f"/api/workflows/{workflow_id}/schedules/{schedule['id']}",
+        json={"cadence": {"kind": "hourly", "time": "09:00", "timezone": "UTC"}},
+    )
+    assert bad_cadence.status_code == 422
+    assert bad_cadence.json()["code"] == "workflow_schedule_invalid"
+
+    bad_inputs = await http.patch(
+        f"/api/workflows/{workflow_id}/schedules/{schedule['id']}",
+        json={"inputs": {"days": "七天"}},
+    )
+    assert bad_inputs.status_code == 422
+    assert bad_inputs.json()["code"] == "workflow_schedule_invalid"
+    assert bad_inputs.json()["detail"]["issues"]
+
+    deleted = await http.delete(
+        f"/api/workflows/{workflow_id}/schedules/{schedule['id']}"
+    )
+    assert deleted.status_code == 204
+    assert (await http.get(f"/api/workflows/{workflow_id}/schedules")).json() == []
+
+
+async def test_schedule_role_matrix_and_tenant_isolation(api, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="admin")
+    workflow_id = (await create_via_api(http)).json()["id"]
+    assert (await publish_once(http, workflow_id)).status_code == 201
+
+    state["user"] = await make_user(db_session, role="editor")
+    denied = await http.post(
+        f"/api/workflows/{workflow_id}/schedules",
+        json={"cadence": DAILY, "inputs": {"days": 7}},
+    )
+    assert denied.status_code == 403
+    assert (
+        await http.get(f"/api/workflows/{workflow_id}/schedules")
+    ).status_code == 200
+
+    foreign = Workflow(
+        tenant_id=OTHER_TENANT,
+        name="别人的流",
+        created_by=uuid.uuid4(),
+        draft_graph=graph(),
+    )
+    db_session.add(foreign)
+    await db_session.commit()
+    await db_session.refresh(foreign)
+
+    resp = await http.get(f"/api/workflows/{foreign.id}/schedules")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "workflow_not_found"
+
+
+async def test_schedule_pins_the_requested_version(api, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="admin")
+    workflow_id = (await create_via_api(http)).json()["id"]
+    assert (await publish_once(http, workflow_id)).status_code == 201
+    saved = await http.patch(
+        f"/api/workflows/{workflow_id}",
+        json={"revision": 0, "draft_graph": graph(days=30)},
+    )
+    assert saved.status_code == 200
+    assert (
+        await publish_once(http, workflow_id, revision=1)
+    ).status_code == 201
+
+    v1 = await http.get(f"/api/workflows/{workflow_id}/versions/1")
+
+    created = await http.post(
+        f"/api/workflows/{workflow_id}/schedules",
+        json={"cadence": DAILY, "inputs": {"days": 7}, "version": 1},
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["workflow_version_id"] == v1.json()["id"]

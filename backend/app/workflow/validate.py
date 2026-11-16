@@ -320,3 +320,55 @@ def validate_publish(
             issues=issues,
         )
     return ValidationResult(_dedupe(issues))
+
+
+def validate_inputs(graph_raw: Any, inputs: Any) -> list[Issue]:
+    """按输入节点的 fields 校验运行入参；空列表表示通过。"""
+    if not isinstance(inputs, dict):
+        return [Issue("input_invalid", "入参必须是对象")]
+    try:
+        graph = parse_graph(graph_raw)
+    except GraphError as exc:
+        return [Issue(exc.code, exc.message)]
+    nodes = [node for node in graph.nodes.values() if node.kind == "input"]
+    if len(nodes) != 1:
+        return [Issue("input_invalid", "工作流必须恰好有一个输入节点")]
+    fields = nodes[0].data.get("fields")
+    if not isinstance(fields, list):
+        return [Issue("input_invalid", "输入节点缺少字段定义")]
+    declared = {
+        item.get("key"): item
+        for item in fields
+        if isinstance(item, dict) and isinstance(item.get("key"), str)
+    }
+    issues: list[Issue] = []
+    for key in inputs:
+        if key not in declared:
+            issues.append(Issue("input_invalid", f"未知入参: {key}"))
+    for key, item in declared.items():
+        if key not in inputs or inputs[key] is None:
+            if item.get("required"):
+                issues.append(Issue("input_invalid", f"缺少必填入参: {key}"))
+            continue
+        value = inputs[key]
+        expected = item.get("type")
+        if expected == "string":
+            if not isinstance(value, str):
+                issues.append(Issue("input_invalid", f"入参 {key} 必须是字符串"))
+                continue
+            max_length = item.get("maxLength")
+            if (
+                isinstance(max_length, int)
+                and max_length > 0
+                and len(value) > max_length
+            ):
+                issues.append(
+                    Issue("input_invalid", f"入参 {key} 超过 {max_length} 字")
+                )
+        elif expected == "number" and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            issues.append(Issue("input_invalid", f"入参 {key} 必须是数字"))
+        elif expected == "boolean" and not isinstance(value, bool):
+            issues.append(Issue("input_invalid", f"入参 {key} 必须是布尔值"))
+    return issues
