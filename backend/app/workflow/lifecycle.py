@@ -547,13 +547,16 @@ async def _fail_orphans(session: AsyncSession, moment: datetime) -> int:
         .scalars()
         .all()
     )
+    # 先取标量：某个运行 CAS 落败会 rollback 并过期 session 内全部实例，
+    # 之后读 ORM 属性会触发 MissingGreenlet，打断整轮对账。
+    targets = [(run.id, run.tenant_id) for run in runs]
     failed = 0
-    for run in runs:
+    for run_id, tenant_id in targets:
         if await approvals.has_pending(
-            session, tenant_id=run.tenant_id, run_id=run.id
+            session, tenant_id=tenant_id, run_id=run_id
         ):
             continue
-        failed += await _fail_approval_run(session, run.id, moment)
+        failed += await _fail_approval_run(session, run_id, moment)
     return failed
 
 

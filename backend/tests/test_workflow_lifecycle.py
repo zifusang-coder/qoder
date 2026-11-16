@@ -1,9 +1,10 @@
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import get_settings
@@ -18,7 +19,7 @@ from app.models.workflow import (
     WorkflowVersion,
 )
 from app.workflow import lifecycle
-from app.workflow.lifecycle import _fail_approval_run
+from app.workflow.lifecycle import _fail_approval_run, _fail_orphans
 
 NOW = datetime.now(UTC)
 
@@ -505,3 +506,48 @@ async def test_fail_approval_run_lost_cas_writes_nothing(db_session):
     assert approval.decided_at is None
     assert node.status == "waiting"
     assert node.finished_at is None
+
+
+async def test_fail_orphans_survives_lost_cas_and_processes_rest(db_session):
+    first = await make_run(db_session, status="waiting_approval")
+    first_node = await add_node_run(db_session, first, "review", "waiting")
+    second = await make_run(db_session, status="waiting_approval")
+    second_node = await add_node_run(db_session, second, "review", "waiting")
+    first_id, second_id = first.id, second.id
+
+    real_has_pending = lifecycle.approvals.has_pending
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    calls = 0
+    lost_run_id = None
+
+    async def has_pending(session, *, tenant_id, run_id):
+        nonlocal calls, lost_run_id
+        calls += 1
+        if calls == 1:
+            # 模拟并发决策者在 select 与 CAS 之间把该运行改成 cancelled
+            lost_run_id = run_id
+            async with factory() as other:
+                await other.execute(
+                    update(WorkflowRun)
+                    .where(WorkflowRun.id == run_id)
+                    .values(status="cancelled")
+                )
+                await other.commit()
+            return False
+        return await real_has_pending(
+            session, tenant_id=tenant_id, run_id=run_id
+        )
+
+    with patch.object(lifecycle.approvals, "has_pending", has_pending):
+        failed = await _fail_orphans(db_session, NOW)
+
+    assert failed == 1
+    assert lost_run_id == first_id
+    for row in (first, first_node, second, second_node):
+        await db_session.refresh(row)
+    assert first.status == "cancelled"
+    assert first_node.status == "waiting"
+    assert second.id == second_id
+    assert second.status == "failed"
+    assert second.error_code == "approval_expired"
+    assert second_node.status == "denied"
