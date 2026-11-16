@@ -3,7 +3,9 @@ from datetime import UTC, datetime
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, update
 
+from app.api import workflows as workflows_api
 from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
@@ -193,6 +195,49 @@ async def test_patch_is_optimistic_and_rejects_bad_shape(api, db_session):
     assert broken.status_code == 422
     assert broken.json()["code"] == "workflow_invalid"
     assert broken.json()["detail"]["issues"]
+
+
+async def test_draft_save_rejects_revision_race_atomically(
+    api, db_session, monkeypatch
+):
+    http, state = api
+    state["user"] = await make_user(db_session, role="admin")
+    created = await create_via_api(http, name="原始名称")
+    workflow_id = uuid.UUID(created.json()["id"])
+
+    real_owned = workflows_api._owned
+
+    async def racing_owned(session, raw, user):
+        row = await real_owned(session, raw, user)
+        # 模拟另一个会话在读与写之间提交：库里已到 revision 1，
+        # 而本次请求手里的 ORM 对象仍是旧的 revision 0。
+        await session.execute(
+            update(Workflow)
+            .where(Workflow.id == row.id)
+            .values(draft_revision=Workflow.draft_revision + 1)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        return row
+
+    monkeypatch.setattr(workflows_api, "_owned", racing_owned)
+
+    raced = await http.patch(
+        f"/api/workflows/{workflow_id}",
+        json={"revision": 0, "name": "被覆盖"},
+    )
+
+    assert raced.status_code == 409, raced.text
+    assert raced.json()["code"] == "workflow_conflict"
+
+    db_session.expire_all()
+    stored = (
+        await db_session.execute(
+            select(Workflow).where(Workflow.id == workflow_id)
+        )
+    ).scalar_one()
+    assert stored.name == "原始名称"
+    assert stored.draft_revision == 1
 
 
 async def test_publish_runs_authoritative_validation(api, db_session):

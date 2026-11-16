@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -422,21 +422,40 @@ async def update_workflow(
             "workflow_conflict", "草稿已被其他会话修改，请重新加载", 409
         )
     changed: list[str] = []
+    updates: dict[str, Any] = {}
     if payload.name is not None:
         name = payload.name.strip()
         if not name:
             raise AppError("workflow_invalid", "名称不能为空", 422)
-        row.name = name
+        updates["name"] = name
         changed.append("name")
     if payload.description is not None:
-        row.description = payload.description
+        updates["description"] = payload.description
         changed.append("description")
     if payload.draft_graph is not None:
         _check_savable(payload.draft_graph)
-        row.draft_graph = payload.draft_graph
+        updates["draft_graph"] = payload.draft_graph
         changed.append("graph")
-    row.draft_revision += 1
+    updates["draft_revision"] = Workflow.draft_revision + 1
+    # 条件更新即 CAS：revision 不匹配时 rowcount 为 0，避免两个并发保存互相覆盖。
+    saved = await session.execute(
+        update(Workflow)
+        .where(
+            Workflow.id == row.id,
+            Workflow.tenant_id == user.tenant_id,
+            Workflow.archived_at.is_(None),
+            Workflow.draft_revision == payload.revision,
+        )
+        .values(**updates)
+        .execution_options(synchronize_session=False)
+    )
+    if saved.rowcount == 0:
+        await session.rollback()
+        raise AppError(
+            "workflow_conflict", "草稿已被其他会话修改，请重新加载", 409
+        )
     await session.commit()
+    await session.refresh(row)
     await record_best_effort(
         session,
         tenant_id=user.tenant_id,
