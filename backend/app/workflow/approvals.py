@@ -124,16 +124,18 @@ async def has_pending(
     *,
     tenant_id: str,
     run_id: uuid.UUID,
-    exclude_id: uuid.UUID | None = None,
 ) -> bool:
-    """两条通道里还有没有待处理审批（可选排除刚决策的那条）。"""
+    """两条通道里还有没有待处理审批。
+
+    这里只做一次普通查询：同一事务里刚 CAS 过的那条已不再是 pending，不会
+    算进来；并行决策的串行化来自 ``decide_approval`` 对 ``workflow_runs``
+    的行锁，而不是从这个结果里排除某一行。
+    """
     workflow_stmt = select(WorkflowApproval.id).where(
         WorkflowApproval.tenant_id == tenant_id,
         WorkflowApproval.run_id == run_id,
         WorkflowApproval.status == "pending",
     )
-    if exclude_id is not None:
-        workflow_stmt = workflow_stmt.where(WorkflowApproval.id != exclude_id)
     if (await session.execute(workflow_stmt.limit(1))).first() is not None:
         return True
     agent_stmt = (
@@ -238,14 +240,38 @@ async def decide_approval(
     角色与「不能审批自己发起」的校验在 API 层；这里只保证状态机与并发。
     审批与运行状态的 CAS 在同一事务内：任一失败整体回滚，不会留下
     「审批已通过但运行已取消」的脏数据。
+
+    先锁运行行、再动审批行：锁顺序与 ``lifecycle.cancel_run``（运行 →
+    审批）一致，并发 approve/cancel 不会互相等待成环；同一运行的并行决策
+    也因此串行化，最后一条通过时一定看得到别人的决定，不会把运行留在
+    「零 pending 却仍在 waiting_approval」的状态。SQLite 上 ``FOR UPDATE``
+    是空操作，那里的并发由写入串行兜底（测试环境即如此）。
     """
     if decision not in DECISIONS:
         raise AppError("workflow_invalid", "审批决定不合法", 422)
     if approval.run_id != run.id or approval.tenant_id != run.tenant_id:
         raise AppError("workflow_approval_not_pending", "审批与运行不匹配", 409)
+    # 只读调用方手里的对象、不碰库：重放请求在这里快速失败，不必去拿运行锁。
     if approval.status != "pending":
         raise AppError("workflow_approval_not_pending", "该审批已处理或已过期", 409)
     moment = now or _now()
+
+    locked = (
+        await session.execute(
+            select(WorkflowRun)
+            .where(
+                WorkflowRun.id == run.id,
+                WorkflowRun.tenant_id == run.tenant_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if locked is None:
+        raise AppError("workflow_approval_not_pending", "审批与运行不匹配", 409)
+    # 后续的状态判断、usage 结算与 CAS 都用这份重读过的实例。
+    run = locked
+
     expires = _aware(approval.expires_at)
     if expires is not None and expires <= moment:
         await session.execute(
@@ -259,6 +285,8 @@ async def decide_approval(
             .execution_options(synchronize_session=False)
         )
         await session.commit()
+        await session.refresh(run)
+        await session.refresh(approval)
         raise AppError("workflow_approval_not_pending", "该审批已过期", 409)
 
     target = "approved" if decision == "approve" else "rejected"
@@ -279,11 +307,11 @@ async def decide_approval(
             session,
             tenant_id=run.tenant_id,
             run_id=run.id,
-            exclude_id=approval.id,
         )
         if others:
             # 并行分支还有别的待处理审批：保持等待，等待时长留给最后一条结算。
             await session.commit()
+            await session.refresh(run)
             await session.refresh(approval)
             return "waiting_approval"
         usage = dict(run.usage or {})
