@@ -40,16 +40,31 @@ function propertyType(spec: Record<string, unknown>): string {
   return typeof spec.type === "string" ? spec.type : "string";
 }
 
+/** 与 Task 13 的 `isInputField` 同规则：草稿里的脏数据不得进入渲染。 */
+function isInputFieldEntry(value: unknown): value is InputField {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (typeof record.key !== "string" || record.key.length === 0) return false;
+  return (
+    record.type === "string" ||
+    record.type === "number" ||
+    record.type === "boolean"
+  );
+}
+
 function VariablePicker({
   options,
+  disabled = false,
   onPick,
 }: {
   options: VariableOption[];
+  disabled?: boolean;
   onPick: (value: string) => void;
 }) {
   return (
     <select
       className="input text-xs"
+      disabled={disabled}
       value=""
       onChange={(event) => {
         const value = event.target.value;
@@ -75,22 +90,29 @@ function TextAreaWithVariables({
   value,
   rows,
   options,
+  ariaLabel,
+  disabled = false,
   onChange,
 }: {
   value: string;
   rows: number;
   options: VariableOption[];
+  ariaLabel: string;
+  disabled?: boolean;
   onChange: (value: string) => void;
 }) {
   return (
     <div className="space-y-1">
       <textarea
+        aria-label={ariaLabel}
         className="input"
+        disabled={disabled}
         rows={rows}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
       <VariablePicker
+        disabled={disabled}
         options={options}
         onPick={(picked) => onChange(appendValue(value, picked))}
       />
@@ -103,12 +125,14 @@ function ArgsForm({
   args,
   options,
   skills,
+  disabled = false,
   onChange,
 }: {
   tool: ToolSpec | null;
   args: Record<string, unknown>;
   options: VariableOption[];
   skills: SkillOption[];
+  disabled?: boolean;
   onChange: (args: Record<string, unknown>) => void;
 }) {
   const properties = schemaProperties(tool?.parameters);
@@ -129,6 +153,7 @@ function ArgsForm({
               <span>{label}</span>
               <select
                 className="input text-xs text-ink-900"
+                disabled={disabled}
                 value={typeof args[key] === "string" ? (args[key] as string) : ""}
                 onChange={(event) => setArg(key, event.target.value)}
               >
@@ -148,6 +173,7 @@ function ArgsForm({
               <input
                 type="checkbox"
                 checked={Boolean(args[key])}
+                disabled={disabled}
                 onChange={(event) => setArg(key, event.target.checked)}
               />
               <span>{label}</span>
@@ -160,6 +186,7 @@ function ArgsForm({
               <span>{label}</span>
               <input
                 className="input text-xs text-ink-900"
+                disabled={disabled}
                 type={type === "number" || type === "integer" ? "number" : "text"}
                 value={
                   typeof args[key] === "string" || typeof args[key] === "number"
@@ -177,6 +204,7 @@ function ArgsForm({
               />
             </label>
             <VariablePicker
+              disabled={disabled}
               options={options}
               onPick={(picked) => setArg(key, picked)}
             />
@@ -205,11 +233,26 @@ export default function NodeInspector({
   onDelete: () => void;
 }) {
   const [label, setLabel] = useState("");
+  const [toolsDraft, setToolsDraft] = useState("");
 
   const nodeData = node?.data ?? {};
+  const nodeId = node?.id;
+  const committedLabel = node ? String(node.data.label ?? "") : "";
+  const toolsWanted = Array.isArray(nodeData.tools)
+    ? (nodeData.tools as unknown[]).filter(
+        (item): item is string => typeof item === "string",
+      )
+    : [];
+
   useEffect(() => {
-    setLabel(node ? String(node.data.label ?? "") : "");
-  }, [node?.id]);
+    setLabel(committedLabel);
+  }, [nodeId, committedLabel]);
+
+  useEffect(() => {
+    setToolsDraft(toolsWanted.join(", "));
+    // 仅在切换选中节点时重置草稿，输入过程中的逗号不能被回写覆盖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeId]);
 
   if (!node) {
     return (
@@ -221,12 +264,7 @@ export default function NodeInspector({
 
   const options = variableCandidates(graph, node.id, inputFields(graph));
   const fields = Array.isArray(nodeData.fields)
-    ? (nodeData.fields as InputField[])
-    : [];
-  const toolsWanted = Array.isArray(nodeData.tools)
-    ? (nodeData.tools as unknown[]).filter(
-        (item): item is string => typeof item === "string",
-      )
+    ? nodeData.fields.filter(isInputFieldEntry)
     : [];
   const budget =
     typeof nodeData.budget === "object" && nodeData.budget !== null
@@ -238,6 +276,15 @@ export default function NodeInspector({
       : {};
   const selectedTool =
     tools.find((tool) => tool.name === nodeData.tool) ?? null;
+
+  const commitTools = () => {
+    onChange({
+      tools: toolsDraft
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    });
+  };
 
   return (
     <aside className="card card-pad space-y-3 overflow-y-auto">
@@ -286,7 +333,7 @@ export default function NodeInspector({
             )}
           </div>
           {fields.map((field, index) => (
-            <div key={`${field.key}-${index}`} className="space-y-1 rounded-lg border border-line p-2">
+            <div key={index} className="space-y-1 rounded-lg border border-line p-2">
               <input
                 className="input text-xs"
                 disabled={readOnly}
@@ -398,6 +445,7 @@ export default function NodeInspector({
             args={args}
             options={options}
             skills={skills}
+            disabled={readOnly}
             onChange={(next) => onChange({ args: next })}
           />
         </div>
@@ -405,29 +453,28 @@ export default function NodeInspector({
 
       {node.type === "agent" && (
         <div className="space-y-2">
-          <label className="block space-y-1 text-xs text-ink-500">
+          <div className="space-y-1 text-xs text-ink-500">
             <span>目标</span>
             <TextAreaWithVariables
               value={typeof nodeData.goal === "string" ? nodeData.goal : ""}
               rows={5}
               options={options}
+              ariaLabel="目标"
+              disabled={readOnly}
               onChange={(goal) => onChange({ goal })}
             />
-          </label>
+          </div>
           <label className="block space-y-1 text-xs text-ink-500">
             <span>工具白名单（逗号分隔，支持前缀.*；留空为全部）</span>
             <input
               className="input text-xs text-ink-900"
               disabled={readOnly}
-              value={toolsWanted.join(", ")}
-              onChange={(event) =>
-                onChange({
-                  tools: event.target.value
-                    .split(",")
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                })
-              }
+              value={toolsDraft}
+              onChange={(event) => setToolsDraft(event.target.value)}
+              onBlur={commitTools}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") commitTools();
+              }}
             />
           </label>
           <div className="grid grid-cols-2 gap-2">
@@ -443,14 +490,16 @@ export default function NodeInspector({
                     value={
                       typeof budget[key] === "number" ? String(budget[key]) : ""
                     }
-                    onChange={(event) =>
-                      onChange({
-                        budget: {
-                          ...budget,
-                          [key]: Number(event.target.value) || undefined,
-                        },
-                      })
-                    }
+                    onChange={(event) => {
+                      const raw = event.target.value;
+                      const next: Record<string, unknown> = { ...budget };
+                      if (raw === "") {
+                        delete next[key];
+                      } else {
+                        next[key] = Number(raw);
+                      }
+                      onChange({ budget: next });
+                    }}
                   />
                 </label>
               ),
@@ -467,6 +516,8 @@ export default function NodeInspector({
               value={typeof nodeData.left === "string" ? nodeData.left : ""}
               rows={2}
               options={options}
+              ariaLabel="左值"
+              disabled={readOnly}
               onChange={(left) => onChange({ left })}
             />
           </div>
@@ -496,6 +547,8 @@ export default function NodeInspector({
                 value={typeof nodeData.value === "string" ? nodeData.value : ""}
                 rows={2}
                 options={options}
+                ariaLabel="右值"
+                disabled={readOnly}
                 onChange={(value) => onChange({ value })}
               />
             </div>

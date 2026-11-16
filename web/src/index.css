@@ -54,3 +54,8 @@ body {
     @apply rounded-md bg-sage-50 px-3 py-1.5 text-sm font-medium text-sage-700;
   }
 }
+
+/* 应用仅浅色主题；React Flow v13 的 light-dark() 令牌需要固定 color-scheme。 */
+.react-flow {
+  color-scheme: light;
+}
