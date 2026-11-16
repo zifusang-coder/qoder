@@ -6,7 +6,7 @@
 
 **Tech Stack:** FastAPI、SQLAlchemy 2.0 async、Pydantic v2、httpx、jsonschema、arq、PostgreSQL/SQLite、React 19、TanStack Query、Tailwind CSS v4、vitest。
 
-**Status:** 三层方向与第 1 层详细设计已与用户确认，等待规格评审。
+**Status:** 第 1 层已实现；第 2 层详细设计已完成（见 `docs/superpowers/specs/2026-11-15-workflow-engine-design.md`），等待规格评审；第 3 层待补。
 
 ---
 
@@ -35,7 +35,7 @@
 - 三层的执行都写审计与运行记录，可回放。
 - 计费数据从第 1 层开始落库，计费功能本身延后。
 
-本文档只详细定义第 1 层；第 2、3 层在第 1 层实施完成后各自补详细设计与计划。
+本文档详细定义第 1 层；第 2 层（工作流引擎 + 画布）见 `docs/superpowers/specs/2026-11-15-workflow-engine-design.md`；第 3 层待补详细设计与计划。
 
 ## 3. 第 1 层范围
 
@@ -447,6 +447,6 @@ worker 每分钟扫描 `running` 且 `heartbeat_at < now - agent_run_stale_secon
 ## 16. 交付顺序
 
 1. **第 1 层实施计划**：网关工具调用 → 数据模型与迁移 → 工具契约与注册表 → 策略引擎 → 运行时 → API 与 worker → 前端 → 文档与验收。
-2. 第 1 层完成后，补第 2 层（工作流引擎 + 画布）详细设计与计划。
+2. 第 2 层（工作流引擎 + 画布）详细设计已完成：`docs/superpowers/specs/2026-11-15-workflow-engine-design.md`；实施计划待编写。
 3. 第 2 层完成后，补第 3 层（多 Agent 团队）详细设计与计划。
 4. 注册与计费在三层稳定后单独立项，直接复用 `agent_runs.usage`。
