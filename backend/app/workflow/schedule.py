@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.errors import AppError
 
-TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])\Z")
 KINDS = frozenset({"daily", "weekly"})
 # weekly 一定能在 7 天内命中；多留一天只在异常输入下兜底
 MAX_DAYS_AHEAD = 8
@@ -46,7 +46,7 @@ def parse_cadence(raw: object) -> Cadence:
     if not isinstance(raw, dict):
         raise _invalid("cadence 必须是对象")
     kind = raw.get("kind")
-    if kind not in KINDS:
+    if not isinstance(kind, str) or kind not in KINDS:
         raise _invalid("kind 只能是 daily 或 weekly")
     match = TIME_RE.match(str(raw.get("time") or ""))
     if match is None:
@@ -89,16 +89,21 @@ def next_run_at(cadence: Cadence, after: datetime) -> datetime:
     """
     if after.tzinfo is None:
         raise _invalid("after 必须是带时区的时间")
-    zone = ZoneInfo(cadence.timezone)
+    try:
+        zone = ZoneInfo(cadence.timezone)
+        trigger = time(cadence.hour, cadence.minute)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        raise _invalid("cadence 的时区或时分非法") from None
     local = after.astimezone(zone)
     start = local.date()
     for offset in range(MAX_DAYS_AHEAD):
         current: date = start + timedelta(days=offset)
         if cadence.kind == "weekly" and current.isoweekday() not in cadence.weekdays:
             continue
-        candidate = datetime.combine(
-            current, time(cadence.hour, cadence.minute), tzinfo=zone
-        )
-        if candidate > local:
-            return candidate.astimezone(UTC)
+        candidate = datetime.combine(current, trigger, tzinfo=zone)
+        # 必须比较时间轴上的瞬间：local 与 candidate 共用同一个 ZoneInfo，
+        # 直接比较表盘时间会忽略 fold/偏移（重叠、缺口都会算错）
+        candidate_utc = candidate.astimezone(UTC)
+        if candidate_utc > after:
+            return candidate_utc
     raise _invalid("无法计算下次运行时间")

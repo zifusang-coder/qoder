@@ -71,9 +71,12 @@ def test_parse_weekly_sorts_and_dedupes_weekdays():
         "daily",
         {},
         {"kind": "hourly", "time": "09:00", "timezone": SHANGHAI},
+        {"kind": [], "time": "09:00", "timezone": SHANGHAI},
+        {"kind": {}, "time": "09:00", "timezone": SHANGHAI},
         {"kind": "daily", "time": "9:00", "timezone": SHANGHAI},
         {"kind": "daily", "time": "24:00", "timezone": SHANGHAI},
         {"kind": "daily", "time": "09:60", "timezone": SHANGHAI},
+        {"kind": "daily", "time": "09:00\n", "timezone": SHANGHAI},
         {"kind": "daily", "time": "09:00"},
         {"kind": "daily", "time": "09:00", "timezone": "Mars/Olympus"},
         {"kind": "weekly", "time": "09:00", "timezone": SHANGHAI},
@@ -135,6 +138,41 @@ def test_next_run_at_follows_dst_offset_change():
     # 2026-03-08 美国进入夏令时：09:00 从 UTC-5 变成 UTC-4
     assert next_run_at(cadence, utc(2026, 3, 7, 6, 0)) == utc(2026, 3, 7, 14, 0)
     assert next_run_at(cadence, utc(2026, 3, 7, 15, 0)) == utc(2026, 3, 8, 13, 0)
+
+
+def test_dst_overlap_after_second_pass_advances_to_next_day():
+    cadence = daily(hour=1, minute=30, zone="America/New_York")
+    # 2026-11-01 01:30 纽约出现两次；06:15Z 已是第二遍（01:15 EST），
+    # 第一遍 01:30 EDT = 05:30Z 已过去，必须取次日 06:30Z 而不是回到 05:30Z
+    assert next_run_at(cadence, utc(2026, 11, 1, 6, 15)) == utc(2026, 11, 2, 6, 30)
+
+
+def test_dst_overlap_takes_first_pass_when_after_is_before_it():
+    cadence = daily(hour=1, minute=30, zone="America/New_York")
+    # 04:00Z 早于第一遍 01:30 EDT（05:30Z），重叠取第一次
+    assert next_run_at(cadence, utc(2026, 11, 1, 4, 0)) == utc(2026, 11, 1, 5, 30)
+
+
+def test_dst_gap_rolls_forward_past_wall_time():
+    cadence = daily(hour=2, minute=30, zone="America/New_York")
+    # 2026-03-08 02:30 不存在（02:00 EST → 03:00 EDT）；
+    # 07:00Z = 03:00 EDT，缺口顺延到 03:30 EDT（07:30Z），不跳到次日
+    assert next_run_at(cadence, utc(2026, 3, 8, 7, 0)) == utc(2026, 3, 8, 7, 30)
+
+
+@pytest.mark.parametrize(
+    "cadence",
+    [
+        Cadence(kind="daily", weekdays=(), hour=25, minute=0, timezone=SHANGHAI),
+        Cadence(kind="daily", weekdays=(), hour=9, minute=60, timezone=SHANGHAI),
+        Cadence(kind="daily", weekdays=(), hour=9, minute=0, timezone="Mars/Olympus"),
+    ],
+)
+def test_next_run_at_rejects_invalid_hand_built_cadence(cadence):
+    with pytest.raises(AppError) as excinfo:
+        next_run_at(cadence, utc(2026, 11, 16, 0, 30))
+    assert excinfo.value.code == "workflow_schedule_invalid"
+    assert excinfo.value.status == 422
 
 
 def test_next_run_at_requires_aware_after():
