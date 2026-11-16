@@ -5,6 +5,7 @@ import type {
   GraphNode,
   InputField,
   WorkflowApproval,
+  WorkflowNodeRun,
   WorkflowRun,
   WorkflowSchedule,
 } from "./types/workflow";
@@ -313,6 +314,184 @@ export function scheduleText(schedule: { cadence: Cadence }): string {
     return `每周${days} ${time}${zone}`;
   }
   return `每天 ${time}${zone}`;
+}
+
+const NODE_PREFIXES: Record<string, string> = {
+  input: "in",
+  tool: "t",
+  agent: "a",
+  condition: "c",
+  review: "r",
+  output: "o",
+};
+
+function usablePosition(value: unknown): { x: number; y: number } {
+  if (typeof value !== "object" || value === null) return { x: 0, y: 0 };
+  const record = value as Record<string, unknown>;
+  return {
+    x: Number(record.x) || 0,
+    y: Number(record.y) || 0,
+  };
+}
+
+export function nodeDefaults(type: string): Record<string, unknown> {
+  switch (type) {
+    case "tool":
+      return { label: "工具", tool: "", args: {}, retry: 0 };
+    case "agent":
+      return {
+        label: "Agent",
+        goal: "",
+        tools: [],
+        budget: { max_steps: 8 },
+        retry: 0,
+      };
+    case "condition":
+      return { label: "条件", left: "", operator: "contains", value: "" };
+    case "review":
+      return { label: "审核", title: "请确认本次结果", note: "" };
+    case "output":
+      return { label: "输出" };
+    case "input":
+      return {
+        label: "输入",
+        fields: [{ key: "topic", label: "主题", type: "string", required: true }],
+      };
+    default:
+      return { label: type };
+  }
+}
+
+export function addNode(
+  graph: Graph,
+  type: string,
+  position: { x: number; y: number },
+): Graph {
+  const prefix = NODE_PREFIXES[type] ?? "n";
+  const used = new Set(graph.nodes.map((node) => node.id));
+  let id = `${prefix}1`;
+  let counter = 1;
+  while (used.has(id)) {
+    counter += 1;
+    id = `${prefix}${counter}`;
+  }
+  return {
+    ...graph,
+    nodes: [
+      ...graph.nodes,
+      {
+        id,
+        type,
+        position: { x: position.x, y: position.y },
+        data: nodeDefaults(type),
+      },
+    ],
+  };
+}
+
+export interface ConnectResult {
+  graph: Graph;
+  error: string | null;
+}
+
+export function connectNodes(
+  graph: Graph,
+  source: string,
+  target: string,
+  sourceHandle: string | null = null,
+): ConnectResult {
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+  const from = byId.get(source);
+  const to = byId.get(target);
+  if (!from || !to) return { graph, error: "节点不存在" };
+  if (source === target) return { graph, error: "不能连接到自己" };
+  if (to.type === "input") return { graph, error: "输入节点不能有入边" };
+  const handle = typeof sourceHandle === "string" && sourceHandle ? sourceHandle : null;
+  if (from.type === "condition") {
+    if (handle !== "true" && handle !== "false") {
+      return { graph, error: "条件节点必须从「是」或「否」出边连接" };
+    }
+    if (
+      graph.edges.some(
+        (edge) => edge.source === source && edge.sourceHandle === handle,
+      )
+    ) {
+      return { graph, error: "该分支已有连线" };
+    }
+  } else if (handle) {
+    return { graph, error: "只有条件节点可以指定出边句柄" };
+  }
+  if (
+    graph.edges.some(
+      (edge) =>
+        edge.source === source &&
+        edge.target === target &&
+        (edge.sourceHandle ?? null) === handle,
+    )
+  ) {
+    return { graph, error: "连线已存在" };
+  }
+  const id = `e-${source}-${handle ?? "out"}-${target}`;
+  return {
+    graph: {
+      ...graph,
+      edges: [
+        ...graph.edges,
+        { id, source, target, ...(handle ? { sourceHandle: handle } : {}) },
+      ],
+    },
+    error: null,
+  };
+}
+
+export function removeNode(graph: Graph, nodeId: string): Graph {
+  return {
+    nodes: graph.nodes.filter((node) => node.id !== nodeId),
+    edges: graph.edges.filter(
+      (edge) => edge.source !== nodeId && edge.target !== nodeId,
+    ),
+  };
+}
+
+export function moveNode(
+  graph: Graph,
+  nodeId: string,
+  position: { x: number; y: number },
+): Graph {
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) =>
+      node.id === nodeId ? { ...node, position: usablePosition(position) } : node,
+    ),
+  };
+}
+
+export function updateNodeData(
+  graph: Graph,
+  nodeId: string,
+  patch: Record<string, unknown>,
+): Graph {
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) =>
+      node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node,
+    ),
+  };
+}
+
+/** 运行详情：两端都成功的边视为已执行路径。 */
+export function executedEdgeIds(
+  graph: Graph,
+  nodeRuns: Pick<WorkflowNodeRun, "node_id" | "status">[],
+): Set<string> {
+  const done = new Set(
+    nodeRuns.filter((run) => run.status === "ok").map((run) => run.node_id),
+  );
+  return new Set(
+    graph.edges
+      .filter((edge) => done.has(edge.source) && done.has(edge.target))
+      .map((edge) => edge.id),
+  );
 }
 
 export type ScaleLevel = "ok" | "warn" | "over";

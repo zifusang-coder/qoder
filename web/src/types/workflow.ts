@@ -178,3 +178,13 @@ export interface TemplateSummary {
   description: string;
   parameters: Record<string, unknown>[];
 }
+
+export interface SkillOption {
+  id: string;
+  name: string;
+  enabled?: boolean;
+}
+
+export interface SkillList {
+  items: SkillOption[];
+}

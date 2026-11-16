@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.59.0",
+    "@xyflow/react": "^13.0.0",
     "dompurify": "^3.1.7",
     "marked": "^18.0.0",
     "react": "^19.2.0",

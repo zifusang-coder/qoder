@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addNode,
   approvalSourceLabel,
   canCancelWorkflowRun,
   canDecideWorkflowApproval,
@@ -7,19 +8,24 @@ import {
   canResumeWorkflowRun,
   canRunWorkflow,
   conditionTargets,
+  connectNodes,
   emptyGraph,
+  executedEdgeIds,
   graphScale,
   inputFields,
   isRunTerminal,
+  moveNode,
   nodeKindLabel,
   nodeLabel,
   nodeStatusBadge,
   nodeStatusLabel,
   reachableNodes,
+  removeNode,
   runStatusLabel,
   scheduleText,
   topoOrder,
   triggerLabel,
+  updateNodeData,
   upstreamNodeIds,
   variableCandidates,
 } from "../workflows";
@@ -347,5 +353,84 @@ describe("工作流导航", () => {
     );
     const viewerItems = visibleNavItems({ role: "viewer", is_platform_admin: false });
     expect(viewerItems.some((item) => item.to === "/workflows")).toBe(false);
+  });
+});
+
+describe("图编辑帮助函数", () => {
+  it("按类型生成默认数据与唯一 id", () => {
+    const one = addNode(emptyGraph(), "tool", { x: 300, y: 120 });
+    const added = one.nodes.find((node) => node.id === "t1");
+    expect(added).toBeDefined();
+    expect(added!.type).toBe("tool");
+    expect(added!.data).toMatchObject({ label: "工具", tool: "", args: {}, retry: 0 });
+    expect(added!.position).toEqual({ x: 300, y: 120 });
+
+    const two = addNode(one, "tool", { x: 300, y: 240 });
+    expect(two.nodes.map((node) => node.id)).toContain("t2");
+  });
+
+  it("条件节点必须带句柄，非条件节点不得带句柄", () => {
+    const withCondition = addNode(graph, "condition", { x: 0, y: 0 });
+    const plain = connectNodes(withCondition, "a", "out", null);
+    expect(plain.error).toBeNull();
+    expect(plain.graph.edges.at(-1)).toMatchObject({
+      source: "a",
+      target: "out",
+    });
+
+    const handled = connectNodes(withCondition, "a", "out", "true");
+    expect(handled.error).toBe("只有条件节点可以指定出边句柄");
+
+    const missing = connectNodes(withCondition, "cond", "out", null);
+    expect(missing.error).toBe("条件节点必须从「是」或「否」出边连接");
+
+    const taken = connectNodes(withCondition, "cond", "out", "true");
+    expect(taken.error).toBe("该分支已有连线");
+  });
+
+  it("拒绝自连、输入入边与重复连线", () => {
+    expect(connectNodes(graph, "a", "a").error).toBe("不能连接到自己");
+    expect(connectNodes(graph, "a", "in").error).toBe("输入节点不能有入边");
+    expect(connectNodes(graph, "a", "b").error).toBe("连线已存在");
+  });
+
+  it("删除节点同时删除关联边，更新位置与数据保持不变式", () => {
+    const removed = removeNode(graph, "a");
+    expect(removed.nodes.some((node) => node.id === "a")).toBe(false);
+    expect(
+      removed.edges.some((edge) => edge.source === "a" || edge.target === "a"),
+    ).toBe(false);
+
+    const moved = moveNode(graph, "a", { x: 12, y: 34 });
+    expect(moved.nodes.find((node) => node.id === "a")!.position).toEqual({
+      x: 12,
+      y: 34,
+    });
+    expect(moved.nodes.length).toBe(graph.nodes.length);
+
+    const patched = updateNodeData(graph, "a", { label: "读画像（改）" });
+    expect(patched.nodes.find((node) => node.id === "a")!.data.label).toBe(
+      "读画像（改）",
+    );
+    expect(patched.nodes.find((node) => node.id === "b")!.data).toEqual(
+      graph.nodes.find((node) => node.id === "b")!.data,
+    );
+  });
+
+  it("已执行边只包含两端都成功的边", () => {
+    const runs = [
+      { node_id: "in", status: "ok" },
+      { node_id: "a", status: "ok" },
+      { node_id: "b", status: "ok" },
+      { node_id: "cond", status: "ok" },
+      { node_id: "yes", status: "skipped" },
+      { node_id: "no", status: "ok" },
+      { node_id: "out", status: "ok" },
+    ] as never;
+    const ids = executedEdgeIds(graph, runs);
+    expect(ids.has("e2")).toBe(true);
+    expect(ids.has("e5")).toBe(true);
+    expect(ids.has("e4")).toBe(false);
+    expect(ids.has("e6")).toBe(false);
   });
 });
