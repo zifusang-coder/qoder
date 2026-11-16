@@ -13,6 +13,7 @@ from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
 from app.models.agent import AgentApproval, AgentRun, AgentStep
+from app.models.audit import AuditLog
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.user import User
 from app.models.workflow import (
@@ -1062,6 +1063,8 @@ async def test_resume_queue_failure_rolls_back_to_failed(api, queue, db_session)
     await db_session.refresh(row)
     assert row.status == "failed"
     assert row.error_code == "queue_unavailable"
+    # 补偿要撤销 lifecycle 自增的 resume_count，否则队列故障十次就永久无法续跑。
+    assert row.resume_count == 0
 
 
 async def test_approval_visibility_and_self_approval_guard(api, queue, db_session):
@@ -1178,3 +1181,59 @@ async def test_approve_queue_failure_keeps_pending(api, queue, db_session):
     approval_row = await db_session.get(WorkflowApproval, approval.id)
     await db_session.refresh(approval_row)
     assert approval_row.status == "pending"
+
+
+async def test_decide_writes_spec_audit_action(api, queue, db_session):
+    http, state = api
+    state["user"] = await make_user(db_session, role="admin")
+    workflow_id, _ = await published(http)
+
+    state["user"] = await make_user(db_session, role="editor")
+    approved_run = (await start_run(http, workflow_id)).json()
+    _, approval = await park(db_session, approved_run["id"])
+    state["user"] = await make_user(db_session, role="admin")
+
+    approved = await http.post(
+        f"/api/workflow-approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert approved.status_code == 200, approved.text
+    approved_actions = (
+        (
+            await db_session.execute(
+                select(AuditLog.action).where(
+                    AuditLog.resource_id == approved_run["id"]
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert "workflow.review.approve" in approved_actions
+    assert "workflow.review.reject" not in approved_actions
+
+    state["user"] = await make_user(db_session, role="editor")
+    rejected_run = (await start_run(http, workflow_id)).json()
+    _, rejected_approval = await park(db_session, rejected_run["id"])
+    state["user"] = await make_user(db_session, role="admin")
+
+    rejected = await http.post(
+        f"/api/workflow-approvals/{rejected_approval.id}/decide",
+        json={"decision": "reject", "note": "不通过"},
+    )
+
+    assert rejected.status_code == 200, rejected.text
+    rejected_actions = (
+        (
+            await db_session.execute(
+                select(AuditLog.action).where(
+                    AuditLog.resource_id == rejected_run["id"]
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert "workflow.review.reject" in rejected_actions
+    assert "workflow.review.approve" not in rejected_actions

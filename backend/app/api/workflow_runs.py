@@ -640,6 +640,7 @@ async def resume_run(
         await _enqueue(queue, run.id)
     except AppError:
         # 没进队就不算续跑成功：退回 failed，节点保持 interrupted，可再次续跑。
+        # resume_count 也一并回退，否则每次队列故障都白耗一次续跑额度。
         await session.execute(
             update(WorkflowRun)
             .where(WorkflowRun.id == run.id, WorkflowRun.status == "queued")
@@ -648,6 +649,7 @@ async def resume_run(
                 error_code="queue_unavailable",
                 error_message=QUEUE_UNAVAILABLE_MESSAGE,
                 finished_at=_now(),
+                resume_count=WorkflowRun.resume_count - 1,
             )
             .execution_options(synchronize_session=False)
         )
@@ -732,7 +734,11 @@ async def decide(
     await record_best_effort(
         session,
         tenant_id=run.tenant_id,
-        action="workflow.approval.decide",
+        action=(
+            "workflow.review.approve"
+            if payload.decision == "approve"
+            else "workflow.review.reject"
+        ),
         actor=user,
         resource_type="workflow_run",
         resource_id=str(run.id),
