@@ -14,7 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import JSONType, TenantScoped
+from app.models.base import JSONType, TenantScoped, UtcDateTime
 
 
 class Workflow(TenantScoped):
@@ -198,9 +198,9 @@ class WorkflowApproval(TenantScoped):
         Uuid(as_uuid=True), nullable=True
     )
     decided_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime, nullable=True
     )
     note: Mapped[str] = mapped_column(Text, default="")
     expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime, nullable=True
     )
