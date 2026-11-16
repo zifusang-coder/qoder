@@ -20,6 +20,12 @@ from app.models.agent import (
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.project import Project
 from app.models.user import User
+from app.models.workflow import (
+    Workflow,
+    WorkflowApproval,
+    WorkflowRun,
+    WorkflowVersion,
+)
 from app.queue import get_queue
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
@@ -1106,3 +1112,326 @@ async def test_retry_snapshots_current_policy(api, queue, db_session):
     assert retried.policy["project.create"] == "deny"
     await db_session.refresh(source)
     assert source.policy["project.create"] == "auto"
+
+
+async def make_workflow_child(
+    db_session,
+    *,
+    creator,
+    trigger="manual",
+    parent_status="waiting_approval",
+):
+    triggered_by = creator.id if trigger == "manual" else None
+    workflow = Workflow(
+        tenant_id=creator.tenant_id, name="审批流", created_by=creator.id
+    )
+    db_session.add(workflow)
+    await db_session.flush()
+    version = WorkflowVersion(
+        tenant_id=creator.tenant_id,
+        workflow_id=workflow.id,
+        version=1,
+        graph={},
+        source_revision=0,
+        published_by=creator.id,
+        published_at=datetime.now(UTC),
+    )
+    db_session.add(version)
+    await db_session.flush()
+    parent = WorkflowRun(
+        tenant_id=creator.tenant_id,
+        workflow_id=workflow.id,
+        workflow_version_id=version.id,
+        trigger=trigger,
+        triggered_by=triggered_by,
+        status=parent_status,
+        inputs={},
+        policy={},
+    )
+    db_session.add(parent)
+    await db_session.flush()
+    child = AgentRun(
+        tenant_id=creator.tenant_id,
+        user_id=creator.id,
+        goal="子任务",
+        mode="node",
+        status="waiting_approval",
+        budget={},
+        policy={},
+        workflow_run_id=parent.id,
+        workflow_node_id="writer",
+    )
+    db_session.add(child)
+    await db_session.flush()
+    step = AgentStep(
+        tenant_id=creator.tenant_id,
+        run_id=child.id,
+        step_index=1,
+        kind="approval",
+        tool_name="project.create",
+        status="skipped",
+        input={},
+    )
+    db_session.add(step)
+    await db_session.flush()
+    approval = AgentApproval(
+        tenant_id=creator.tenant_id,
+        run_id=child.id,
+        step_id=step.id,
+        tool_name="project.create",
+        risk="low",
+        payload={"title": "草稿"},
+        status="pending",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+    )
+    db_session.add(approval)
+    await db_session.commit()
+    return parent, child, approval
+
+
+async def test_child_approval_wakes_parent_workflow(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    state["user"] = reviewer
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    await db_session.refresh(child)
+    await db_session.refresh(parent)
+    assert child.status == "queued"
+    assert parent.status == "queued"
+    assert queue.jobs == [("run_workflow_job", str(parent.id))]
+
+
+async def test_child_approval_credits_parent_paused_time(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    # 父运行 5 分钟前最后一次心跳：审批等待时间必须计入父运行的 paused_ms，
+    # 否则恢复后会把等待时长当作已消耗的墙钟预算。
+    paused_at = datetime.now(UTC) - timedelta(minutes=5)
+    parent.heartbeat_at = paused_at
+    await db_session.commit()
+    state["user"] = reviewer
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    await db_session.refresh(child)
+    await db_session.refresh(parent)
+    assert child.status == "queued"
+    assert parent.status == "queued"
+    assert int((parent.usage or {}).get("paused_ms") or 0) >= 300_000
+    assert queue.jobs == [("run_workflow_job", str(parent.id))]
+
+
+async def test_child_approval_waits_for_sibling_approval(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, _child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    db_session.add(
+        WorkflowApproval(
+            tenant_id=creator.tenant_id,
+            run_id=parent.id,
+            node_id="review",
+            kind="review",
+            title="审核",
+            payload={},
+            status="pending",
+            expires_at=datetime.now(UTC) + timedelta(hours=24),
+        )
+    )
+    await db_session.commit()
+    state["user"] = reviewer
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    await db_session.refresh(parent)
+    assert parent.status == "waiting_approval"
+    # 父运行仍是唯一执行者：兄弟审批未决时什么都不入队。
+    assert queue.jobs == []
+
+
+async def test_child_approval_rolls_back_when_parent_enqueue_fails(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    # 补偿必须把记账也一起还原：等待时长回滚后再次决策应重新累计。
+    paused_at = datetime.now(UTC) - timedelta(minutes=5)
+    parent.heartbeat_at = paused_at
+    await db_session.commit()
+    state["user"] = reviewer
+    # ``queue`` fixture owns the override cleanup, so the DownQueue override
+    # cannot leak into later tests.
+    app.dependency_overrides[get_queue] = lambda: DownQueue()
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 503
+    await db_session.refresh(parent)
+    await db_session.refresh(child)
+    await db_session.refresh(approval)
+    assert parent.status == "waiting_approval"
+    assert child.status == "waiting_approval"
+    assert approval.status == "pending"
+    assert (parent.usage or {}).get("paused_ms", 0) == 0
+    stored = parent.heartbeat_at
+    if stored is not None and stored.tzinfo is None:
+        stored = stored.replace(tzinfo=UTC)
+    assert stored == paused_at
+    assert queue.jobs == []
+
+
+async def test_child_rejection_fails_parent_workflow(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    state["user"] = reviewer
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "reject"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    await db_session.refresh(child)
+    await db_session.refresh(parent)
+    assert child.status == "failed"
+    assert child.error_code == "approval_rejected"
+    assert parent.status == "failed"
+    assert parent.error_code == "approval_rejected"
+    assert queue.jobs == []
+
+
+async def test_scheduled_child_approval_visible_to_its_creator(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="owner")
+    parent, _child, approval = await make_workflow_child(
+        db_session, creator=creator, trigger="schedule"
+    )
+    state["user"] = creator
+
+    listing = await http.get("/api/agent/approvals")
+    approved = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert listing.status_code == 200, listing.text
+    assert [row["id"] for row in listing.json()] == [str(approval.id)]
+    # 定时运行没有发起人：创建人自己也能审批，否则单管理员租户必然卡到过期。
+    assert approved.status_code == 200, approved.text
+    await db_session.refresh(parent)
+    assert parent.status == "queued"
+    assert queue.jobs == [("run_workflow_job", str(parent.id))]
+
+
+async def test_manual_child_approval_still_excludes_its_creator(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="owner")
+    _parent, _child, approval = await make_workflow_child(
+        db_session, creator=creator, trigger="manual"
+    )
+    state["user"] = creator
+
+    listing = await http.get("/api/agent/approvals")
+    decided = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert listing.status_code == 200, listing.text
+    assert listing.json() == []
+    assert decided.status_code == 403
+    assert queue.jobs == []
+
+
+async def test_agent_approval_list_keeps_independent_runs(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    _parent, _child, workflow_approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    independent = AgentRun(
+        tenant_id=creator.tenant_id,
+        user_id=creator.id,
+        goal="独立任务",
+        status="waiting_approval",
+        budget={},
+        policy={},
+    )
+    db_session.add(independent)
+    await db_session.flush()
+    step = AgentStep(
+        tenant_id=creator.tenant_id,
+        run_id=independent.id,
+        step_index=1,
+        kind="approval",
+        tool_name="project.create",
+        status="skipped",
+        input={},
+    )
+    db_session.add(step)
+    await db_session.flush()
+    standalone = AgentApproval(
+        tenant_id=creator.tenant_id,
+        run_id=independent.id,
+        step_id=step.id,
+        tool_name="project.create",
+        risk="low",
+        payload={},
+        status="pending",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+    )
+    db_session.add(standalone)
+    await db_session.commit()
+    state["user"] = reviewer
+
+    listing = await http.get("/api/agent/approvals")
+
+    assert listing.status_code == 200, listing.text
+    ids = {row["id"] for row in listing.json()}
+    assert ids == {str(standalone.id), str(workflow_approval.id)}

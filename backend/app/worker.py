@@ -7,6 +7,8 @@ Agent 运行由 API 以 ``run_agent_job`` 入队执行，心跳对账与审批�
 任务兜底。
 """
 
+import asyncio
+import contextlib
 import logging
 import uuid
 from collections.abc import Callable
@@ -17,8 +19,10 @@ from typing import ClassVar
 from arq import cron
 from arq.connections import ArqRedis, RedisSettings
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.policy import load_overrides, snapshot_policy
 from app.agent.registry import ToolRegistry, get_tool_registry
 from app.agent.runtime import (
     INTERNAL_ERROR,
@@ -34,6 +38,12 @@ from app.models.agent import AgentApproval, AgentRun
 from app.models.project import Content
 from app.models.publish import PublishJob
 from app.models.tenant import Tenant
+from app.models.workflow import (
+    Workflow,
+    WorkflowRun,
+    WorkflowSchedule,
+    WorkflowVersion,
+)
 from app.publish.adapters import adapter_for
 from app.publish.base import PublishConfigError, PublisherAdapter, PublishError
 from app.publish.registry import AUTO_PUBLISH_PAIRS
@@ -49,6 +59,9 @@ from app.services.publish import (
 )
 from app.skills.registry import SkillRegistry, get_registry
 from app.storage import StorageBackend, get_storage
+from app.workflow import lifecycle
+from app.workflow.engine import EngineDeps, run_workflow
+from app.workflow.schedule import next_run_at, parse_cadence
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +88,15 @@ BLOCKED_ERROR_CODES = {
     "platform_content_mismatch",
     "platform_not_available",
 }
+
+WORKFLOW_INTERNAL_ERROR = "workflow_internal_error"
+WORKFLOW_INTERNAL_MESSAGE = "工作流运行异常，请稍后重试"
+WORKFLOW_QUEUE_MESSAGE = "队列暂不可用，请稍后重试"
+WORKFLOW_HEARTBEAT_SECONDS = 15
+WORKFLOW_SCHEDULE_BATCH_SIZE = 100
+# 只有这两个状态属于「仍在执行」，心跳与崩溃兜底都只碰它们。
+WORKFLOW_ACTIVE_STATUSES = {"queued", "running"}
+WORKFLOW_RUNNING_STATUSES = ("queued", "running", "waiting_approval")
 
 
 async def list_due_jobs(
@@ -326,6 +348,18 @@ async def _fail_active_agent_run(
         logger.exception("agent run failure could not be recorded run=%s", run_id)
 
 
+async def _enqueue_workflow(queue: ArqRedis | None, run_id: uuid.UUID) -> None:
+    if queue is None:
+        raise AppError("queue_unavailable", WORKFLOW_QUEUE_MESSAGE, 503)
+    try:
+        await queue.enqueue_job("run_workflow_job", str(run_id))
+    except Exception:
+        logger.exception("workflow enqueue failed run=%s", run_id)
+        raise AppError(
+            "queue_unavailable", WORKFLOW_QUEUE_MESSAGE, 503
+        ) from None
+
+
 async def run_agent_job(
     _ctx: dict | None,
     run_id: str,
@@ -399,6 +433,403 @@ async def run_agent_job(
         except Exception:
             logger.exception("agent run crashed run=%s", run.id)
             await _fail_active_agent_run(session, run_uuid, run_id)
+
+
+async def _heartbeat_loop(
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ],
+    run_id: uuid.UUID,
+    *,
+    interval: float,
+) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with session_factory() as session:
+                await session.execute(
+                    update(WorkflowRun)
+                    .where(
+                        WorkflowRun.id == run_id,
+                        WorkflowRun.status.in_(WORKFLOW_ACTIVE_STATUSES),
+                    )
+                    .values(heartbeat_at=datetime.now(UTC))
+                    .execution_options(synchronize_session=False)
+                )
+                await session.commit()
+        except Exception:  # noqa: BLE001 - 心跳失败不能打断运行本身
+            logger.warning("workflow heartbeat failed run=%s", run_id)
+
+
+async def _fail_active_workflow_run(
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ],
+    run_uuid: uuid.UUID,
+    run_id: str,
+) -> None:
+    """把崩溃后仍处于 queued/running 的运行落为失败。
+
+    ``waiting_approval`` 与其他终态属于别的写入者，``fail_active_run``
+    只改 queued/running，因此这里可以无条件调用。
+    """
+    try:
+        async with session_factory() as session:
+            await lifecycle.fail_active_run(
+                session,
+                run_uuid,
+                error_code=WORKFLOW_INTERNAL_ERROR,
+                message=WORKFLOW_INTERNAL_MESSAGE,
+                actor="worker",
+            )
+    except Exception:  # 兜底写入失败只记录日志
+        logger.exception(
+            "workflow run failure could not be recorded run=%s", run_id
+        )
+
+
+async def run_workflow_job(
+    _ctx: dict | None = None,
+    run_id: str | None = None,
+    *,
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ] = SessionLocal,
+    gateway: LLMGateway | None = None,
+    tool_registry: ToolRegistry | None = None,
+    skill_registry: SkillRegistry | None = None,
+    storage: StorageBackend | None = None,
+    queue: ArqRedis | None = None,
+    heartbeat_seconds: float = WORKFLOW_HEARTBEAT_SECONDS,
+) -> None:
+    """执行一个已入队的工作流运行。
+
+    只有 ``queued`` 会被领取：``lifecycle.claim_run`` 的条件更新保证 arq
+    至少一次投递下的幂等，重复投递或已被其他执行者接手的运行直接返回。
+    网关缺失不终结运行（没有 Agent 节点的工作流不需要网关），任何逃逸
+    异常把仍处于 queued/running 的运行落 ``workflow_internal_error``。
+    """
+    worker_queue = queue or (_ctx or {}).get("redis")
+    try:
+        run_uuid = uuid.UUID(str(run_id))
+    except (AttributeError, TypeError, ValueError):
+        logger.warning("workflow run id 不合法，跳过 run=%s", run_id)
+        return
+    tenant_id: str | None = None
+    async with session_factory() as session:
+        try:
+            run = await session.get(WorkflowRun, run_uuid)
+            if run is None or run.status != "queued":
+                return
+            tenant_id = run.tenant_id
+            tenant = await session.get(Tenant, run.tenant_id)
+            if tenant is None or tenant.status != "active":
+                await lifecycle.fail_active_run(
+                    session,
+                    run_uuid,
+                    error_code="tenant_suspended",
+                    message="租户已停用",
+                    actor="worker",
+                )
+                return
+            if await lifecycle.claim_run(session, run_uuid) != "claimed":
+                return
+        except Exception:
+            logger.exception("workflow run setup failed run=%s", run_id)
+            await _fail_active_workflow_run(
+                session_factory, run_uuid, str(run_id)
+            )
+            return
+
+    active_gateway = gateway
+    if active_gateway is None and tenant_id is not None:
+        try:
+            async with session_factory() as session:
+                active_gateway = await load_gateway_default(
+                    session, tenant_id
+                )
+        except AppError:
+            # 没有 Agent 节点的工作流不需要网关；需要时由 Agent 节点自己
+            # 落 llm_not_configured。
+            active_gateway = None
+        except Exception:
+            logger.exception("workflow gateway setup failed run=%s", run_id)
+            await _fail_active_workflow_run(
+                session_factory, run_uuid, str(run_id)
+            )
+            return
+
+    deps = EngineDeps(
+        gateway=active_gateway,
+        tool_registry=tool_registry or get_tool_registry(),
+        skill_registry=skill_registry or get_registry(),
+        storage=storage or get_storage(),
+        queue=worker_queue,
+        settings=get_settings(),
+        session_factory=session_factory,
+    )
+    beat = asyncio.create_task(
+        _heartbeat_loop(
+            session_factory, run_uuid, interval=heartbeat_seconds
+        )
+    )
+    try:
+        await run_workflow(session_factory, run_uuid, deps=deps)
+    except Exception:
+        logger.exception("workflow run crashed run=%s", run_uuid)
+        await _fail_active_workflow_run(session_factory, run_uuid, str(run_uuid))
+    finally:
+        beat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await beat
+
+
+async def _schedule_skip_reason(
+    session: AsyncSession, schedule: WorkflowSchedule
+) -> str | None:
+    tenant = await session.get(Tenant, schedule.tenant_id)
+    if tenant is None or tenant.status != "active":
+        return "tenant_suspended"
+    workflow = await session.get(Workflow, schedule.workflow_id)
+    if workflow is None or workflow.archived_at is not None:
+        return "workflow_archived"
+    version = await session.get(WorkflowVersion, schedule.workflow_version_id)
+    if version is None:
+        return "version_missing"
+    active = (
+        await session.execute(
+            select(WorkflowRun.id)
+            .where(
+                WorkflowRun.tenant_id == schedule.tenant_id,
+                WorkflowRun.workflow_id == schedule.workflow_id,
+                WorkflowRun.status.in_(WORKFLOW_RUNNING_STATUSES),
+            )
+            .limit(1)
+        )
+    ).first()
+    return "active_run" if active is not None else None
+
+
+async def _audit_schedule_skip(
+    session: AsyncSession, schedule: WorkflowSchedule, reason: str
+) -> None:
+    await record_best_effort(
+        session,
+        tenant_id=schedule.tenant_id,
+        action="workflow.schedule.skipped",
+        actor="scheduler",
+        resource_type="workflow_schedule",
+        resource_id=str(schedule.id),
+        detail={"workflow": str(schedule.workflow_id), "reason": reason},
+    )
+
+
+async def _fire_schedule(
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ],
+    schedule_id: uuid.UUID,
+    *,
+    queue: ArqRedis | None,
+    moment: datetime,
+) -> bool:
+    """消费一个到期的定时：先推进计划时刻，再决定建不建运行。"""
+    async with session_factory() as session:
+        schedule = await session.get(WorkflowSchedule, schedule_id)
+        if (
+            schedule is None
+            or not schedule.enabled
+            or schedule.next_run_at is None
+        ):
+            return False
+        try:
+            following = next_run_at(parse_cadence(schedule.cadence), moment)
+        except AppError as exc:
+            # API 已校验 cadence；坏数据只记录，不阻断同批其他定时。
+            logger.warning(
+                "workflow schedule cadence invalid schedule=%s: %s",
+                schedule.id,
+                exc.message,
+            )
+            await session.rollback()
+            return False
+        slot = schedule.next_run_at
+        advanced = await session.execute(
+            update(WorkflowSchedule)
+            .where(
+                WorkflowSchedule.id == schedule.id,
+                WorkflowSchedule.tenant_id == schedule.tenant_id,
+                WorkflowSchedule.enabled.is_(True),
+                WorkflowSchedule.next_run_at == slot,
+            )
+            .values(next_run_at=following, last_run_at=slot)
+            .execution_options(synchronize_session=False)
+        )
+        if advanced.rowcount == 0:
+            # 另一个 worker 已消费该触发时刻。
+            await session.rollback()
+            return False
+        await session.commit()
+
+        skip = await _schedule_skip_reason(session, schedule)
+        if skip is not None:
+            await _audit_schedule_skip(session, schedule, skip)
+            return False
+
+        run = WorkflowRun(
+            tenant_id=schedule.tenant_id,
+            workflow_id=schedule.workflow_id,
+            workflow_version_id=schedule.workflow_version_id,
+            trigger="schedule",
+            triggered_by=None,
+            schedule_id=schedule.id,
+            scheduled_for=slot,
+            status="queued",
+            inputs=dict(schedule.inputs or {}),
+            policy=snapshot_policy(
+                await load_overrides(session, schedule.tenant_id),
+                {spec.name: spec for spec in get_tool_registry().all()},
+            ),
+            heartbeat_at=moment,
+        )
+        session.add(run)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # 同一 (schedule_id, scheduled_for) 已存在：并发触发，保留先到者。
+            await session.rollback()
+            return False
+        await session.refresh(run)
+
+        try:
+            await _enqueue_workflow(queue, run.id)
+        except AppError:
+            await session.execute(
+                update(WorkflowRun)
+                .where(
+                    WorkflowRun.id == run.id,
+                    WorkflowRun.status == "queued",
+                )
+                .values(
+                    status="failed",
+                    error_code="queue_unavailable",
+                    error_message=WORKFLOW_QUEUE_MESSAGE,
+                    finished_at=moment,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+            return False
+
+        await record_best_effort(
+            session,
+            tenant_id=schedule.tenant_id,
+            action="workflow.schedule.fire",
+            actor="scheduler",
+            resource_type="workflow_run",
+            resource_id=str(run.id),
+            detail={
+                "schedule": str(schedule.id),
+                "scheduled_for": slot.isoformat(),
+            },
+        )
+        return True
+
+
+async def fire_due_workflow_schedules(
+    _ctx: dict | None = None,
+    *,
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ] = SessionLocal,
+    queue: ArqRedis | None = None,
+    now: datetime | None = None,
+) -> int:
+    """每分钟触发一次：消费所有到期的定时并创建运行。
+
+    单条定时失败不阻断同批其他定时；每条定时独立会话，推进计划时刻与
+    创建运行不共享事务（进程在两者之间崩溃只会漏掉一次，不会重复触发）。
+    """
+    moment = now or datetime.now(UTC)
+    worker_queue = queue or (_ctx or {}).get("redis")
+    async with session_factory() as session:
+        due = (
+            (
+                await session.execute(
+                    select(WorkflowSchedule.id)
+                    .where(
+                        WorkflowSchedule.enabled.is_(True),
+                        WorkflowSchedule.next_run_at.is_not(None),
+                        WorkflowSchedule.next_run_at <= moment,
+                    )
+                    .order_by(
+                        WorkflowSchedule.next_run_at, WorkflowSchedule.id
+                    )
+                    .limit(WORKFLOW_SCHEDULE_BATCH_SIZE)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    fired = 0
+    for schedule_id in due:
+        try:
+            if await _fire_schedule(
+                session_factory, schedule_id, queue=worker_queue, moment=moment
+            ):
+                fired += 1
+        except Exception:  # 单条失败不阻断同批
+            logger.exception("workflow schedule fire failed id=%s", schedule_id)
+    return fired
+
+
+async def reconcile_workflow_runs(
+    _ctx: dict | None = None,
+    *,
+    session_factory: Callable[
+        [], AbstractAsyncContextManager[AsyncSession]
+    ] = SessionLocal,
+    queue: ArqRedis | None = None,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """心跳对账：重排超时运行、终结无望运行、过期审批。
+
+    状态迁移全部在 ``lifecycle.reconcile`` 内完成，worker 只负责把重排回
+    ``queued`` 的运行投递出去。入队失败（含没有队列）立即落
+    ``queue_unavailable``，避免运行停在 queued 永远没人执行。
+    """
+    worker_queue = queue or (_ctx or {}).get("redis")
+
+    async def wake(run_id: uuid.UUID) -> None:
+        if worker_queue is None:
+            async with session_factory() as session:
+                await lifecycle.fail_active_run(
+                    session,
+                    run_id,
+                    error_code="queue_unavailable",
+                    message=WORKFLOW_QUEUE_MESSAGE,
+                    actor="worker",
+                )
+            return
+        try:
+            await worker_queue.enqueue_job("run_workflow_job", str(run_id))
+        except Exception:
+            logger.exception("workflow requeue failed run=%s", run_id)
+            async with session_factory() as session:
+                await lifecycle.fail_active_run(
+                    session,
+                    run_id,
+                    error_code="queue_unavailable",
+                    message=WORKFLOW_QUEUE_MESSAGE,
+                    actor="worker",
+                )
+
+    return await lifecycle.reconcile(
+        session_factory,
+        settings=get_settings(),
+        now=now,
+        on_requeue=wake,
+    )
 
 
 async def _stale_agent_run_ids(
@@ -634,13 +1065,23 @@ async def archive_audit_logs(
 
 
 class WorkerSettings:
-    functions: ClassVar[list] = [process_media_job, run_agent_job]
+    functions: ClassVar[list] = [
+        process_media_job,
+        run_agent_job,
+        run_workflow_job,
+    ]
     cron_jobs: ClassVar[list] = [
         cron(publish_due_jobs, second=0, job_id="publish-due-jobs"),
         cron(
-            reconcile_agent_runs,
-            second=30,
-            job_id="agent-reconcile",
+            fire_due_workflow_schedules,
+            second=15,
+            job_id="workflow-schedules",
+        ),
+        cron(reconcile_agent_runs, second=30, job_id="agent-reconcile"),
+        cron(
+            reconcile_workflow_runs,
+            second=45,
+            job_id="workflow-reconcile",
         ),
         cron(archive_audit_logs, hour=3, minute=15, job_id="audit-archive"),
     ]

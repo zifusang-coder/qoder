@@ -38,6 +38,7 @@ from app.llm.gateway import LLMGateway
 from app.llm.tools import ToolCall
 from app.models.agent import AgentApproval, AgentRun, AgentStep
 from app.models.user import User
+from app.models.workflow import WorkflowRun
 from app.services.audit import record_best_effort
 from app.skills.registry import SkillRegistry
 from app.storage import StorageBackend
@@ -1207,6 +1208,19 @@ async def _expire_approval(
     return True
 
 
+async def _has_initiator(session: AsyncSession, run: AgentRun) -> bool:
+    """Whether this run was started by a person who must not self-approve.
+
+    Scheduled workflow runs have no initiator (``triggered_by is None``), so
+    their creator may review the child run they started on the scheduler's
+    behalf; only manual workflow and independent runs exclude the owner.
+    """
+    if run.workflow_run_id is None:
+        return True
+    parent = await session.get(WorkflowRun, run.workflow_run_id)
+    return parent is not None and parent.triggered_by is not None
+
+
 async def decide_approval(
     session: AsyncSession,
     approval: AgentApproval,
@@ -1236,7 +1250,7 @@ async def decide_approval(
     run = await session.get(AgentRun, approval.run_id)
     if run is None or run.tenant_id != approval.tenant_id:
         raise AppError("agent_run_not_found", "运行不存在", 404)
-    if actor.id == run.user_id:
+    if actor.id == run.user_id and await _has_initiator(session, run):
         raise AppError("forbidden", "不能审批自己发起的运行", 403)
     if actor.role not in APPROVAL_ROLES:
         raise AppError("forbidden", "只有管理员或所有者可以审批", 403)

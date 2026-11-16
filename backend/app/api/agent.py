@@ -6,7 +6,7 @@ from typing import Any, Literal
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,11 @@ from app.agent.policy import (
     validate_overrides,
 )
 from app.agent.registry import get_tool_registry
-from app.agent.runtime import decide_approval, fail_run
+from app.agent.runtime import (
+    APPROVAL_REJECTED,
+    decide_approval,
+    fail_run,
+)
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.errors import AppError
@@ -27,9 +31,12 @@ from app.models.agent import AgentApproval, AgentRun, AgentStep
 from app.models.profile import Profile
 from app.models.project import Project
 from app.models.user import User
+from app.models.workflow import WorkflowRun
 from app.permissions import admin_access, editor_access, viewer_access
 from app.queue import get_queue
 from app.services.audit import record_best_effort
+from app.workflow import approvals as workflow_approvals
+from app.workflow import lifecycle
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +447,163 @@ async def _enqueue(queue: ArqRedis | None, run: AgentRun) -> None:
         ) from None
 
 
+async def _enqueue_workflow(queue: ArqRedis | None, run_id: uuid.UUID) -> None:
+    if queue is None:
+        raise AppError("queue_unavailable", QUEUE_UNAVAILABLE_MESSAGE, 503)
+    try:
+        await queue.enqueue_job("run_workflow_job", str(run_id))
+    except Exception:
+        logger.exception("workflow enqueue failed run=%s", run_id)
+        raise AppError(
+            "queue_unavailable", QUEUE_UNAVAILABLE_MESSAGE, 503
+        ) from None
+
+
+async def _restore_child_wait(
+    session: AsyncSession,
+    parent: WorkflowRun,
+    child: AgentRun,
+    approval: AgentApproval,
+    *,
+    waited_ms: int,
+    paused_at: datetime,
+) -> None:
+    """Undo a woke parent whose worker never saw the job.
+
+    All three rows are restored in one transaction and only while each still
+    holds the value this request wrote, so a concurrent cancel or a sibling
+    decision is never resurrected. The approval wait credited to ``paused_ms``
+    is reversed too (floored at zero) and ``heartbeat_at`` goes back to the
+    moment the parent paused, so the retry accrues the same wait instead of
+    billing it to the run's wall-clock budget.
+    """
+    usage = dict(parent.usage or {})
+    usage["paused_ms"] = max(
+        0, int(usage.get("paused_ms") or 0) - int(waited_ms)
+    )
+    reset_parent = await session.execute(
+        update(WorkflowRun)
+        .where(
+            WorkflowRun.id == parent.id,
+            WorkflowRun.tenant_id == parent.tenant_id,
+            WorkflowRun.status == "queued",
+        )
+        .values(
+            status="waiting_approval",
+            finished_at=None,
+            error_code="",
+            error_message="",
+            usage=usage,
+            heartbeat_at=paused_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    reset_child = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == child.id,
+            AgentRun.tenant_id == child.tenant_id,
+            AgentRun.status == "queued",
+        )
+        .values(
+            status="waiting_approval",
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    reset_approval = await session.execute(
+        update(AgentApproval)
+        .where(
+            AgentApproval.id == approval.id,
+            AgentApproval.tenant_id == approval.tenant_id,
+            AgentApproval.status == "approved",
+        )
+        .values(status="pending", decided_by=None, decided_at=None, note="")
+        .execution_options(synchronize_session=False)
+    )
+    if (
+        reset_parent.rowcount
+        and reset_child.rowcount
+        and reset_approval.rowcount
+    ):
+        await session.commit()
+        return
+    await session.rollback()
+    logger.warning(
+        "agent approval compensation skipped (workflow moved on) run=%s approval=%s",
+        child.id,
+        approval.id,
+    )
+
+
+async def _wake_parent_workflow(
+    session: AsyncSession,
+    queue: ArqRedis | None,
+    child: AgentRun,
+    approval: AgentApproval,
+) -> None:
+    """Wake the parent workflow that owns ``child`` -- never the child itself.
+
+    The parent resumes its children inline, so enqueueing the child as well
+    would let two executors run the same child. While a sibling approval is
+    still pending the parent keeps waiting; whoever decides the last one wakes
+    it, and the parent then resumes every approved child.
+
+    The wait is credited to the parent's ``paused_ms`` (spec §4.7/§5.3) so
+    resuming does not bill the approval wait to the run's wall-clock budget.
+    """
+    parent = await session.get(WorkflowRun, child.workflow_run_id)
+    if parent is None or parent.tenant_id != child.tenant_id:
+        raise AppError("not_found", "运行不存在", 404)
+    if await workflow_approvals.has_pending(
+        session, tenant_id=parent.tenant_id, run_id=parent.id
+    ):
+        return
+    moment = datetime.now(UTC)
+    paused_at = _utc(parent.heartbeat_at) or moment
+    waited_ms = int(
+        max(0.0, (moment - min(paused_at, moment)).total_seconds()) * 1000
+    )
+    usage = dict(parent.usage or {})
+    usage["paused_ms"] = int(usage.get("paused_ms") or 0) + int(waited_ms)
+    resumed = await session.execute(
+        update(WorkflowRun)
+        .where(
+            WorkflowRun.id == parent.id,
+            WorkflowRun.tenant_id == parent.tenant_id,
+            WorkflowRun.status == "waiting_approval",
+        )
+        .values(
+            status="queued",
+            usage=usage,
+            heartbeat_at=moment,
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if resumed.rowcount == 0:
+        # 父运行已被取消、已被另一个审批唤醒或已终态：它的写入者负责子运行。
+        await session.rollback()
+        return
+    await session.commit()
+    try:
+        await _enqueue_workflow(queue, parent.id)
+    except AppError:
+        await _restore_child_wait(
+            session,
+            parent,
+            child,
+            approval,
+            waited_ms=waited_ms,
+            paused_at=paused_at,
+        )
+        raise
+
+
 async def _compensate_approval(
     session: AsyncSession, approval: AgentApproval, run: AgentRun
 ) -> None:
@@ -826,10 +990,16 @@ async def list_approvals(
         await session.execute(
             select(AgentApproval)
             .join(AgentRun, AgentRun.id == AgentApproval.run_id)
+            .outerjoin(
+                WorkflowRun, WorkflowRun.id == AgentRun.workflow_run_id
+            )
             .where(
                 AgentApproval.tenant_id == user.tenant_id,
                 AgentApproval.status == "pending",
-                AgentRun.user_id != user.id,
+                or_(
+                    AgentRun.user_id != user.id,
+                    WorkflowRun.trigger == "schedule",
+                ),
             )
             .order_by(AgentApproval.created_at, AgentApproval.id)
             .limit(limit)
@@ -856,6 +1026,10 @@ async def decide(
         note=payload.note,
     )
     if payload.decision == "approve":
+        if run.workflow_run_id is not None:
+            # 父工作流是子运行的唯一执行者：只唤醒父运行。
+            await _wake_parent_workflow(session, queue, run, approval)
+            return _run_out(run)
         try:
             await _enqueue(queue, run)
         except AppError:
@@ -864,4 +1038,14 @@ async def decide(
             # possible; a 503 tells the reviewer to retry.
             await _compensate_approval(session, approval, run)
             raise
+    elif run.workflow_run_id is not None:
+        # 子运行已由第 1 层落 failed/approval_rejected；这里终结父运行，
+        # 保证没有审批或子运行比父运行活得更久。
+        await lifecycle.fail_waiting_run(
+            session,
+            run.workflow_run_id,
+            error_code="approval_rejected",
+            message=APPROVAL_REJECTED,
+            actor=str(user.id),
+        )
     return _run_out(run)

@@ -27,12 +27,15 @@ from app.worker import (
     STALE_PUBLISH_MESSAGE,
     WorkerSettings,
     archive_audit_logs,
+    fire_due_workflow_schedules,
     list_due_jobs,
     process_media_job,
     publish_due_jobs,
     reconcile_agent_runs,
     reconcile_stale_publishing,
+    reconcile_workflow_runs,
     run_agent_job,
+    run_workflow_job,
 )
 
 OTHER_TENANT = "00000000-0000-0000-0000-000000000002"
@@ -867,20 +870,40 @@ async def test_adapter_error_isolated_to_failing_job(worker_factory):
 
 
 def test_worker_settings_wire_cron():
-    assert WorkerSettings.functions == [process_media_job, run_agent_job]
-    assert len(WorkerSettings.cron_jobs) == 3
-    publish_cron, agent_cron, archive_cron = WorkerSettings.cron_jobs
+    assert WorkerSettings.functions == [
+        process_media_job,
+        run_agent_job,
+        run_workflow_job,
+    ]
+    assert len(WorkerSettings.cron_jobs) == 5
+    (
+        publish_cron,
+        schedule_cron,
+        agent_cron,
+        workflow_cron,
+        archive_cron,
+    ) = WorkerSettings.cron_jobs
     assert publish_cron.job_id == "publish-due-jobs"
     assert publish_cron.coroutine is publish_due_jobs
     # 每分钟整点执行，不保留结果（worker 每次独立扫描数据库）
     assert publish_cron.minute is None
     assert publish_cron.second == 0
     assert publish_cron.keep_result_s == 0
+    # 每分钟第 15 秒消费到期的定时工作流
+    assert schedule_cron.job_id == "workflow-schedules"
+    assert schedule_cron.coroutine is fire_due_workflow_schedules
+    assert schedule_cron.minute is None
+    assert schedule_cron.second == 15
     # 每分钟第 30 秒做一次 Agent 运行对账与审批过期
     assert agent_cron.job_id == "agent-reconcile"
     assert agent_cron.coroutine is reconcile_agent_runs
     assert agent_cron.minute is None
     assert agent_cron.second == 30
+    # 每分钟第 45 秒做一次工作流运行对账
+    assert workflow_cron.job_id == "workflow-reconcile"
+    assert workflow_cron.coroutine is reconcile_workflow_runs
+    assert workflow_cron.minute is None
+    assert workflow_cron.second == 45
     # 每天凌晨低峰归档一次过期审计日志
     assert archive_cron.job_id == "audit-archive"
     assert archive_cron.coroutine is archive_audit_logs
