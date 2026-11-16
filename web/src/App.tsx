@@ -18,6 +18,7 @@ import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
 import Team from "./pages/Team";
 import Tenants from "./pages/Tenants";
+import Workflows from "./pages/Workflows";
 
 function HomeRedirect() {
   const { user } = useAuth();
@@ -46,6 +47,14 @@ export default function App() {
             element={
               <RequireRole minRole="editor">
                 <Assistant />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/workflows"
+            element={
+              <RequireRole minRole="editor">
+                <Workflows />
               </RequireRole>
             }
           />

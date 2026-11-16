@@ -23,6 +23,7 @@ import {
   upstreamNodeIds,
   variableCandidates,
 } from "../workflows";
+import { visibleNavItems } from "../auth";
 import type {
   Graph,
   WorkflowApproval,
@@ -335,5 +336,16 @@ describe("定时文案", () => {
       cadence: { kind: "daily", weekdays: [], time: "07:05", timezone: "" },
     };
     expect(scheduleText(schedule)).toBe("每天 07:05");
+  });
+});
+
+describe("工作流导航", () => {
+  it("editor 及以上可见，viewer 不可见", () => {
+    const editorItems = visibleNavItems({ role: "editor", is_platform_admin: false });
+    expect(editorItems.some((item) => item.to === "/workflows" && item.label === "工作流")).toBe(
+      true,
+    );
+    const viewerItems = visibleNavItems({ role: "viewer", is_platform_admin: false });
+    expect(viewerItems.some((item) => item.to === "/workflows")).toBe(false);
   });
 });
