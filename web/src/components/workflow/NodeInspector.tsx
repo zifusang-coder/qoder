@@ -40,16 +40,13 @@ function propertyType(spec: Record<string, unknown>): string {
   return typeof spec.type === "string" ? spec.type : "string";
 }
 
-/** 与 Task 13 的 `isInputField` 同规则：草稿里的脏数据不得进入渲染。 */
+/**
+ * 渲染期仅做结构性校验：`key` 允许为空字符串，字段行在用户清空重输时保持挂载。
+ * key 非空与 type 白名单的严格规则由 `workflows.ts` 的 `inputFields()` 对消费方把关。
+ */
 function isInputFieldEntry(value: unknown): value is InputField {
   if (typeof value !== "object" || value === null) return false;
-  const record = value as Record<string, unknown>;
-  if (typeof record.key !== "string" || record.key.length === 0) return false;
-  return (
-    record.type === "string" ||
-    record.type === "number" ||
-    record.type === "boolean"
-  );
+  return typeof (value as Record<string, unknown>).key === "string";
 }
 
 function VariablePicker({
