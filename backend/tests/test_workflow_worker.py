@@ -284,6 +284,41 @@ async def test_heartbeat_loop_ignores_finished_run(worker_factory):
     assert row.heartbeat_at is None
 
 
+async def test_run_workflow_job_heartbeats_while_running(
+    worker_factory, monkeypatch
+):
+    run = await new_run(worker_factory)
+    seen = {}
+
+    async def slow_run_workflow(session_factory, run_uuid, *, deps):
+        # 只证明心跳任务在运行期间启动、结束后停止；不落任何运行状态，
+        # 免得真实引擎把运行收尾。
+        async with session_factory() as session:
+            row = await session.get(WorkflowRun, run_uuid)
+            seen["start"] = row.heartbeat_at
+        await asyncio.sleep(0.06)
+        async with session_factory() as session:
+            row = await session.get(WorkflowRun, run_uuid)
+            seen["during"] = row.heartbeat_at
+
+    monkeypatch.setattr(worker, "run_workflow", slow_run_workflow)
+
+    await worker.run_workflow_job(
+        None,
+        str(run.id),
+        session_factory=worker_factory,
+        heartbeat_seconds=0.01,
+    )
+
+    assert seen["start"] is not None
+    assert aware(seen["during"]) > aware(seen["start"])
+    first = await load_run(worker_factory, run.id)
+    await asyncio.sleep(0.03)
+    second = await load_run(worker_factory, run.id)
+    assert aware(second.heartbeat_at) == aware(first.heartbeat_at)
+    assert second.heartbeat_at is not None
+
+
 async def test_fire_schedule_creates_and_enqueues_run(worker_factory):
     schedule, slot = await new_schedule(worker_factory)
     queue = FakeQueue()

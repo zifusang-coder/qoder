@@ -1218,7 +1218,13 @@ async def _has_initiator(session: AsyncSession, run: AgentRun) -> bool:
     if run.workflow_run_id is None:
         return True
     parent = await session.get(WorkflowRun, run.workflow_run_id)
-    return parent is not None and parent.triggered_by is not None
+    # 只有「父运行存在、仍属于同一租户、且没有发起人」时才豁免自批。
+    # 跨租户（或找不到父运行）属于数据损坏，不能因此放宽自批限制。
+    return not (
+        parent is not None
+        and parent.tenant_id == run.tenant_id
+        and parent.triggered_by is None
+    )
 
 
 async def decide_approval(

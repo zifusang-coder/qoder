@@ -1286,13 +1286,51 @@ async def test_child_approval_rolls_back_when_parent_enqueue_fails(
     parent, child, approval = await make_workflow_child(
         db_session, creator=creator
     )
-    # 补偿必须把记账也一起还原：等待时长回滚后再次决策应重新累计。
+    # 补偿必须把记账也一起还原：之前的暂停时长与等待起点都要恢复，
+    # 不能把本轮等待扣到已有 paused_ms 上（那会吞掉历史暂停时长）。
     paused_at = datetime.now(UTC) - timedelta(minutes=5)
     parent.heartbeat_at = paused_at
+    parent.usage = {"paused_ms": 300_000}
     await db_session.commit()
     state["user"] = reviewer
     # ``queue`` fixture owns the override cleanup, so the DownQueue override
     # cannot leak into later tests.
+    app.dependency_overrides[get_queue] = lambda: DownQueue()
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 503
+    await db_session.refresh(parent)
+    await db_session.refresh(child)
+    await db_session.refresh(approval)
+    assert parent.status == "waiting_approval"
+    assert child.status == "waiting_approval"
+    assert approval.status == "pending"
+    assert (parent.usage or {}).get("paused_ms") == 300_000
+    stored = parent.heartbeat_at
+    if stored is not None and stored.tzinfo is None:
+        stored = stored.replace(tzinfo=UTC)
+    assert stored == paused_at
+    assert queue.jobs == []
+
+
+async def test_child_approval_rollback_restores_zero_pause_baseline(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    # 没有任何历史暂停时长时，补偿后 paused_ms 仍为 0（不能被扣成负数）。
+    paused_at = datetime.now(UTC) - timedelta(minutes=5)
+    parent.heartbeat_at = paused_at
+    await db_session.commit()
+    state["user"] = reviewer
     app.dependency_overrides[get_queue] = lambda: DownQueue()
 
     resp = await http.post(
@@ -1312,6 +1350,111 @@ async def test_child_approval_rolls_back_when_parent_enqueue_fails(
     if stored is not None and stored.tzinfo is None:
         stored = stored.replace(tzinfo=UTC)
     assert stored == paused_at
+    assert queue.jobs == []
+
+
+async def test_child_approval_survives_lost_wake_cas(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    # 父运行已被别的写入者推进（不再 waiting_approval）：唤醒 CAS 落败并
+    # rollback，响应仍必须来自重新加载的子运行，而不是已过期的 ORM 实例。
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator, parent_status="running"
+    )
+    state["user"] = reviewer
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == str(child.id)
+    assert resp.json()["status"] == "queued"
+    await db_session.refresh(parent)
+    assert parent.status == "running"
+    assert queue.jobs == []
+
+
+async def test_child_rejection_survives_lost_fail_cas(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    # 父运行已不在 waiting_approval：fail_waiting_run 落败并 rollback，
+    # 驳回响应仍必须能序列化已过期的子运行。
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator, parent_status="running"
+    )
+    state["user"] = reviewer
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "reject"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == str(child.id)
+    assert resp.json()["status"] == "failed"
+    assert resp.json()["error_code"] == "approval_rejected"
+    await db_session.refresh(parent)
+    assert parent.status == "running"
+    assert queue.jobs == []
+
+
+async def test_child_approval_compensation_skip_does_not_raise(
+    api, queue, db_session
+):
+    http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, _child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    state["user"] = reviewer
+
+    class RacingQueue:
+        async def enqueue_job(self, name, *args):
+            # 模拟父运行在本请求提交后被另一个写入者推进：补偿时父行 CAS
+            # 落败并 rollback，之后只允许记录日志，不能再读过期实例。
+            await db_session.execute(
+                update(WorkflowRun)
+                .where(WorkflowRun.id == parent.id)
+                .values(status="succeeded")
+                .execution_options(synchronize_session=False)
+            )
+            raise RuntimeError("redis down")
+
+    app.dependency_overrides[get_queue] = lambda: RacingQueue()
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    # 补偿放弃后仍按入队失败语义返回 503，而不是 500。
+    assert resp.status_code == 503
+    assert queue.jobs == []
+
+
+async def test_self_approval_rejects_cross_tenant_parent(api, queue, db_session):
+    http, state = api
+    creator = await make_user(db_session, role="owner")
+    parent, _child, approval = await make_workflow_child(
+        db_session, creator=creator, trigger="schedule"
+    )
+    # 损坏的父运行（跨租户）不能让自批校验放行：定时运行没有发起人这条规则
+    # 只在父运行仍属于同一租户时成立。
+    parent.tenant_id = OTHER_TENANT
+    await db_session.commit()
+    state["user"] = creator
+
+    resp = await http.post(
+        f"/api/agent/approvals/{approval.id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 403
     assert queue.jobs == []
 
 

@@ -536,6 +536,11 @@ async def run_workflow_job(
                 return
         except Exception:
             logger.exception("workflow run setup failed run=%s", run_id)
+            # Release this session's transaction before the fallback opens a
+            # second one; otherwise the failed write can keep the row locked
+            # and the fallback never records the failure.
+            with contextlib.suppress(Exception):
+                await session.rollback()
             await _fail_active_workflow_run(
                 session_factory, run_uuid, str(run_id)
             )

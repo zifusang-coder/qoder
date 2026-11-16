@@ -465,7 +465,7 @@ async def _restore_child_wait(
     child: AgentRun,
     approval: AgentApproval,
     *,
-    waited_ms: int,
+    previous_paused_ms: int,
     paused_at: datetime,
 ) -> None:
     """Undo a woke parent whose worker never saw the job.
@@ -473,19 +473,27 @@ async def _restore_child_wait(
     All three rows are restored in one transaction and only while each still
     holds the value this request wrote, so a concurrent cancel or a sibling
     decision is never resurrected. The approval wait credited to ``paused_ms``
-    is reversed too (floored at zero) and ``heartbeat_at`` goes back to the
-    moment the parent paused, so the retry accrues the same wait instead of
-    billing it to the run's wall-clock budget.
+    is removed by writing the pre-credit value back, and ``heartbeat_at`` goes
+    back to the moment the parent paused, so the retry accrues the same wait
+    instead of billing it to the run's wall-clock budget.
+
+    The row identities are captured up front: the losing CAS rolls the session
+    back, which expires every ORM instance, so ``child.id`` and friends are no
+    longer readable when the warning is logged.
     """
+    parent_id = parent.id
+    parent_tenant = parent.tenant_id
+    child_id = child.id
+    child_tenant = child.tenant_id
+    approval_id = approval.id
+    approval_tenant = approval.tenant_id
     usage = dict(parent.usage or {})
-    usage["paused_ms"] = max(
-        0, int(usage.get("paused_ms") or 0) - int(waited_ms)
-    )
+    usage["paused_ms"] = previous_paused_ms
     reset_parent = await session.execute(
         update(WorkflowRun)
         .where(
-            WorkflowRun.id == parent.id,
-            WorkflowRun.tenant_id == parent.tenant_id,
+            WorkflowRun.id == parent_id,
+            WorkflowRun.tenant_id == parent_tenant,
             WorkflowRun.status == "queued",
         )
         .values(
@@ -501,8 +509,8 @@ async def _restore_child_wait(
     reset_child = await session.execute(
         update(AgentRun)
         .where(
-            AgentRun.id == child.id,
-            AgentRun.tenant_id == child.tenant_id,
+            AgentRun.id == child_id,
+            AgentRun.tenant_id == child_tenant,
             AgentRun.status == "queued",
         )
         .values(
@@ -516,8 +524,8 @@ async def _restore_child_wait(
     reset_approval = await session.execute(
         update(AgentApproval)
         .where(
-            AgentApproval.id == approval.id,
-            AgentApproval.tenant_id == approval.tenant_id,
+            AgentApproval.id == approval_id,
+            AgentApproval.tenant_id == approval_tenant,
             AgentApproval.status == "approved",
         )
         .values(status="pending", decided_by=None, decided_at=None, note="")
@@ -533,8 +541,8 @@ async def _restore_child_wait(
     await session.rollback()
     logger.warning(
         "agent approval compensation skipped (workflow moved on) run=%s approval=%s",
-        child.id,
-        approval.id,
+        child_id,
+        approval_id,
     )
 
 
@@ -563,11 +571,16 @@ async def _wake_parent_workflow(
         return
     moment = datetime.now(UTC)
     paused_at = _utc(parent.heartbeat_at) or moment
+    # The CAS below runs with synchronize_session=False, so the ORM instance
+    # keeps the pre-credit ``paused_ms``. Capture it before adding this wait:
+    # a compensation must write that value back, not subtract from a stale one
+    # it never saw added.
+    previous_paused_ms = int((parent.usage or {}).get("paused_ms") or 0)
     waited_ms = int(
         max(0.0, (moment - min(paused_at, moment)).total_seconds()) * 1000
     )
     usage = dict(parent.usage or {})
-    usage["paused_ms"] = int(usage.get("paused_ms") or 0) + int(waited_ms)
+    usage["paused_ms"] = previous_paused_ms + int(waited_ms)
     resumed = await session.execute(
         update(WorkflowRun)
         .where(
@@ -598,7 +611,7 @@ async def _wake_parent_workflow(
             parent,
             child,
             approval,
-            waited_ms=waited_ms,
+            previous_paused_ms=previous_paused_ms,
             paused_at=paused_at,
         )
         raise
@@ -1025,10 +1038,14 @@ async def decide(
         decision=payload.decision,
         note=payload.note,
     )
+    child_id = run.id
     if payload.decision == "approve":
         if run.workflow_run_id is not None:
             # 父工作流是子运行的唯一执行者：只唤醒父运行。
             await _wake_parent_workflow(session, queue, run, approval)
+            # 唤醒在父运行 CAS 落败时会 rollback，expire 掉子运行实例；
+            # 重新加载后才能安全序列化响应。
+            run = await session.get(AgentRun, child_id)
             return _run_out(run)
         try:
             await _enqueue(queue, run)
@@ -1048,4 +1065,6 @@ async def decide(
             message=APPROVAL_REJECTED,
             actor=str(user.id),
         )
+        # 父运行 CAS 落败时 fail_waiting_run 会 rollback 并 expire 子运行。
+        run = await session.get(AgentRun, child_id)
     return _run_out(run)
