@@ -57,6 +57,13 @@ class PolicyOut(BaseModel):
     defaults: dict[str, str]
 
 
+class ToolOut(BaseModel):
+    name: str
+    description: str
+    parameters: dict
+    risk: str
+
+
 class RunIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -504,6 +511,21 @@ async def _expire_source_approvals(
         .execution_options(synchronize_session=False)
     )
     await session.commit()
+
+
+@router.get("/tools", response_model=list[ToolOut])
+async def list_tools(
+    user: User = Depends(editor_access),  # noqa: B008
+) -> list[ToolOut]:
+    return [
+        ToolOut(
+            name=spec.name,
+            description=spec.description,
+            parameters=spec.input_schema,
+            risk=spec.risk,
+        )
+        for spec in get_tool_registry().all()
+    ]
 
 
 @router.get("/policy", response_model=PolicyOut)
