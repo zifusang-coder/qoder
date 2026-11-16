@@ -426,6 +426,35 @@ async def test_time_slice_requeues_when_next_node_cannot_fit(engine, db_session)
     assert engine.stats["calls"][0][2] == {"text": "A"}
 
 
+async def test_node_equal_to_slice_still_runs(engine, db_session):
+    # 完整估算恰好等于时间片：首批从片头开始，必须能跑，而不是永远重排队。
+    deps = replace(
+        engine.deps,
+        settings=engine.deps.settings.model_copy(
+            update={"workflow_time_slice_seconds": 1.5}
+        ),
+    )
+    run = await make_run(db_session, linear_graph(tool="demo.slow"))
+    assert await run_workflow(engine.factory, run.id, deps=deps) == "succeeded"
+    assert len(engine.stats["calls"]) == 1
+
+
+async def test_retry_budget_counts_against_slice(engine, db_session):
+    # demo.slow 单次 1.5 秒、retry=1，完整估算 1.5*2 + 2 = 5 秒 > 3 秒切片。
+    deps = replace(
+        engine.deps,
+        settings=engine.deps.settings.model_copy(
+            update={"workflow_time_slice_seconds": 3}
+        ),
+    )
+    run = await make_run(db_session, linear_graph(tool="demo.slow", retry=1))
+    assert await run_workflow(engine.factory, run.id, deps=deps) == "failed"
+    await db_session.refresh(run)
+    assert run.error_code == "node_failed"
+    assert "时间片" in run.error_message
+    assert engine.stats["calls"] == []
+
+
 async def test_node_longer_than_slice_fails_instead_of_requeueing(engine, db_session):
     deps = replace(
         engine.deps,

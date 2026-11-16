@@ -217,6 +217,11 @@ def _retry_budget(node: GraphNode) -> int:
         return 0
 
 
+def _backoff(index: int) -> float:
+    """第 index 次重试前的退避秒数；``RETRY_BACKOFF`` 比 ``MAX_RETRY`` 短时沿用末项。"""
+    return RETRY_BACKOFF[min(max(0, index), len(RETRY_BACKOFF) - 1)]
+
+
 def _statuses(state: RunState) -> dict[str, str]:
     return {node_id: item.status for node_id, item in state.node_states.items()}
 
@@ -347,19 +352,27 @@ def _estimate(node: GraphNode, deps: EngineDeps) -> float:
 def _full_estimate(node: GraphNode, deps: EngineDeps) -> float:
     """整次节点执行（全部尝试 + 退避）的最大可能耗时；时间片按这个值比较。"""
     retries = _retry_budget(node)
-    return _estimate(node, deps) * (retries + 1) + sum(RETRY_BACKOFF[:retries])
+    return _estimate(node, deps) * (retries + 1) + sum(
+        _backoff(index) for index in range(retries)
+    )
+
+
+def _remaining(deadline: float | None) -> float | None:
+    """实际剩余时间片；``None`` 表示时间片关闭（不限时）。"""
+    if deadline is None:
+        return None
+    return deadline - asyncio.get_running_loop().time()
 
 
 def _fits(
     node_id: str,
     state: RunState,
     deps: EngineDeps,
-    deadline: float | None,
+    remaining: float | None,
 ) -> bool:
-    """剩余时间片是否装得下该节点整次执行（含重试与退避）。"""
-    if deadline is None:
+    """给定余量是否装得下该节点整次执行（含重试与退避）。"""
+    if remaining is None:
         return True
-    remaining = deadline - asyncio.get_running_loop().time()
     return _full_estimate(state.graph.nodes[node_id], deps) <= remaining
 
 
@@ -367,11 +380,9 @@ def _fitting(
     state: RunState,
     ready: list[str],
     deps: EngineDeps,
-    deadline: float | None,
+    remaining: float | None,
 ) -> list[str]:
-    return [
-        node_id for node_id in ready if _fits(node_id, state, deps, deadline)
-    ]
+    return [node_id for node_id in ready if _fits(node_id, state, deps, remaining)]
 
 
 async def _status_of(
@@ -409,6 +420,9 @@ async def run_workflow(
 
     serial = _is_serial(factory)
     slice_seconds, deadline = _slice_window(deps)
+    # 首批节点在片头组装：容量按标称时间片算，不扣已流逝的余量，完整估算
+    # 恰等于时间片的节点因此能在片头跑起来；之后一律只看实际剩余。
+    first_batch = True
 
     while True:
         state = await _load(factory, run_id)
@@ -420,6 +434,8 @@ async def run_workflow(
         if any(item.status == "waiting" for item in state.node_states.values()):
             outcome = await _resume_waiting(factory, state, deps=deps)
             if outcome == "progress":
+                # 审批恢复也可能执行节点，时钟已不在片头。
+                first_batch = False
                 continue
             if outcome == "waiting_approval":
                 return "waiting_approval"
@@ -472,15 +488,31 @@ async def run_workflow(
                     f"节点 {overdue[0]} 预计耗时 {estimate:g} 秒（含重试与退避）"
                     f"超过时间片 {slice_seconds:g} 秒，无法在单个时间片内完成",
                 )
-            runnable = _fitting(state, ready, deps, deadline)
+            capacity = slice_seconds if first_batch else _remaining(deadline)
+            runnable = _fitting(state, ready, deps, capacity)
             if not runnable:
                 return await _requeue(factory, run_id, deps=deps)
             ready = runnable
 
         if serial:
-            await _run_serial(factory, state, ready, deps=deps, deadline=deadline)
+            await _run_serial(
+                factory,
+                state,
+                ready,
+                deps=deps,
+                deadline=deadline,
+                first_batch=first_batch,
+            )
         else:
-            await _run_parallel(factory, state, ready, deps=deps, deadline=deadline)
+            await _run_parallel(
+                factory,
+                state,
+                ready,
+                deps=deps,
+                deadline=deadline,
+                first_batch=first_batch,
+            )
+        first_batch = False
 
 
 async def _run_serial(
@@ -490,12 +522,16 @@ async def _run_serial(
     *,
     deps: EngineDeps,
     deadline: float | None = None,
+    first_batch: bool = False,
 ) -> None:
     """SQLite 测试夹具：一个会话里逐节点执行，避免并行 session 抢同一连接。"""
     async with factory() as session:
-        for node_id in node_ids:
-            # 前一个节点实跑完可能已吃掉余量：不再启动后续节点，交回外层重排队。
-            if not _fits(node_id, state, deps, deadline):
+        for position, node_id in enumerate(node_ids):
+            # 首批首个节点已按标称时间片校验过；其余节点重查实际剩余，
+            # 前一个节点实跑完可能已吃掉余量，装不下就交回外层重排队。
+            if (position > 0 or not first_batch) and not _fits(
+                node_id, state, deps, _remaining(deadline)
+            ):
                 break
             outcome = await _run_node(
                 factory, state, node_id, deps=deps, session=session
@@ -511,22 +547,28 @@ async def _run_parallel(
     *,
     deps: EngineDeps,
     deadline: float | None = None,
+    first_batch: bool = False,
 ) -> None:
     limit = max(1, int(deps.settings.workflow_max_parallel_nodes))
 
-    async def run_chunk(chunk: list[str]) -> None:
+    async def run_wave(wave: list[str], *, check: bool) -> None:
         gate = asyncio.Semaphore(limit)
 
         async def guarded(node_id: str) -> None:
             async with gate:
-                # 排队等槽位期间余量可能已耗尽：不执行，交给外层重新入队。
-                if _fits(node_id, state, deps, deadline):
-                    await _run_node(factory, state, node_id, deps=deps)
+                # 波宽等于槽位数，门在波内不会阻塞；check 只服务于首批之后的
+                # 波次：前一波已跑掉一段时间，按实际剩余再确认一次。
+                if check and not _fits(node_id, state, deps, _remaining(deadline)):
+                    return
+                await _run_node(factory, state, node_id, deps=deps)
 
-        await asyncio.gather(*(guarded(node_id) for node_id in chunk))
+        await asyncio.gather(*(guarded(node_id) for node_id in wave))
 
     for start in range(0, len(node_ids), limit):
-        await run_chunk(node_ids[start : start + limit])
+        await run_wave(
+            node_ids[start : start + limit],
+            check=start > 0 or not first_batch,
+        )
 
 
 async def _seed_input(
@@ -728,7 +770,7 @@ async def _run_node(
             if run is None or not _node_can_run(run.status):
                 return "stopped"
             if _retryable(exc) and index < retry:
-                await deps.sleep(RETRY_BACKOFF[index])
+                await deps.sleep(_backoff(index))
                 # 退避期间运行可能被取消：上一次尝试的回滚已过期本会话实例，
                 # 重读后才能决定是否还要写新尝试行并执行工具。
                 session.expire_all()
