@@ -171,7 +171,9 @@ describe("图结构纯函数", () => {
     expect(graphScale(make(5, 5)).level).toBe("ok");
     expect(graphScale(make(45, 10)).level).toBe("warn");
     expect(graphScale(make(51, 10)).level).toBe("over");
-    expect(graphScale(make(10, 91)).level).toBe("over");
+    expect(graphScale(make(10, 90)).level).toBe("warn");
+    expect(graphScale(make(10, 100)).level).toBe("warn");
+    expect(graphScale(make(10, 101)).level).toBe("over");
     expect(graphScale(make(5, 5)).text).toBe("5/50 节点 · 5/100 边");
   });
 });

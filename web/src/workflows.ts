@@ -317,11 +317,11 @@ export interface ScaleHint {
   text: string;
 }
 
-/** 与后端发布校验一致：节点 ≤50、边 ≤100；90% 起提示，超过 90% 即视为超限。 */
+/** 与后端发布校验一致：节点 ≤50、边 ≤100；90% 起提示，超过上限才视为超限。 */
 export function graphScale(graph: Graph): ScaleHint {
   const nodes = graph.nodes.length;
   const edges = graph.edges.length;
   const level: ScaleLevel =
-    nodes > 50 || edges > 90 ? "over" : nodes >= 45 || edges >= 90 ? "warn" : "ok";
+    nodes > 50 || edges > 100 ? "over" : nodes >= 45 || edges >= 90 ? "warn" : "ok";
   return { level, text: `${nodes}/50 节点 · ${edges}/100 边` };
 }
