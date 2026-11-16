@@ -494,6 +494,26 @@ export function executedEdgeIds(
   );
 }
 
+export type InputValues = Record<string, string | boolean>;
+
+/** 空字符串视为未填写；布尔字段总是提交（未勾选即 false）。 */
+export function inputPayload(
+  fields: InputField[],
+  values: InputValues,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const field of fields) {
+    const raw = values[field.key];
+    if (field.type === "boolean") {
+      payload[field.key] = Boolean(raw);
+      continue;
+    }
+    if (raw === undefined || raw === "") continue;
+    payload[field.key] = field.type === "number" ? Number(raw) : raw;
+  }
+  return payload;
+}
+
 export type ScaleLevel = "ok" | "warn" | "over";
 
 export interface ScaleHint {

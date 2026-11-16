@@ -18,6 +18,7 @@ import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
 import Team from "./pages/Team";
 import Tenants from "./pages/Tenants";
+import WorkflowEditor from "./pages/WorkflowEditor";
 import Workflows from "./pages/Workflows";
 
 function HomeRedirect() {
@@ -55,6 +56,14 @@ export default function App() {
             element={
               <RequireRole minRole="editor">
                 <Workflows />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/workflows/:id"
+            element={
+              <RequireRole minRole="editor">
+                <WorkflowEditor />
               </RequireRole>
             }
           />

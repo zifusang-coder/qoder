@@ -13,6 +13,7 @@ import {
   executedEdgeIds,
   graphScale,
   inputFields,
+  inputPayload,
   isRunTerminal,
   moveNode,
   nodeKindLabel,
@@ -432,5 +433,25 @@ describe("图编辑帮助函数", () => {
     expect(ids.has("e5")).toBe(true);
     expect(ids.has("e4")).toBe(false);
     expect(ids.has("e6")).toBe(false);
+  });
+});
+
+describe("运行入参转换", () => {
+  it("按字段类型转换，跳过空的可选值", () => {
+    const fields = [
+      { key: "topic", type: "string" as const, required: true },
+      { key: "limit", type: "number" as const },
+      { key: "dry_run", type: "boolean" as const },
+    ];
+    expect(
+      inputPayload(fields, { topic: "秋季护肤", limit: "5", dry_run: false }),
+    ).toEqual({ topic: "秋季护肤", limit: 5, dry_run: false });
+    expect(inputPayload(fields, { topic: "只有主题" })).toEqual({
+      topic: "只有主题",
+      dry_run: false,
+    });
+    expect(inputPayload(fields, { topic: "", limit: "" })).toEqual({
+      dry_run: false,
+    });
   });
 });
