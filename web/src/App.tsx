@@ -22,6 +22,7 @@ import Tenants from "./pages/Tenants";
 import Workflows from "./pages/Workflows";
 
 const WorkflowEditor = lazy(() => import("./pages/WorkflowEditor"));
+const WorkflowRunDetail = lazy(() => import("./pages/WorkflowRunDetail"));
 
 function HomeRedirect() {
   const { user } = useAuth();
@@ -71,6 +72,16 @@ export default function App() {
                   }
                 >
                   <WorkflowEditor />
+                </Suspense>
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/workflows/:id/runs/:runId"
+            element={
+              <RequireRole minRole="editor">
+                <Suspense fallback={<p className="text-sm text-ink-500">加载运行…</p>}>
+                  <WorkflowRunDetail />
                 </Suspense>
               </RequireRole>
             }

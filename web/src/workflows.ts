@@ -22,6 +22,7 @@ const NODE_KIND_LABELS: Record<string, string> = {
 const NODE_STATUS_LABELS: Record<string, string> = {
   queued: "排队中",
   running: "执行中",
+  waiting: "待审核",
   ok: "成功",
   error: "失败",
   denied: "被拒绝",
@@ -32,11 +33,16 @@ const NODE_STATUS_LABELS: Record<string, string> = {
 const NODE_STATUS_BADGES: Record<string, string> = {
   queued: "badge bg-line text-ink-500",
   running: "badge bg-sage-50 text-sage-700",
+  waiting: "badge bg-surface text-warm-600 border border-line",
   ok: "badge bg-sage-50 text-sage-700",
   error: "badge bg-wine-50 text-wine-700",
   denied: "badge bg-wine-50 text-wine-700",
   skipped: "badge bg-line text-ink-300",
   interrupted: "badge bg-surface text-warm-600 border border-line",
+  succeeded: "badge bg-sage-50 text-sage-700",
+  failed: "badge bg-wine-50 text-wine-700",
+  cancelled: "badge bg-line text-ink-500",
+  waiting_approval: "badge bg-sage-100 text-sage-700",
 };
 
 const RUN_STATUS_LABELS: Record<string, string> = {
@@ -82,6 +88,10 @@ export function nodeStatusBadge(status: string): string {
 
 export function runStatusLabel(status: string): string {
   return RUN_STATUS_LABELS[status] ?? status;
+}
+
+export function runStatusBadge(status: string): string {
+  return nodeStatusBadge(status);
 }
 
 export function triggerLabel(trigger: string): string {
@@ -477,6 +487,22 @@ export function updateNodeData(
       node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node,
     ),
   };
+}
+
+/** 同一节点可能重试多次，画布展示最大 attempt 的状态。 */
+export function latestNodeStatuses(
+  nodeRuns: Pick<WorkflowNodeRun, "node_id" | "attempt" | "status">[],
+): Record<string, string> {
+  const latest = new Map<string, { attempt: number; status: string }>();
+  for (const run of nodeRuns) {
+    const current = latest.get(run.node_id);
+    if (!current || run.attempt >= current.attempt) {
+      latest.set(run.node_id, { attempt: run.attempt, status: run.status });
+    }
+  }
+  return Object.fromEntries(
+    [...latest].map(([nodeId, item]) => [nodeId, item.status]),
+  );
 }
 
 /** 运行详情：两端都成功的边视为已执行路径。 */

@@ -15,6 +15,7 @@ import {
   inputFields,
   inputPayload,
   isRunTerminal,
+  latestNodeStatuses,
   moveNode,
   nodeKindLabel,
   nodeLabel,
@@ -22,6 +23,7 @@ import {
   nodeStatusLabel,
   reachableNodes,
   removeNode,
+  runStatusBadge,
   runStatusLabel,
   scheduleText,
   topoOrder,
@@ -453,5 +455,20 @@ describe("运行入参转换", () => {
     expect(inputPayload(fields, { topic: "", limit: "" })).toEqual({
       dry_run: false,
     });
+  });
+});
+
+describe("运行状态汇总", () => {
+  it("同一节点取最大 attempt 的状态，并给运行状态徽标", () => {
+    const runs = [
+      { node_id: "a", attempt: 1, status: "error" },
+      { node_id: "a", attempt: 2, status: "ok" },
+      { node_id: "b", attempt: 1, status: "skipped" },
+    ] as never;
+    expect(latestNodeStatuses(runs)).toEqual({ a: "ok", b: "skipped" });
+    expect(runStatusBadge("succeeded")).toContain("sage");
+    expect(runStatusBadge("failed")).toContain("wine");
+    expect(runStatusBadge("waiting_approval")).toContain("sage-100");
+    expect(nodeStatusBadge("waiting")).toContain("warm");
   });
 });
