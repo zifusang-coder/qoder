@@ -53,7 +53,7 @@
 - 真实环境验收：租户创建与强制改密、双租户隔离、角色矩阵、停用会话失效、租户停用、审计脱敏全部通过。
 - 主题：前端 `npm test` 与 `npm run build` 通过；桌面与移动宽度下逐页视觉验收通过，无旧色板残留。
 - Agent 运行时：`uv run pytest -q` 933 passed、3 skipped，`uv run ruff check .` 通过；`npm test` 156 passed、`npm run build` 通过。`RUN_AGENT_E2E=1` 真实模型用例通过：测试先种一条既有内容，模型为它调用 `content.create_version` 追加一版，再用 `publish.create_draft_job` 建草稿（项目由 `project.create` 另建）；共 7 步，产出项目、内容版本与发布草稿三类产物（草稿为 `draft` 且未排期），耗时 14.06s，远低于 10 分钟上限。
-- 工作流：`uv run pytest -q` 1109 passed、4 skipped，`uv run ruff check .` 通过；`npm test` 181 passed、`npm run build` 通过。`RUN_WORKFLOW_E2E=1` 真实模型用例在「输入主题 → Agent → 输出」图上通过（1 passed，15.59s），产出项目、内容版本与 `draft` 发布任务（未排期）；浏览器验收走通创建 → 编辑 → 保存 → 发布 → 运行 → 审核通过 → 查看产物。
+- 工作流：`uv run pytest -q` 1111 passed、4 skipped，`uv run ruff check .` 通过；`npm test` 181 passed、`npm run build` 通过。`RUN_WORKFLOW_E2E=1` 真实模型用例在「输入主题 → Agent → 输出」图上通过（1 passed，15.59s），产出项目、内容版本与 `draft` 发布任务（未排期）；浏览器验收走通模板实例化 → 拖拽/新增/连线 → 保存（第二标签页旧 revision 保存返回 `workflow_conflict` 并可重载）→ 发布 → 定时触发 → 审核挂起 → 通过后续跑至成功，驳回后运行落 `review_rejected`；产物链接可打开内容版本与未排期的 `draft` 发布任务；editor 可运行但改草稿/发布/建定时均 403，viewer 按规格无页面入口且读接口开放。验收期间发现并修复了 worker 领取审批挂起运行时等待节点被误打断的问题。
 
 ### 已知限制
 
