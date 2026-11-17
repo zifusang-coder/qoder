@@ -44,12 +44,17 @@ def _aware(value: datetime | None) -> datetime | None:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-async def _interrupt_nodes(session: AsyncSession, run_id: uuid.UUID) -> None:
+async def _interrupt_nodes(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    statuses: frozenset[str] = frozenset({"running", "waiting"}),
+) -> None:
     await session.execute(
         update(WorkflowNodeRun)
         .where(
             WorkflowNodeRun.run_id == run_id,
-            WorkflowNodeRun.status.in_({"running", "waiting"}),
+            WorkflowNodeRun.status.in_(statuses),
         )
         .values(
             status="interrupted",
@@ -138,7 +143,10 @@ async def claim_run(session: AsyncSession, run_id: uuid.UUID) -> str:
         .values(started_at=moment)
         .execution_options(synchronize_session=False)
     )
-    await _interrupt_nodes(session, run_id)
+    # 只清理上次执行遗留的 running 节点。waiting 节点必须保持原状：
+    # 审批通过后引擎靠这条记录在 _resume_waiting 里结算，清掉会让
+    # 审核/工具确认节点重新执行并再建一条 pending 审批，运行永远出不来。
+    await _interrupt_nodes(session, run_id, statuses=frozenset({"running"}))
     await session.commit()
     return "claimed"
 

@@ -160,6 +160,21 @@ def linear_graph(tool="demo.echo", retry=0):
     }
 
 
+def review_graph():
+    return {
+        "nodes": [
+            node(
+                "in",
+                "input",
+                fields=[{"key": "topic", "type": "string", "required": True}],
+            ),
+            node("review", "review", name="审核", title="请确认"),
+            node("out", "output"),
+        ],
+        "edges": [edge("in", "review"), edge("review", "out")],
+    }
+
+
 def condition_graph():
     return {
         "nodes": [
@@ -348,6 +363,81 @@ async def test_tool_confirm_reject_never_executes(engine, db_session):
     await db_session.refresh(run)
     assert run.error_code == "approval_rejected"
     assert engine.stats["calls"] == []
+
+
+async def test_review_approval_resumes_after_worker_claim(engine, db_session):
+    from app.workflow import lifecycle
+
+    run = await make_run(db_session, review_graph(), status="queued", attempts=0)
+    assert (
+        await run_workflow(engine.factory, run.id, deps=engine.deps)
+        == "waiting_approval"
+    )
+    approval = (
+        await db_session.execute(
+            select(WorkflowApproval).where(WorkflowApproval.run_id == run.id)
+        )
+    ).scalars().one()
+    assert (
+        await approvals.decide_approval(
+            db_session,
+            run=run,
+            approval=approval,
+            decision="approve",
+            actor_id=uuid.uuid4(),
+        )
+        == "queued"
+    )
+
+    # 生产路径：worker 先领取再推进。领取不得清掉等待审批的节点，
+    # 否则审核节点会重新执行并建一条新的 pending 审批。
+    assert await lifecycle.claim_run(db_session, run.id) == "claimed"
+    assert await run_workflow(engine.factory, run.id, deps=engine.deps) == "succeeded"
+    await db_session.refresh(run)
+    assert run.status == "succeeded"
+    assert (
+        await db_session.execute(
+            select(WorkflowApproval).where(
+                WorkflowApproval.run_id == run.id,
+                WorkflowApproval.status == "pending",
+            )
+        )
+    ).scalars().all() == []
+
+
+async def test_tool_confirm_approval_resumes_after_worker_claim(engine, db_session):
+    from app.workflow import lifecycle
+
+    run = await make_run(
+        db_session,
+        linear_graph(),
+        status="queued",
+        attempts=0,
+        policy={"tool:demo.echo": "confirm"},
+    )
+    assert (
+        await run_workflow(engine.factory, run.id, deps=engine.deps)
+        == "waiting_approval"
+    )
+    approval = (
+        await db_session.execute(
+            select(WorkflowApproval).where(WorkflowApproval.run_id == run.id)
+        )
+    ).scalars().one()
+    assert (
+        await approvals.decide_approval(
+            db_session,
+            run=run,
+            approval=approval,
+            decision="approve",
+            actor_id=uuid.uuid4(),
+        )
+        == "queued"
+    )
+    assert await lifecycle.claim_run(db_session, run.id) == "claimed"
+    assert await run_workflow(engine.factory, run.id, deps=engine.deps) == "succeeded"
+    assert len(engine.stats["calls"]) == 1
+    assert engine.stats["calls"][0][1] == 1
 
 
 async def test_policy_deny_fails_without_executing(engine, db_session):
