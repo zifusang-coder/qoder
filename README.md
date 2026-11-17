@@ -128,6 +128,22 @@ GET  /api/projects/{project_id}/files/preview?path=media/<run_id>/video.mp4
 cd backend && RUN_AGENT_E2E=1 uv run pytest tests/test_agent_e2e.py -q
 ```
 
+### 工作流（第 2 层）
+
+- **入口**：`/workflows` 列表与内置模板；`/workflows/:id` 画布编辑器；`/workflows/:id/runs/:runId` 运行详情。admin/owner 可编辑与发布，editor 可运行已发布版本，viewer 只读。
+- **节点**：输入、工具、Agent、条件、审核、输出六类；DAG 支持并行分支与汇合，条件节点用 `true`/`false` 两条出边，汇合节点在全部活跃分支结束后执行一次。
+- **版本**：草稿自动保存（`draft_revision` 乐观锁），发布生成不可变 `workflow_versions`；编辑草稿不影响已发布版本与历史运行，可把任意历史版本恢复为草稿。
+- **运行**：`POST /api/workflows/{id}/runs` 返回 `202` 并入队 arq 的 `run_workflow_job`；按 `WORKFLOW_TIME_SLICE_SECONDS` 分片推进，崩溃由心跳对账续跑，失败可从失败处续跑（`resume_count < 10`）。
+- **审批与发布边界**：命中租户策略 `confirm` 的工具或审核节点挂起为 `waiting_approval`，由非发起人的 admin/owner 决定；工作流只调用注册表里已有的工具，真实发布与排期仍无工具，只创建 `status=draft` 的发布任务。
+- **定时**：`POST /api/workflows/{id}/schedules` 支持每日/每周（星期 1=周一 … 7=周日）+ 本地时间与时区；`(schedule_id, scheduled_for)` 唯一约束保证到点只触发一次，工作流已有活跃运行时跳过并写 `workflow.schedule.skipped` 审计。
+- **配置**：6 个 `WORKFLOW_*` 见 `.env.example`；真实模型验收见下方「测试」。
+
+真实模型验收（前置条件：可连接的开发 PostgreSQL，且该租户已配置默认 LLM 提供商；缺失时用例报错而非跳过）：
+
+```bash
+cd backend && RUN_WORKFLOW_E2E=1 uv run pytest tests/test_workflow_e2e.py -q
+```
+
 ### 发布边界
 
 - 发布账号：9 个平台、同平台多账号、按平台动态凭据表单；凭据加密且只返回掩码。
@@ -150,6 +166,8 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 首次运行前安装依赖：`make setup`（后端）与 `npm --prefix web install`（前端）。只有本地联调与人工验收需要 `make up` 启动 PostgreSQL 和 Redis。
 
 Agent 真实模型用例默认跳过，设置 `RUN_AGENT_E2E=1` 才会执行。
+
+工作流真实模型用例默认跳过，设置 `RUN_WORKFLOW_E2E=1` 才会执行。
 
 ## Phase 2 工程基础
 

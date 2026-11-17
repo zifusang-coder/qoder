@@ -34,6 +34,11 @@
 - **人工确认**：命中确认策略的工具挂起为 `waiting_approval`，由发起人之外的管理员审批后继续；支持驳回、过期与撤销，真实发布仍不提供工具。
 - **Agent API 与页面**：新增 `/api/agent` 的运行、取消、重试、审批与策略接口；前端新增「AI 助理」页面，展示步骤时间线、预算进度与产物链接，活跃运行每 2 秒轮询。
 - **LLM 工具调用**：网关新增 provider 无关的 `complete_tool_calls`，不改动既有 `complete`/`stream` 行为。
+- **工作流引擎**：新增 `workflows`/`workflow_versions`/`workflow_schedules`/`workflow_runs`/`workflow_node_runs`/`workflow_approvals` 六张表与迁移，`agent_runs` 增加 `workflow_run_id`/`workflow_node_id`；新增 `app/workflow/` 包（图解析、发布校验、变量解析、引擎、审批、生命周期、定时与内置模板），支持并行分支、条件跳过、节点重试、时间片推进、崩溃续跑与从失败处续跑。
+- **工作流 API**：新增 `/api/workflows` 的定义、版本、发布、恢复与模板实例化接口，`/api/workflows/{id}/schedules` 定时接口，`/api/workflows/{id}/runs` 与 `/api/workflow-runs/{id}` 运行/取消/续跑接口，`/api/workflow-approvals` 审批接口，以及供编辑器使用的 `GET /api/agent/tools`；草稿保存用 `revision` 乐观锁，发布失败返回 `422 workflow_invalid` 与 `detail.issues`。
+- **工作流 worker**：新增 `run_workflow_job`、`fire_due_workflow_schedules`、`reconcile_workflow_runs` 三个任务与 cron；定时先 CAS 推进 `next_run_at` 再建运行，活跃运行跳过；第 1 层子运行审批接入父运行，父子不会并发执行。
+- **工作流画布**：前端新增 React Flow 画布编辑器（节点面板、属性面板、连线校验、条件真假句柄、撤销/重做、草稿保存与发布校验抽屉）、工作流列表与模板实例化、运行详情页（节点状态、审批、产物、取消/续跑，活跃运行每 2 秒轮询）。
+- **分级自治**：工作流复用第 1 层策略矩阵，租户只能收紧不能放宽；审核节点与 `confirm` 工具统一挂起审批，真实发布在工作流里结构上不可达。
 
 ### 验证
 
@@ -48,6 +53,7 @@
 - 真实环境验收：租户创建与强制改密、双租户隔离、角色矩阵、停用会话失效、租户停用、审计脱敏全部通过。
 - 主题：前端 `npm test` 与 `npm run build` 通过；桌面与移动宽度下逐页视觉验收通过，无旧色板残留。
 - Agent 运行时：`uv run pytest -q` 933 passed、3 skipped，`uv run ruff check .` 通过；`npm test` 156 passed、`npm run build` 通过。`RUN_AGENT_E2E=1` 真实模型用例通过：测试先种一条既有内容，模型为它调用 `content.create_version` 追加一版，再用 `publish.create_draft_job` 建草稿（项目由 `project.create` 另建）；共 7 步，产出项目、内容版本与发布草稿三类产物（草稿为 `draft` 且未排期），耗时 14.06s，远低于 10 分钟上限。
+- 工作流：`uv run pytest -q` 1109 passed、4 skipped，`uv run ruff check .` 通过；`npm test` 181 passed、`npm run build` 通过。`RUN_WORKFLOW_E2E=1` 真实模型用例在「输入主题 → Agent → 输出」图上通过（1 passed，15.59s），产出项目、内容版本与 `draft` 发布任务（未排期）；浏览器验收走通创建 → 编辑 → 保存 → 发布 → 运行 → 审核通过 → 查看产物。
 
 ### 已知限制
 
