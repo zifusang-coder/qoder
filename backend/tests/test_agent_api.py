@@ -1277,6 +1277,59 @@ async def test_child_approval_waits_for_sibling_approval(
     assert queue.jobs == []
 
 
+async def test_wake_parent_releases_lock_and_last_decision_queues_once(
+    api, queue, db_session
+):
+    from app.agent import runtime as agent_runtime
+
+    _http, state = api
+    creator = await make_user(db_session, role="editor")
+    reviewer = await make_user(db_session, role="owner")
+    parent, child, approval = await make_workflow_child(
+        db_session, creator=creator
+    )
+    sibling = WorkflowApproval(
+        tenant_id=creator.tenant_id,
+        run_id=parent.id,
+        node_id="review",
+        kind="review",
+        title="审核",
+        payload={},
+        status="pending",
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+    )
+    db_session.add(sibling)
+    await db_session.commit()
+    parent_id, sibling_id, child_id = parent.id, sibling.id, child.id
+
+    await agent_runtime.decide_approval(
+        db_session, approval, actor=reviewer, decision="approve"
+    )
+    await agent_api._wake_parent_workflow(db_session, queue, child, approval)
+
+    # 兄弟审批仍挂起时必须释放父运行行锁：不能在返回时留下未结束的事务，
+    # 否则调用方重载子运行会继续持有父运行锁。
+    assert not db_session.in_transaction()
+    await db_session.refresh(parent)
+    assert parent.status == "waiting_approval"
+    assert queue.jobs == []
+    # 回滚过期了会话里的全部实例，重新加载审批人后再走 HTTP 决策路径。
+    await db_session.refresh(reviewer)
+
+    state["user"] = reviewer
+    resp = await _http.post(
+        f"/api/workflow-approvals/{sibling_id}/decide",
+        json={"decision": "approve"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    refreshed = await db_session.get(WorkflowRun, parent_id)
+    assert refreshed.status == "queued"
+    # 最后一条审批只唤醒一次父运行。
+    assert queue.jobs == [("run_workflow_job", str(parent_id))]
+    assert await db_session.get(AgentRun, child_id) is not None
+
+
 async def test_child_approval_rolls_back_when_parent_enqueue_fails(
     api, queue, db_session
 ):

@@ -543,7 +543,91 @@ async def _expire_overdue(session: AsyncSession, moment: datetime) -> int:
     return failed
 
 
-async def _fail_orphans(session: AsyncSession, moment: datetime) -> int:
+async def requeue_settled_orphan(
+    session: AsyncSession,
+    run_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """把「审批已全部通过却没有被唤醒」的挂起运行重排回 ``queued``。
+
+    最后一条审批通过时本应由 ``decide_approval``（工作流审批）或
+    ``_wake_parent_workflow``（子运行审批）CAS 成 queued；跨通道并发下两者
+    可能互相看到对方 pending，结果运行停在零 pending 的 waiting_approval。
+    这里是对账兜底：只处理至少有一条 approved、且没有任何 pending 的运行，
+    并把等待时长按与 ``_wake_parent_workflow`` 相同的公式计入 ``paused_ms``。
+
+    锁顺序与 ``decide_approval`` 一致（运行行 -> 审批行）。不满足条件或
+    CAS 落败时回滚释放锁并返回 False，调用方再决定是否按失败清理。
+    """
+    moment = now or _now()
+    run = (
+        await session.execute(
+            select(WorkflowRun)
+            .where(WorkflowRun.id == run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if run is None or run.status != "waiting_approval":
+        await session.rollback()
+        return False
+    if await approvals.has_pending(
+        session, tenant_id=run.tenant_id, run_id=run.id
+    ):
+        await session.rollback()
+        return False
+    settled = (
+        await session.execute(
+            select(WorkflowApproval.id)
+            .where(
+                WorkflowApproval.tenant_id == run.tenant_id,
+                WorkflowApproval.run_id == run.id,
+                WorkflowApproval.status == "approved",
+            )
+            .limit(1)
+        )
+    ).first()
+    if settled is None:
+        await session.rollback()
+        return False
+    usage = dict(run.usage or {})
+    paused_at = _aware(run.heartbeat_at) or moment
+    waited_ms = int(
+        max(0.0, (moment - min(paused_at, moment)).total_seconds()) * 1000
+    )
+    usage["paused_ms"] = int(usage.get("paused_ms") or 0) + waited_ms
+    requeued = await session.execute(
+        update(WorkflowRun)
+        .where(
+            WorkflowRun.id == run.id,
+            WorkflowRun.tenant_id == run.tenant_id,
+            WorkflowRun.status == "waiting_approval",
+        )
+        .values(
+            status="queued",
+            usage=usage,
+            heartbeat_at=moment,
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if requeued.rowcount == 0:
+        await session.rollback()
+        return False
+    await session.commit()
+    return True
+
+
+async def _fail_orphans(
+    session: AsyncSession,
+    moment: datetime,
+    *,
+    requeued: list[uuid.UUID] | None = None,
+) -> int:
+    """处理没有 pending 审批的挂起运行：已结算的救回，其余判失败。"""
     runs = (
         (
             await session.execute(
@@ -560,6 +644,10 @@ async def _fail_orphans(session: AsyncSession, moment: datetime) -> int:
     targets = [(run.id, run.tenant_id) for run in runs]
     failed = 0
     for run_id, tenant_id in targets:
+        if await requeue_settled_orphan(session, run_id, now=moment):
+            if requeued is not None:
+                requeued.append(run_id)
+            continue
         if await approvals.has_pending(
             session, tenant_id=tenant_id, run_id=run_id
         ):
@@ -573,16 +661,24 @@ async def reconcile(
     *,
     settings: Settings,
     now: datetime | None = None,
+    queued_grace_seconds: int = 60,
     on_requeue: Callable[[uuid.UUID], Awaitable[None]] | None = None,
 ) -> dict[str, int]:
-    """每分钟对账：超时运行、过期审批、无 pending 的挂起运行。
+    """每分钟对账：超时运行、丢失的入队、过期审批、无 pending 的挂起运行。
 
     ``on_requeue`` 在每次把运行重排回 ``queued`` 后调用一次，worker 用它
     入队；回调抛错会中断本次扫描，由调用方自己兜底（worker 在回调内部
-    消化入队失败，不会抛到这里）。
+    消化入队失败，不会抛到这里）。``queued_grace_seconds`` 是「queued 后
+    入队丢失」的宽限期：超过它仍未推进的运行会被重新投递（不改状态，
+    ``claim_run`` 的 CAS 保证重复投递安全）。
     """
     moment = now or _now()
-    counts = {"requeued": 0, "stale_failed": 0, "approval_expired": 0}
+    counts = {
+        "requeued": 0,
+        "stale_failed": 0,
+        "approval_expired": 0,
+        "queued_reenqueued": 0,
+    }
     cutoff = moment - timedelta(
         seconds=max(1, int(settings.workflow_run_stale_seconds or 0))
     )
@@ -614,9 +710,38 @@ async def reconcile(
         elif outcome == "failed":
             counts["stale_failed"] += 1
 
+    # queued 提交后入队丢失（进程在两步之间死亡）：宽限期外重新投递一次。
+    lost_cutoff = moment - timedelta(seconds=max(0, int(queued_grace_seconds)))
+    async with factory() as session:
+        lost = (
+            (
+                await session.execute(
+                    select(WorkflowRun.id)
+                    .where(
+                        WorkflowRun.status == "queued",
+                        WorkflowRun.updated_at < lost_cutoff,
+                    )
+                    .limit(100)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    for run_id in lost:
+        counts["queued_reenqueued"] += 1
+        if on_requeue is not None:
+            await on_requeue(run_id)
+
+    orphan_requeued: list[uuid.UUID] = []
     async with factory() as session:
         counts["approval_expired"] += await _expire_overdue(session, moment)
-        counts["approval_expired"] += await _fail_orphans(session, moment)
+        counts["approval_expired"] += await _fail_orphans(
+            session, moment, requeued=orphan_requeued
+        )
+    for run_id in orphan_requeued:
+        counts["requeued"] += 1
+        if on_requeue is not None:
+            await on_requeue(run_id)
     if any(counts.values()):
         logger.info("workflow reconcile %s", counts)
     return counts

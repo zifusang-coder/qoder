@@ -403,6 +403,13 @@ async def test_review_approval_resumes_after_worker_claim(engine, db_session):
             )
         )
     ).scalars().all() == []
+    # 审核节点只在第一次挂起时执行；恢复后必须复用那条 waiting 记录，
+    # 不允许出现第二 attempt 或重新执行。
+    review_rows = [
+        row for row in await node_rows(db_session, run.id)
+        if row.node_id == "review"
+    ]
+    assert [(row.attempt, row.status) for row in review_rows] == [(1, "ok")]
 
 
 async def test_tool_confirm_approval_resumes_after_worker_claim(engine, db_session):
@@ -438,6 +445,12 @@ async def test_tool_confirm_approval_resumes_after_worker_claim(engine, db_sessi
     assert await run_workflow(engine.factory, run.id, deps=engine.deps) == "succeeded"
     assert len(engine.stats["calls"]) == 1
     assert engine.stats["calls"][0][1] == 1
+    # 工具确认恢复后直接复用 waiting 节点，不产生第二次执行。
+    echo_rows = [
+        row for row in await node_rows(db_session, run.id)
+        if row.node_id == "echo"
+    ]
+    assert [(row.attempt, row.status) for row in echo_rows] == [(1, "ok")]
 
 
 async def test_policy_deny_fails_without_executing(engine, db_session):

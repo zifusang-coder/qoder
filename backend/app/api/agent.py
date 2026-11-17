@@ -561,13 +561,33 @@ async def _wake_parent_workflow(
 
     The wait is credited to the parent's ``paused_ms`` (spec §4.7/§5.3) so
     resuming does not bill the approval wait to the run's wall-clock budget.
+
+    The parent is read with a row lock so this check-then-CAS serializes with
+    ``workflow.approvals.decide_approval`` on the same run (parent run ->
+    approval rows, the same order both writers use). Without it, a workflow
+    review decision and a child approval decision can each see the other as
+    pending and neither wakes the parent. When a sibling approval is still
+    pending the lock is released before returning: the child decision was
+    already committed by ``agent.runtime.decide_approval``, and the caller
+    reloads the child afterwards.
     """
-    parent = await session.get(WorkflowRun, child.workflow_run_id)
-    if parent is None or parent.tenant_id != child.tenant_id:
+    parent = (
+        await session.execute(
+            select(WorkflowRun)
+            .where(
+                WorkflowRun.id == child.workflow_run_id,
+                WorkflowRun.tenant_id == child.tenant_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if parent is None:
         raise AppError("not_found", "运行不存在", 404)
     if await workflow_approvals.has_pending(
         session, tenant_id=parent.tenant_id, run_id=parent.id
     ):
+        await session.rollback()
         return
     moment = datetime.now(UTC)
     paused_at = _utc(parent.heartbeat_at) or moment

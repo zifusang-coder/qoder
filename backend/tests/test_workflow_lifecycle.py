@@ -358,6 +358,72 @@ async def test_reconcile_reports_requeued_runs_to_callback(factory, db_session):
     assert seen == [run.id]
 
 
+async def test_reconcile_requeues_settled_waiting_run(factory, db_session):
+    run = await make_run(
+        db_session,
+        status="waiting_approval",
+        heartbeat_at=NOW - timedelta(minutes=5),
+    )
+    approval = await add_workflow_approval(db_session, run)
+    approval.status = "approved"
+    approval.decided_at = NOW - timedelta(minutes=4)
+    await db_session.commit()
+    await add_node_run(db_session, run, "review", "waiting")
+    seen = []
+
+    async def on_requeue(run_id):
+        seen.append(run_id)
+
+    counts = await lifecycle.reconcile(
+        factory,
+        settings=get_settings(),
+        now=NOW,
+        on_requeue=on_requeue,
+    )
+    await db_session.refresh(run)
+    # 最后一条审批已通过、却没人把它唤回队列：对账要重排而不是判失败。
+    assert run.status == "queued"
+    assert run.error_code == ""
+    assert run.finished_at is None
+    assert counts["requeued"] == 1
+    assert counts["approval_expired"] == 0
+    assert seen == [run.id]
+    # 等待审批的 5 分钟必须计入 paused_ms，不能算进运行墙钟预算。
+    assert int((run.usage or {}).get("paused_ms") or 0) >= 300_000
+
+
+async def test_reconcile_reenqueues_lost_queued_run(factory, db_session):
+    stale = await make_run(db_session, status="queued", attempts=0)
+    fresh = await make_run(db_session, status="queued", attempts=0)
+    await db_session.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == stale.id)
+        .values(updated_at=NOW - timedelta(minutes=5))
+    )
+    await db_session.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == fresh.id)
+        .values(updated_at=NOW)
+    )
+    await db_session.commit()
+    seen = []
+
+    async def on_requeue(run_id):
+        seen.append(run_id)
+
+    counts = await lifecycle.reconcile(
+        factory, settings=get_settings(), now=NOW, on_requeue=on_requeue
+    )
+    await db_session.refresh(stale)
+    await db_session.refresh(fresh)
+    # 提交 queued 后进程死亡：超过宽限期的运行要重新投递，状态不变。
+    assert counts["queued_reenqueued"] == 1
+    assert seen == [stale.id]
+    assert stale.status == "queued"
+    # 宽限期内的运行可能还在正常入队路径上，不能重复投递。
+    assert fresh.status == "queued"
+
+
 async def test_fail_waiting_run_denies_node_and_expires_the_rest(db_session):
     run = await make_run(db_session, status="waiting_approval")
     workflow_approval = await add_workflow_approval(
