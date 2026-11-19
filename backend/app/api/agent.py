@@ -115,6 +115,8 @@ class RunOut(BaseModel):
     user_id: str
     goal: str
     mode: str
+    role: str = ""
+    parent_run_id: str | None = None
     status: str
     plan: dict
     result_text: str
@@ -182,6 +184,8 @@ def _run_out(run: AgentRun, approval: AgentApproval | None = None) -> RunOut:
         user_id=str(run.user_id),
         goal=run.goal,
         mode=run.mode,
+        role=run.role,
+        parent_run_id=str(run.parent_run_id) if run.parent_run_id else None,
         status=run.status,
         plan=run.plan or {},
         result_text=run.result_text,
@@ -1153,6 +1157,8 @@ async def retry_run(
     queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
 ) -> RunOut:
     source = await _owned_run(session, run_id, user)
+    if source.mode == "team":
+        raise AppError("run_not_retryable", "团队运行不支持重试，请重新发起", 409)
     if source.status not in RETRYABLE_STATUSES:
         raise AppError(
             "invalid_state", "只有失败或已取消的运行可以重试", 409
