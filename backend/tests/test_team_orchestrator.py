@@ -356,6 +356,50 @@ async def test_loop_detected_same_task_three_times(team_env):
 
 
 @pytest.mark.asyncio
+async def test_loop_guard_consecutive_alternating_ok(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    gateway = ScriptedGateway([
+        lead("delegate", role="scout", task="任务甲"),
+        role_turn("r1"),
+        lead("delegate", role="scout", task="任务乙"),
+        role_turn("r2"),
+        lead("delegate", role="scout", task="任务甲"),
+        role_turn("r3"),
+        lead("delegate", role="scout", task="任务乙"),
+        role_turn("r4"),
+        lead("delegate", role="scout", task="任务甲"),
+        role_turn("r5"),
+        lead("finalize", summary="交付"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded", parent.error_code
+
+
+@pytest.mark.asyncio
+async def test_critic_invalid_retry_resets_per_incident(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, roles=("creator", "critic"))
+    gateway = ScriptedGateway([
+        lead("delegate", role="creator", task="写稿"),
+        role_turn("稿件 v1"),
+        role_turn("不是 JSON"),
+        role_turn('{"verdict":"fail","issues":["标题太长"]}'),
+        role_turn("稿件 v2"),
+        role_turn("还不是 JSON"),
+        role_turn('{"verdict":"pass","issues":[]}'),
+        lead("finalize", summary="交付"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded", parent.error_code
+    assert parent.result["critic"]["verdict"] == "pass"
+
+
+@pytest.mark.asyncio
 async def test_critic_disabled_skips_review(team_env):
     from app.agent.team import run_team
     from app.models.agent import AgentTeamRole

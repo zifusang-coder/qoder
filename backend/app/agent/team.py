@@ -220,9 +220,10 @@ async def _start_role(session, run, *, role, task, reason, state, roles,
                       settings, session_factory) -> None:
     normalized = " ".join(task.split())[:500]
     key = f"{role}|{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
-    counts = state.setdefault("loop_guard", {})
-    counts[key] = int(counts.get(key, 0)) + 1
-    if counts[key] >= 3:
+    guard = state.setdefault("loop_guard", {})
+    count = int(guard.get("count", 0)) + 1 if guard.get("last_key") == key else 1
+    state["loop_guard"] = {"last_key": key, "count": count}
+    if count >= 3:
         await _fail_team(session, run, TEAM_LOOP_DETECTED, "同一任务连续委派三次")
         raise _TeamStop()
     child = AgentRun(
@@ -304,6 +305,9 @@ async def _on_child_succeeded(session, run, child, state, *, settings) -> None:
             _save_state(run, state)
             await session.commit()
             return
+        # 纠错重试按事件计数：裁决有效即清零，避免跨返工轮次误判与 note 残留
+        state["critic_invalid"] = 0
+        state["critic_note"] = ""
         await append_entry(session, run=run, kind="critic", role="critic",
                            content={"verdict": verdict.verdict, "issues": verdict.issues})
         state["critic_verdicts"].append({
