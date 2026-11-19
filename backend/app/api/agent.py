@@ -1157,7 +1157,7 @@ async def retry_run(
     queue: ArqRedis | None = Depends(get_queue),  # noqa: B008
 ) -> RunOut:
     source = await _owned_run(session, run_id, user)
-    if source.mode == "team":
+    if source.mode in {"team", "role"}:
         raise AppError("run_not_retryable", "团队运行不支持重试，请重新发起", 409)
     if source.status not in RETRYABLE_STATUSES:
         raise AppError(

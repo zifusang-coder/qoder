@@ -167,13 +167,20 @@ async def get_team_run(
         raise AppError("not_found", "资源不存在", 404)
     children = (
         await session.execute(
-            select(AgentRun).where(AgentRun.parent_run_id == run.id)
+            select(AgentRun).where(
+                AgentRun.parent_run_id == run.id,
+                AgentRun.tenant_id == user.tenant_id,
+                AgentRun.mode == "role",
+            )
             .order_by(AgentRun.created_at, AgentRun.id)
         )
     ).scalars().all()
     entries = (
         await session.execute(
-            select(AgentTeamEntry).where(AgentTeamEntry.run_id == run.id)
+            select(AgentTeamEntry).where(
+                AgentTeamEntry.run_id == run.id,
+                AgentTeamEntry.tenant_id == user.tenant_id,
+            )
             .order_by(AgentTeamEntry.seq)
         )
     ).scalars().all()

@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from app.db import get_session
 from app.deps import get_current_user
 from app.main import app
-from app.models.agent import AgentRun
+from app.models.agent import AgentRun, AgentTeamEntry
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.user import User
 from app.queue import get_queue
@@ -160,5 +160,56 @@ async def test_team_retry_forbidden(db_session, api, queue):
     run.status = "failed"
     await db_session.commit()
     resp = await http.post(f"/api/agent/runs/{run_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["code"] == "run_not_retryable"
+
+
+@pytest.mark.asyncio
+async def test_detail_excludes_foreign_tenant_rows(db_session, api, queue):
+    http, state = api
+    editor = await make_user(db_session, role="editor")
+    state["user"] = editor
+    resp = await http.post("/api/agent/team/runs",
+                           json={"goal": "做内容", "roles": ["creator"]})
+    parent_id = uuid.UUID(resp.json()["id"])
+    # 本租户的 role 子运行与黑板条目应正常返回
+    own_child = AgentRun(
+        tenant_id=editor.tenant_id, user_id=editor.id, goal="子任务",
+        mode="role", role="scout", status="succeeded", parent_run_id=parent_id,
+    )
+    own_entry = AgentTeamEntry(
+        tenant_id=editor.tenant_id, run_id=parent_id, seq=0,
+        kind="note", role="scout", content={"text": "own"},
+    )
+    # 外租户行直接挂到同一 parent，详情接口不得泄露
+    foreign_child = AgentRun(
+        tenant_id=OTHER_TENANT, user_id=editor.id, goal="foreign",
+        mode="role", role="scout", status="succeeded", parent_run_id=parent_id,
+    )
+    foreign_entry = AgentTeamEntry(
+        tenant_id=OTHER_TENANT, run_id=parent_id, seq=1,
+        kind="note", role="scout", content={"text": "foreign"},
+    )
+    db_session.add_all([own_child, own_entry, foreign_child, foreign_entry])
+    await db_session.commit()
+    resp = await http.get(f"/api/agent/team/runs/{parent_id}")
+    assert resp.status_code == 200
+    detail = resp.json()
+    assert [c["id"] for c in detail["children"]] == [str(own_child.id)]
+    assert [e["seq"] for e in detail["entries"]] == [0]
+
+
+@pytest.mark.asyncio
+async def test_role_child_retry_forbidden(db_session, api, queue):
+    http, state = api
+    editor = await make_user(db_session, role="editor")
+    state["user"] = editor
+    child = AgentRun(
+        tenant_id=editor.tenant_id, user_id=editor.id, goal="子任务",
+        mode="role", role="scout", status="failed",
+    )
+    db_session.add(child)
+    await db_session.commit()
+    resp = await http.post(f"/api/agent/runs/{child.id}/retry")
     assert resp.status_code == 409
     assert resp.json()["code"] == "run_not_retryable"
