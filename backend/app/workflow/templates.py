@@ -186,6 +186,47 @@ POST_PUBLISH_REVIEW = {
     ],
 }
 
+CONTENT_TEAM_GRAPH = {
+    "nodes": [
+        {
+            "id": "in",
+            "type": "input",
+            "position": {"x": 0, "y": 140},
+            "data": {
+                "name": "本周主题",
+                "fields": [
+                    {"key": "topic", "type": "string", "required": True, "maxLength": 200}
+                ],
+            },
+        },
+        {
+            "id": "team",
+            "type": "team",
+            "position": {"x": 280, "y": 140},
+            "data": {
+                "name": "内容团队",
+                "roles": ["scout", "creator", "critic", "publisher"],
+                "goal": (
+                    "围绕「{{inputs.topic}}」完成调研、创作、审稿与交付："
+                    "产出一篇可发布的内容版本，并创建 draft 发布任务（不排期）。"
+                ),
+                "budget": {"max_tokens": 120000, "max_turns": 12},
+                "retry": 0,
+            },
+        },
+        {
+            "id": "out",
+            "type": "output",
+            "position": {"x": 560, "y": 140},
+            "data": {"name": "交付结果"},
+        },
+    ],
+    "edges": [
+        {"id": "in-team", "source": "in", "target": "team"},
+        {"id": "team-out", "source": "team", "target": "out"},
+    ],
+}
+
 TEMPLATES: tuple[Template, ...] = (
     Template(
         key="weekly_topic",
@@ -241,6 +282,15 @@ TEMPLATES: tuple[Template, ...] = (
             }
         ],
         graph=POST_PUBLISH_REVIEW,
+    ),
+    Template(
+        key="content_team",
+        name="内容团队",
+        description="五角色团队围绕一个主题完成调研、创作、审稿与草稿交付。",
+        parameters=[
+            {"key": "topic", "label": "主题", "type": "string", "required": True}
+        ],
+        graph=CONTENT_TEAM_GRAPH,
     ),
 )
 

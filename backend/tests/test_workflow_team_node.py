@@ -558,3 +558,13 @@ def test_team_retry_budget_and_estimate():
     expected = float(_team_budget(tm, settings).get("max_seconds") or 0)
     assert expected > 0
     assert _estimate(tm, deps) == expected
+
+
+def test_content_team_template_publishable():
+    from app.workflow.templates import TEMPLATES
+    template = next(t for t in TEMPLATES if t.key == "content_team")
+    registry = get_tool_registry()
+    result = validate_publish(template.graph, registry=registry, skill_ids=set())
+    assert result.ok, [issue.message for issue in result.issues]
+    kinds = [n["type"] for n in template.graph["nodes"]]
+    assert "team" in kinds

@@ -427,6 +427,7 @@ async def test_templates_list_and_instantiate(api, db_session):
         "weekly_topic",
         "multi_platform_rewrite",
         "post_publish_review",
+        "content_team",
     ]
     assert all(item["parameters"] for item in listed.json())
 
