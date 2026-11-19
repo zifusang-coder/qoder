@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import {
   agentStatusLabel,
   artifactLabel,
@@ -20,6 +21,16 @@ import {
   type AgentRunDetail,
   type Artifact,
 } from "../agent";
+import {
+  EXECUTION_ROLES,
+  TEAM_BUDGET_KEYS,
+  canStartTeamRun,
+  defaultTeamBudget,
+  roleLabel,
+  validateParticipants,
+  validateTeamBudget,
+  type TeamRoleConfig,
+} from "../agentTeam";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
 import { errorText } from "../types";
@@ -29,6 +40,13 @@ const BUDGET_LABELS: Record<string, string> = {
   max_tokens: "Token",
   max_tool_calls: "工具调用",
   max_seconds: "时长",
+};
+
+const TEAM_BUDGET_LABELS: Record<string, string> = {
+  max_tokens: "Token",
+  max_tool_calls: "工具调用",
+  max_turns: "轮次",
+  max_seconds: "时长（秒）",
 };
 
 function usageValue(run: AgentRun, key: string): number {
@@ -45,10 +63,16 @@ function usageValue(run: AgentRun, key: string): number {
 export default function Assistant() {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [goal, setGoal] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [tab, setTab] = useState<"single" | "team">("single");
+  const [teamGoal, setTeamGoal] = useState("");
+  const [teamRoles, setTeamRoles] = useState<string[]>(["scout", "creator", "critic", "publisher"]);
+  const [teamBudget, setTeamBudget] = useState<Record<string, number>>(defaultTeamBudget());
+  const [teamError, setTeamError] = useState("");
 
   const runs = useQuery({
     queryKey: ["agent-runs"],
@@ -122,6 +146,42 @@ export default function Assistant() {
     onError: (err) => setError(errorText(err)),
   });
 
+  const roleConfigs = useQuery({
+    queryKey: ["team-roles"],
+    queryFn: () => api<TeamRoleConfig[]>("/agent/team/roles"),
+  });
+
+  const createTeam = useMutation({
+    mutationFn: () => api<AgentRun>("/agent/team/runs", {
+      method: "POST",
+      body: JSON.stringify({ goal: teamGoal, roles: teamRoles, budget: teamBudget }),
+    }),
+    onSuccess: () => {
+      setTeamGoal(""); setTeamError("");
+      queryClient.invalidateQueries({ queryKey: ["agent-runs"] });
+    },
+    onError: (err) => setTeamError(errorText(err)),
+  });
+
+  const submitTeam = () => {
+    if (!teamGoal.trim()) {
+      setTeamError("目标不能为空");
+      return;
+    }
+    const participantError = validateParticipants(teamRoles, roleConfigs.data ?? []);
+    if (participantError) {
+      setTeamError(participantError);
+      return;
+    }
+    const budgetError = validateTeamBudget(teamBudget);
+    if (budgetError) {
+      setTeamError(budgetError);
+      return;
+    }
+    setTeamError("");
+    createTeam.mutate();
+  };
+
   const run = detail.data ?? null;
   const pending = run?.pending_approval ?? null;
   const artifacts = Array.isArray(run?.result?.artifacts)
@@ -143,24 +203,126 @@ export default function Assistant() {
 
       {me && canCreateRun(me.role) && (
         <section className="card space-y-3 p-4">
-          <textarea
-            className="input min-h-24 w-full"
-            placeholder="例如：为「秋季护肤」项目写一版小红书文案并准备发布草稿"
-            value={goal}
-            maxLength={4000}
-            onChange={(event) => setGoal(event.target.value)}
-          />
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-ink-500">{goal.length}/4000</span>
+          <div className="flex gap-1 rounded-lg border border-line bg-surface p-1 text-sm">
             <button
               type="button"
-              className="btn-primary"
-              disabled={!goal.trim() || createRun.isPending}
-              onClick={() => createRun.mutate()}
+              className={`flex-1 rounded-md px-2 py-1 ${
+                tab === "single" ? "bg-sage-50 text-sage-700" : "text-ink-500"
+              }`}
+              onClick={() => setTab("single")}
             >
-              {createRun.isPending ? "提交中…" : "开始"}
+              单 Agent
+            </button>
+            <button
+              type="button"
+              className={`flex-1 rounded-md px-2 py-1 ${
+                tab === "team" ? "bg-sage-50 text-sage-700" : "text-ink-500"
+              }`}
+              onClick={() => setTab("team")}
+            >
+              协作团队
             </button>
           </div>
+          {tab === "single" ? (
+            <>
+              <textarea
+                className="input min-h-24 w-full"
+                placeholder="例如：为「秋季护肤」项目写一版小红书文案并准备发布草稿"
+                value={goal}
+                maxLength={4000}
+                onChange={(event) => setGoal(event.target.value)}
+              />
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-ink-500">{goal.length}/4000</span>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={!goal.trim() || createRun.isPending}
+                  onClick={() => createRun.mutate()}
+                >
+                  {createRun.isPending ? "提交中…" : "开始"}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <textarea
+                className="input min-h-24 w-full"
+                placeholder="例如：为「秋季护肤」项目完成调研、创作、审稿并准备交付草稿"
+                value={teamGoal}
+                maxLength={4000}
+                onChange={(event) => setTeamGoal(event.target.value)}
+              />
+              <div className="space-y-1">
+                <p className="text-xs text-ink-500">参与角色</p>
+                <label className="flex items-center gap-2 text-sm text-ink-500">
+                  <input type="checkbox" checked disabled />
+                  Lead 规划（固定参与）
+                </label>
+                {EXECUTION_ROLES.map((role) => {
+                  const config = roleConfigs.data?.find((item) => item.role === role);
+                  const locked = role === "creator";
+                  return (
+                    <label key={role} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={teamRoles.includes(role)}
+                        disabled={locked}
+                        onChange={(event) =>
+                          setTeamRoles((prev) =>
+                            event.target.checked
+                              ? [...prev, role]
+                              : prev.filter((item) => item !== role),
+                          )
+                        }
+                      />
+                      {config?.label ?? roleLabel(role)}
+                      {locked && <span className="text-xs text-ink-500">（必选）</span>}
+                      {config && !config.enabled && (
+                        <span className="text-xs text-wine-600">（已关闭）</span>
+                      )}
+                    </label>
+                  );
+                })}
+              </div>
+              <details>
+                <summary className="cursor-pointer text-xs text-ink-500">
+                  预算（只能调低，不能超过上限）
+                </summary>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  {TEAM_BUDGET_KEYS.map((key) => (
+                    <label key={key} className="space-y-1 text-xs text-ink-500">
+                      <span>{TEAM_BUDGET_LABELS[key]}</span>
+                      <input
+                        type="number"
+                        className="input w-full"
+                        min={1}
+                        value={teamBudget[key]}
+                        onChange={(event) =>
+                          setTeamBudget((prev) => ({
+                            ...prev,
+                            [key]: Number(event.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+              </details>
+              {teamError && <p className="text-sm text-wine-600">{teamError}</p>}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-ink-500">{teamGoal.length}/4000</span>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={!me || !canStartTeamRun(me.role) || createTeam.isPending}
+                  onClick={submitTeam}
+                >
+                  {createTeam.isPending ? "提交中…" : "发起团队"}
+                </button>
+              </div>
+            </>
+          )}
         </section>
       )}
 
@@ -176,14 +338,23 @@ export default function Assistant() {
             <button
               key={item.id}
               type="button"
-              onClick={() => setSelected(item.id)}
+              onClick={() =>
+                item.mode === "team"
+                  ? navigate(`/assistant/teams/${item.id}`)
+                  : setSelected(item.id)
+              }
               className={`block w-full p-3 text-left ${
                 item.id === activeId ? "bg-sage-50" : ""
               }`}
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="badge bg-sage-100 text-sage-700">
-                  {agentStatusLabel(item.status)}
+                <span className="flex items-center gap-1">
+                  <span className="badge bg-sage-100 text-sage-700">
+                    {agentStatusLabel(item.status)}
+                  </span>
+                  {item.mode === "team" && (
+                    <span className="badge bg-line text-ink-500">协作团队</span>
+                  )}
                 </span>
                 <span className="text-xs text-ink-500">
                   {formatElapsed(item.started_at, item.finished_at)}
