@@ -144,6 +144,23 @@ cd backend && RUN_AGENT_E2E=1 uv run pytest tests/test_agent_e2e.py -q
 cd backend && RUN_WORKFLOW_E2E=1 uv run pytest tests/test_workflow_e2e.py -q
 ```
 
+### 协作团队（第 3 层）
+
+- **五角色**：Planner（Lead，决策与委派）、Scout（调研）、Creator（创作，必选）、Critic（审稿）、Publisher（交付）。角色是「系统提示词 + 工具子集 + 预算」的组合，复用第 1 层运行时 `run_agent` 串行执行，不引入第三方框架或新执行内核。租户角色配置只能收窄工具、调低预算，放宽返回 `422 policy_not_loosenable`；`planner`/`creator` 不可禁用。
+- **黑板**：`agent_team_entries` 追加式共享上下文，编排器在每步结束后代表 Lead 追加条目（`goal/plan/delegation/result/critic/decision/final`），入库前脱敏与截断，运行时注入最近 `AGENT_TEAM_BLACKBOARD_INJECT`（默认 12）条。
+- **Critic 返工**：Creator 交付后 Critic 强制审稿，不通过强制返工，上限 `AGENT_TEAM_REWORK_LIMIT`（默认 2）轮；超限落 `critic_rejected` 并保留草稿与问题清单。循环检测、预算耗尽（`team_budget_exhausted`）、角色失败（`role_failed`）等收敛为失败时，黑板与已产产物保留现场。
+- **团队预算**：默认 120000 tokens / 40 工具调用 / 12 轮 / 900 秒；发起请求可上调至 `AGENT_TEAM_TOKEN_CEILING`（默认 200000）/ `AGENT_TEAM_SECONDS_CEILING`（默认 1800），其余 `AGENT_TEAM_*` 配置见 `.env.example`。运维注记：前端团队预算上限（`web/src/agentTeam.ts` TEAM_CEILINGS）为默认值常量，租户收窄与实际上限以服务端校验为准。
+- **审批唤醒**：子运行命中 `confirm` 时父团队同步挂起为 `waiting_approval`，由发起人之外的 admin/owner 经 `POST /api/agent/approvals/{id}/decide` 批准后唤醒父团队续跑；驳回落 `approval_rejected`，超时过期失败。团队详情页审批卡带「团队 · 角色」标签，助理页审批卡展示团队上下文与详情链接。
+- **双入口**：AI 助理页 `/assistant` 的「协作团队」页签直接发起，详情页 `/assistant/teams/:id` 提供角色时间线、黑板与产物；工作流画布新增 `team` 节点与内置「内容团队」模板（输入 → team → 输出），发布后可手动或定时运行，审批挂起与失败重试均从断点续跑。
+- **权限矩阵**：admin/owner 可改角色配置、发起、审批（非发起人）与取消任意团队运行；editor 可发起、取消本人运行并查看配置与运行；viewer 只读，无发起/审批/取消入口。所有查询按租户过滤，跨租户返回 404。
+- **发布边界**：注册表没有真发布、排期或导出工具，Publisher 只能调用 `publish.create_draft_job`，强制 `status=draft`、`scheduled_at=None`——真发布与排期结构上不可达。
+
+真实模型验收（前置条件：可连接的开发 PostgreSQL，且该租户已配置默认 LLM 提供商；缺失时用例报错而非跳过）：
+
+```bash
+cd backend && RUN_TEAM_E2E=1 uv run pytest tests/test_team_e2e.py -q
+```
+
 ### 发布边界
 
 - 发布账号：9 个平台、同平台多账号、按平台动态凭据表单；凭据加密且只返回掩码。
@@ -168,6 +185,8 @@ npm --prefix web run build  # 前端类型检查 + 构建（tsc -b && vite build
 Agent 真实模型用例默认跳过，设置 `RUN_AGENT_E2E=1` 才会执行。
 
 工作流真实模型用例默认跳过，设置 `RUN_WORKFLOW_E2E=1` 才会执行。
+
+团队真实模型用例默认跳过，设置 `RUN_TEAM_E2E=1` 才会执行。
 
 ## Phase 2 工程基础
 

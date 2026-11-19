@@ -383,6 +383,9 @@ async def run_agent_job(
     arq 至少一次投递下的幂等。``running`` 的运行不在这里重入，交给心跳对账
     决定重排或失败，避免重复执行与尝试次数被重复消耗。
 
+    按 ``run.mode`` 分派：``team`` 交给 ``run_team`` 编排，其余走 ``run_agent``；
+    ``role`` 子运行只由团队编排器驱动，这里直接返回。
+
     任何逃逸异常都把仍处于 ``queued``/``running`` 的运行落为
     ``agent_internal_error``；等待审批或已终态的运行绝不被兜底改写。租户
     已停用时同样落失败且不执行任何工具。
