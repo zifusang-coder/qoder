@@ -7,6 +7,7 @@ from typing import Any
 
 from app.agent.policy import resolve_policy
 from app.agent.registry import ToolRegistry
+from app.agent.roles import EXECUTION_ROLES, TEAM_BUDGET_KEYS
 from app.workflow.graph import (
     Graph,
     GraphError,
@@ -223,6 +224,34 @@ def _check_agent(
             issues.append(Issue("node_invalid", f"预算 {key} 必须是正整数", node.id))
 
 
+def _check_team(node: GraphNode, issues: list[Issue]) -> None:
+    data = node.data
+    goal = data.get("goal")
+    if not isinstance(goal, str) or not goal.strip() or len(goal) > 4000:
+        issues.append(Issue("node_invalid", "团队目标长度必须为 1–4000", node.id))
+    roles = data.get("roles")
+    if not isinstance(roles, list) or not roles:
+        issues.append(Issue("team_roles_invalid", "团队角色不能为空", node.id))
+    else:
+        for role in roles:
+            if role not in EXECUTION_ROLES:
+                issues.append(Issue("team_roles_invalid", f"未知角色：{role}", node.id))
+        if "creator" not in roles:
+            issues.append(Issue("team_roles_invalid", "团队必须包含 creator", node.id))
+    budget = data.get("budget") or {}
+    if not isinstance(budget, dict):
+        issues.append(Issue("node_invalid", "团队预算必须是对象", node.id))
+        return
+    ceilings = {"max_tokens": 200000, "max_tool_calls": 60, "max_turns": 20, "max_seconds": 1800}
+    for key, value in budget.items():
+        if key not in TEAM_BUDGET_KEYS:
+            issues.append(Issue("node_invalid", f"未知预算维度: {key}", node.id))
+        elif not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            issues.append(Issue("node_invalid", f"预算 {key} 必须是正整数", node.id))
+        elif value > ceilings[key]:
+            issues.append(Issue("node_invalid", f"预算 {key} 超过上限", node.id))
+
+
 def _check_node(
     graph: Graph,
     node: GraphNode,
@@ -259,6 +288,8 @@ def _check_node(
         )
     elif node.kind == "agent":
         _check_agent(node, registry=registry, issues=issues)
+    elif node.kind == "team":
+        _check_team(node, issues)
     if node.kind != "condition" and any(item.handle for item in outgoing):
         issues.append(Issue("edge_invalid", "只有条件节点的出边可以带句柄", node.id))
     retry = node.data.get("retry", 0)

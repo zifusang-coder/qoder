@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-NODE_KINDS = ("input", "tool", "agent", "condition", "review", "output")
+NODE_KINDS = ("input", "tool", "agent", "team", "condition", "review", "output")
 NODE_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
 SETTLED = frozenset({"ok", "skipped", "denied", "error"})

@@ -31,8 +31,10 @@ from app.agent.contracts import ToolContext
 from app.agent.policy import resolve_policy
 from app.agent.quota import ensure_daily_quota
 from app.agent.registry import ToolRegistry
+from app.agent.roles import EXECUTION_ROLES, team_budget_ceilings, team_budget_defaults
 from app.agent.runtime import run_agent
 from app.agent.sanitize import fit_bytes, scrub
+from app.agent.team import run_team
 from app.config import Settings
 from app.errors import AppError
 from app.llm.gateway import LLMGateway
@@ -807,6 +809,10 @@ async def _execute_node(
         return await _execute_agent(
             session, run, node, node_run, state, deps, resume=resume
         )
+    if node.kind == "team":
+        return await _execute_team(
+            session, run, node, node_run, state, deps, resume=resume
+        )
     if node.kind == "condition":
         return await _execute_condition(session, node, node_run, state)
     if node.kind == "review":
@@ -854,6 +860,28 @@ def _agent_budget(node: GraphNode, settings: Settings) -> dict[str, int]:
         backoffs = int(sum(_backoff(index) for index in range(attempts - 1)))
         ceiling = max(1, (cap - SLICE_GUARD_SECONDS - backoffs) // attempts)
         budget["max_seconds"] = min(budget.get("max_seconds", ceiling), ceiling)
+    return budget
+
+
+def _team_budget(node: GraphNode, settings: Settings) -> dict[str, int]:
+    budget = team_budget_defaults(settings)
+    ceilings = team_budget_ceilings(settings)
+    raw = node.data.get("budget")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if (
+                key in budget
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+            ):
+                budget[key] = min(value, ceilings[key])
+    cap = int(settings.workflow_time_slice_seconds or 0)
+    if cap > 0:
+        attempts = _retry_budget(node) + 1
+        backoffs = int(sum(_backoff(index) for index in range(attempts - 1)))
+        ceiling = max(1, (cap - SLICE_GUARD_SECONDS - backoffs) // attempts)
+        budget["max_seconds"] = min(budget["max_seconds"], ceiling)
     return budget
 
 
@@ -1011,6 +1039,93 @@ async def _execute_agent(
         await session.commit()
         return "waiting"
     return await _agent_failed(session, run, node_run, child)
+
+
+async def _execute_team(
+    session: AsyncSession,
+    run: WorkflowRun,
+    node: GraphNode,
+    node_run: WorkflowNodeRun,
+    state: RunState,
+    deps: EngineDeps,
+    *,
+    resume: bool = False,
+) -> str:
+    if deps.gateway is None:
+        await _abort_node(
+            session, run, node_run, "llm_not_configured", "未配置可用的大模型"
+        )
+        return "error"
+    try:
+        await ensure_daily_quota(session, run.tenant_id, deps.settings)
+    except AppError as exc:
+        await _abort_node(session, run, node_run, exc.code, exc.message)
+        return "error"
+
+    roles = [r for r in (node.data.get("roles") or []) if r in EXECUTION_ROLES]
+    if "creator" not in roles:
+        roles.append("creator")
+    parent: AgentRun | None = None
+    if resume and node_run.agent_run_id is not None:
+        parent = await session.get(AgentRun, node_run.agent_run_id)
+    if parent is None:
+        goal = _agent_goal(node, state)
+        parent = AgentRun(
+            tenant_id=run.tenant_id,
+            user_id=run.triggered_by or state.creator_id,
+            goal=goal,
+            mode="team",
+            status="queued",
+            plan={"roles": roles},
+            budget=_team_budget(node, deps.settings),
+            policy=dict(run.policy or {}),
+            workflow_run_id=run.id,
+            workflow_node_id=node.id,
+        )
+        session.add(parent)
+        await session.commit()
+        await session.refresh(parent)
+        node_run.agent_run_id = parent.id
+        node_run.input = _safe_dict({"goal": goal, "roles": roles})
+        node_run.status = "running"
+        await session.commit()
+    elif parent.status == "succeeded":
+        return await _agent_succeeded(session, node_run, parent)
+    elif parent.status in {"failed", "cancelled"}:
+        return await _agent_failed(session, run, node_run, parent)
+    elif parent.status not in {"queued", "waiting_approval"}:
+        await _abort_node(
+            session,
+            run,
+            node_run,
+            "workflow_internal_error",
+            f"团队运行状态异常: {parent.status}",
+        )
+        return "error"
+
+    await run_team(
+        session,
+        parent,
+        gateway=deps.gateway,
+        tool_registry=deps.tool_registry,
+        skill_registry=deps.skill_registry,
+        storage=deps.storage,
+        queue=deps.queue,
+        settings=deps.settings,
+        session_factory=deps.session_factory,
+    )
+    await session.refresh(parent)
+    if parent.status == "succeeded":
+        return await _agent_succeeded(session, node_run, parent)
+    if parent.status == "waiting_approval":
+        node_run.status = "waiting"
+        # 与 agent 节点同一套挂起口径：盖心跳并接受并行分支已挂起的状态。
+        if not await _park(session, run, _now()):
+            await session.rollback()
+            return "stopped"
+        await session.commit()
+        return "waiting"
+    return await _agent_failed(session, run, node_run, parent)
 
 
 async def _park(
