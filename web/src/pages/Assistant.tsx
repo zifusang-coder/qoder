@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   agentStatusLabel,
   artifactLabel,
@@ -451,6 +451,17 @@ export default function Assistant() {
                   <h3 className="text-sm font-medium">
                     待确认：{pending.tool_name}
                   </h3>
+                  {run.parent_run_id && (
+                    <p className="text-xs text-ink-500">
+                      团队 · {roleLabel(run.role ?? "")}
+                      <Link
+                        className="ml-2 text-sage-700 underline"
+                        to={`/assistant/teams/${run.parent_run_id}`}
+                      >
+                        查看团队运行
+                      </Link>
+                    </p>
+                  )}
                   <pre className="max-h-48 overflow-auto rounded bg-paper p-3 text-xs">
                     {JSON.stringify(pending.payload, null, 2)}
                   </pre>

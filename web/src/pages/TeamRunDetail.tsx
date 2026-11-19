@@ -8,7 +8,7 @@ import {
   usageTokens,
   type AgentRun,
 } from "../agent";
-import { canCancelTeamRun, entryKindLabel, roleLabel, teamTotals, type TeamRunDetail } from "../agentTeam";
+import { canCancelTeamRun, canDecideTeamChildApproval, entryKindLabel, roleLabel, teamTotals, type TeamRunDetail } from "../agentTeam";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
 import { errorText } from "../types";
@@ -19,6 +19,8 @@ export default function TeamRunDetailPage() {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   const [cancelError, setCancelError] = useState("");
+  const [note, setNote] = useState("");
+  const [decideError, setDecideError] = useState("");
   const detail = useQuery({
     queryKey: ["team-run", id],
     queryFn: () => api<TeamRunDetail>(`/agent/team/runs/${id}`),
@@ -35,6 +37,20 @@ export default function TeamRunDetailPage() {
       void queryClient.invalidateQueries({ queryKey: ["team-run", id] });
     },
     onError: (err) => setCancelError(errorText(err)),
+  });
+  const decide = useMutation({
+    mutationFn: (input: { id: string; decision: "approve" | "reject" }) =>
+      api<AgentRun>(`/agent/approvals/${input.id}/decide`, {
+        method: "POST",
+        body: JSON.stringify({ decision: input.decision, note }),
+      }),
+    onSuccess: () => {
+      setNote("");
+      setDecideError("");
+      void queryClient.invalidateQueries({ queryKey: ["team-run", id] });
+      void queryClient.invalidateQueries({ queryKey: ["agent-runs"] });
+    },
+    onError: (err) => setDecideError(errorText(err)),
   });
   if (detail.isLoading) return <p className="text-sm text-ink-500">加载中…</p>;
   if (detail.isError || !detail.data) return <p className="text-sm text-wine-700">加载失败</p>;
@@ -69,6 +85,62 @@ export default function TeamRunDetailPage() {
         )}
         {cancelError && <p className="text-sm text-wine-700">{cancelError}</p>}
       </header>
+
+      {children.some((child) => child.pending_approval) && (
+        <section className="card card-pad space-y-3">
+          <h2 className="text-sm font-semibold">待审批</h2>
+          {children.map((child) => {
+            const approval = child.pending_approval;
+            if (!approval) return null;
+            const canDecide = me
+              ? canDecideTeamChildApproval(child, run.user_id, me)
+              : false;
+            return (
+              <div key={child.id} className="space-y-2 rounded-lg border border-wine-100 bg-wine-50 p-3">
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="badge bg-line text-ink-500">团队 · {roleLabel(child.role)}</span>
+                  <span className="font-medium">待确认：{approval.tool_name}</span>
+                </div>
+                <pre className="max-h-48 overflow-auto rounded bg-paper p-3 text-xs">
+                  {JSON.stringify(approval.payload, null, 2)}
+                </pre>
+                {canDecide ? (
+                  <>
+                    <input
+                      className="input w-full"
+                      placeholder="审批备注（通过可选，驳回必填）"
+                      value={note}
+                      maxLength={2000}
+                      onChange={(event) => setNote(event.target.value)}
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={decide.isPending}
+                        onClick={() => decide.mutate({ id: approval.id, decision: "approve" })}
+                      >
+                        通过
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        disabled={decide.isPending || note.trim().length === 0}
+                        onClick={() => decide.mutate({ id: approval.id, decision: "reject" })}
+                      >
+                        驳回
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-ink-500">等待其他管理员确认；发起人不能审批自己的任务。</p>
+                )}
+              </div>
+            );
+          })}
+          {decideError && <p className="text-sm text-wine-700">{decideError}</p>}
+        </section>
+      )}
 
       <section className="card card-pad space-y-2">
         <h2 className="text-sm font-semibold">角色时间线</h2>

@@ -1,3 +1,4 @@
+import uuid
 from typing import Any
 
 from arq.connections import ArqRedis
@@ -21,7 +22,7 @@ from app.api import agent as agent_api
 from app.config import get_settings
 from app.db import get_session
 from app.errors import AppError
-from app.models.agent import AgentRun, AgentTeamEntry, AgentTeamRole
+from app.models.agent import AgentApproval, AgentRun, AgentTeamEntry, AgentTeamRole
 from app.models.user import User
 from app.permissions import admin_access, editor_access, viewer_access
 from app.queue import get_queue
@@ -175,6 +176,20 @@ async def get_team_run(
             .order_by(AgentRun.created_at, AgentRun.id)
         )
     ).scalars().all()
+    approvals: dict[uuid.UUID, AgentApproval] = {}
+    if children:
+        pending = (
+            await session.execute(
+                select(AgentApproval)
+                .where(
+                    AgentApproval.run_id.in_([child.id for child in children]),
+                    AgentApproval.status == "pending",
+                )
+                .order_by(AgentApproval.created_at, AgentApproval.id)
+            )
+        ).scalars().all()
+        for approval in pending:
+            approvals.setdefault(approval.run_id, approval)
     entries = (
         await session.execute(
             select(AgentTeamEntry).where(
@@ -193,6 +208,10 @@ async def get_team_run(
                 "result_text": child.result_text[:500],
                 "error_code": child.error_code,
                 "created_at": child.created_at, "finished_at": child.finished_at,
+                "pending_approval": (
+                    agent_api._approval_out(approvals[child.id]).model_dump()
+                    if child.id in approvals else None
+                ),
             }
             for child in children
         ],

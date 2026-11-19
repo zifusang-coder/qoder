@@ -1,5 +1,5 @@
 import { canWrite, isAdmin, type Me, type Role } from "./auth";
-import type { AgentRun } from "./agent";
+import { canDecideApproval, type AgentApproval, type AgentRun } from "./agent";
 
 export type TeamRole = "planner" | "scout" | "creator" | "critic" | "publisher";
 export const EXECUTION_ROLES: TeamRole[] = ["scout", "creator", "critic", "publisher"];
@@ -22,6 +22,7 @@ export interface TeamChild {
   id: string; role: string; status: string; attempts: number;
   usage: Record<string, number>; result_text: string; error_code: string;
   created_at: string; finished_at: string | null;
+  pending_approval: AgentApproval | null;
 }
 export interface TeamEntry {
   seq: number; kind: string; role: string;
@@ -57,6 +58,15 @@ export function canCancelTeamRun(
   if (!live) return false;
   if (isAdmin(viewer.role)) return true;
   return viewer.id === run.user_id && canWrite(viewer.role);
+}
+
+/** 子运行的发起人即父团队发起人；审批口径沿用第 1 层 canDecideApproval。 */
+export function canDecideTeamChildApproval(
+  child: Pick<TeamChild, "status">,
+  parentUserId: string,
+  viewer: Pick<Me, "id" | "role">,
+): boolean {
+  return canDecideApproval({ status: child.status, user_id: parentUserId }, viewer);
 }
 
 export function validateParticipants(selected: string[], configs: TeamRoleConfig[]): string | null {

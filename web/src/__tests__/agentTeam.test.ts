@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  canCancelTeamRun, canEditTeamRoles, canStartTeamRun, defaultTeamBudget, entryKindLabel,
+  canCancelTeamRun, canDecideTeamChildApproval, canEditTeamRoles, canStartTeamRun,
+  defaultTeamBudget, entryKindLabel,
   roleLabel, teamTotals, validateParticipants, validateTeamBudget,
   type TeamRoleConfig,
 } from "../agentTeam";
@@ -77,6 +78,27 @@ describe("canCancelTeamRun", () => {
     for (const status of ["succeeded", "failed", "cancelled"]) {
       expect(canCancelTeamRun({ status, user_id: "u1" }, { id: "u1", role: "editor" })).toBe(false);
       expect(canCancelTeamRun({ status, user_id: "u1" }, { id: "u2", role: "admin" })).toBe(false);
+    }
+  });
+});
+
+describe("canDecideTeamChildApproval", () => {
+  const child = { status: "waiting_approval" };
+  const admin = { id: "a1", role: "admin" as const };
+  it("非发起人的 admin/owner 可审批等待中的子运行", () => {
+    expect(canDecideTeamChildApproval(child, "u1", admin)).toBe(true);
+    expect(canDecideTeamChildApproval(child, "u1", { id: "o1", role: "owner" })).toBe(true);
+  });
+  it("发起人本人（即使是 owner）不能审批", () => {
+    expect(canDecideTeamChildApproval(child, "a1", admin)).toBe(false);
+  });
+  it("editor/viewer 不能审批", () => {
+    expect(canDecideTeamChildApproval(child, "u1", { id: "e1", role: "editor" })).toBe(false);
+    expect(canDecideTeamChildApproval(child, "u1", { id: "v1", role: "viewer" })).toBe(false);
+  });
+  it("子运行非 waiting_approval 时不可审批", () => {
+    for (const status of ["queued", "running", "succeeded", "failed", "cancelled"]) {
+      expect(canDecideTeamChildApproval({ status }, "u1", admin)).toBe(false);
     }
   });
 });
