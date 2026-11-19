@@ -123,35 +123,35 @@ export default function TeamRoles() {
                 ))}
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-2">
-              {Object.keys(config.budget).map((key) => (
-                <label key={key} className="block space-y-1 text-xs text-ink-500">
-                  <span>
-                    {key}（上限 {config.limits[key]}）
-                  </span>
-                  <input
-                    className="input text-xs text-ink-900"
-                    type="number"
-                    min={1}
-                    max={config.limits[key]}
-                    value={
-                      typeof config.budget[key] === "number"
-                        ? String(config.budget[key])
-                        : ""
-                    }
-                    onChange={(event) => {
-                      const raw = event.target.value;
-                      const next = { ...config.budget };
-                      if (raw === "") {
-                        delete next[key];
-                      } else {
-                        next[key] = Number(raw);
-                      }
-                      patchRole(config.role, { budget: next });
-                    }}
-                  />
-                </label>
-              ))}
+            <div className="space-y-1">
+              <p className="text-xs text-ink-500">留空保存后恢复默认上限</p>
+              <div className="grid grid-cols-2 gap-2">
+                {Object.keys(config.limits).map((key) => (
+                  <label key={key} className="block space-y-1 text-xs text-ink-500">
+                    <span>
+                      {key}（上限 {config.limits[key]}）
+                    </span>
+                    <input
+                      className="input text-xs text-ink-900"
+                      type="number"
+                      min={1}
+                      max={config.limits[key]}
+                      placeholder={String(config.limits[key])}
+                      value={config.budget[key] ?? ""}
+                      onChange={(event) => {
+                        const raw = event.target.value;
+                        const next = { ...config.budget };
+                        if (raw === "") {
+                          delete next[key];
+                        } else {
+                          next[key] = Number(raw);
+                        }
+                        patchRole(config.role, { budget: next });
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
         );
