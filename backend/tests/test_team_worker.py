@@ -16,6 +16,11 @@ class FakeQueue:
         self.jobs.append((name, *args))
 
 
+class BrokenQueue:
+    async def enqueue_job(self, name, *args):
+        raise RuntimeError("queue unavailable")
+
+
 async def make_parent(db_session, status):
     run = AgentRun(
         tenant_id=DEFAULT_TENANT_ID, user_id=uuid.uuid4(), goal="g",
@@ -68,6 +73,42 @@ async def test_waiting_team_with_approved_requeues(db_session):
     await db_session.refresh(parent)
     assert parent.status == "queued"
     assert queue.jobs == [("run_agent_job", str(parent.id))]
+
+
+@pytest.mark.asyncio
+async def test_waiting_team_enqueue_failure_fails_stale(db_session):
+    parent = await make_parent(db_session, "waiting_approval")
+    child = await make_child(db_session, parent, "waiting_approval",
+                             approval_status="approved")
+    from app.worker import AGENT_STALE_MESSAGE, _settle_waiting_team_parents
+    handled = await _settle_waiting_team_parents(
+        db_session, moment=datetime.now(UTC), queue=BrokenQueue(),
+    )
+    assert handled == 1
+    await db_session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "agent_stale"
+    assert parent.error_message == AGENT_STALE_MESSAGE
+    await db_session.refresh(child)
+    assert child.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_waiting_team_no_queue_fails_stale(db_session):
+    parent = await make_parent(db_session, "waiting_approval")
+    child = await make_child(db_session, parent, "waiting_approval",
+                             approval_status="approved")
+    from app.worker import AGENT_STALE_MESSAGE, _settle_waiting_team_parents
+    handled = await _settle_waiting_team_parents(
+        db_session, moment=datetime.now(UTC), queue=None,
+    )
+    assert handled == 1
+    await db_session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "agent_stale"
+    assert parent.error_message == AGENT_STALE_MESSAGE
+    await db_session.refresh(child)
+    assert child.status == "cancelled"
 
 
 @pytest.mark.asyncio

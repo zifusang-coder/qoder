@@ -1024,7 +1024,9 @@ async def _settle_waiting_team_parents(
 
     与 ``lifecycle.requeue_settled_orphan`` 同一口径：行锁 + 谓词重评估，
     等待时长按 ``heartbeat_at``（挂起时刻）计入 ``paused_ms``；CAS 落败或
-    仍有 pending 时回滚释放锁，交给下一次对账。
+    仍有 pending 时回滚释放锁，交给下一次对账。入队失败或拿不到队列时落
+    ``agent_stale``（与 ``_reconcile_agent_run`` 同一口径）：queued 的团队
+    父运行没有重投递路径，不能留在 queued 搁浅。
     """
     ids = (
         await session.execute(
@@ -1065,6 +1067,16 @@ async def _settle_waiting_team_parents(
             )
             handled += 1
             continue
+        if queue is None:
+            # 拿不到队列时不重排：queued 的团队父运行没有重投递路径，
+            # 直接落 agent_stale（与 _reconcile_agent_run 同一口径）。
+            await fail_team_run(
+                session, parent_id,
+                error_code="agent_stale",
+                message=AGENT_STALE_MESSAGE,
+            )
+            handled += 1
+            continue
         paused_at = parent.heartbeat_at or moment
         if paused_at.tzinfo is None:
             paused_at = paused_at.replace(tzinfo=UTC)
@@ -1086,11 +1098,18 @@ async def _settle_waiting_team_parents(
             await session.rollback()
             continue
         await session.commit()
-        if queue is not None:
-            try:
-                await queue.enqueue_job("run_agent_job", str(parent.id))
-            except Exception:
-                logger.exception("team requeue enqueue failed run=%s", parent.id)
+        await session.refresh(parent)
+        try:
+            await queue.enqueue_job("run_agent_job", str(parent_id))
+        except Exception:
+            logger.exception("team requeue enqueue failed run=%s", parent_id)
+            await session.refresh(parent)
+            if parent.status == "queued":
+                await fail_team_run(
+                    session, parent_id,
+                    error_code="agent_stale",
+                    message=AGENT_STALE_MESSAGE,
+                )
         handled += 1
     return handled
 
