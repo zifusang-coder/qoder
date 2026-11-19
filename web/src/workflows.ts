@@ -14,6 +14,7 @@ const NODE_KIND_LABELS: Record<string, string> = {
   input: "输入",
   tool: "工具",
   agent: "Agent",
+  team: "团队",
   condition: "条件",
   review: "审核",
   output: "输出",
@@ -330,6 +331,7 @@ const NODE_PREFIXES: Record<string, string> = {
   input: "in",
   tool: "t",
   agent: "a",
+  team: "tm",
   condition: "c",
   review: "r",
   output: "o",
@@ -354,6 +356,14 @@ export function nodeDefaults(type: string): Record<string, unknown> {
         goal: "",
         tools: [],
         budget: { max_steps: 8 },
+        retry: 0,
+      };
+    case "team":
+      return {
+        label: "团队",
+        roles: ["scout", "creator", "critic", "publisher"],
+        goal: "",
+        budget: { max_tokens: 120000 },
         retry: 0,
       };
     case "condition":

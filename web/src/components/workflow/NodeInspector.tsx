@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { EXECUTION_ROLES, TEAM_BUDGET_KEYS, roleLabel } from "../../agentTeam";
 import type {
   Graph,
   GraphNode,
@@ -237,6 +238,11 @@ export default function NodeInspector({
   const committedLabel = node ? String(node.data.label ?? "") : "";
   const toolsWanted = Array.isArray(nodeData.tools)
     ? (nodeData.tools as unknown[]).filter(
+        (item): item is string => typeof item === "string",
+      )
+    : [];
+  const teamRoles = Array.isArray(nodeData.roles)
+    ? (nodeData.roles as unknown[]).filter(
         (item): item is string => typeof item === "string",
       )
     : [];
@@ -505,6 +511,71 @@ export default function NodeInspector({
         </div>
       )}
 
+      {node.type === "team" && (
+        <div className="space-y-2">
+          <div className="space-y-1 text-xs text-ink-500">
+            <span>目标</span>
+            <TextAreaWithVariables
+              value={typeof nodeData.goal === "string" ? nodeData.goal : ""}
+              rows={5}
+              options={options}
+              ariaLabel="目标"
+              disabled={readOnly}
+              onChange={(goal) => onChange({ goal })}
+            />
+          </div>
+          <div className="space-y-1 text-xs text-ink-500">
+            <span>参与角色</span>
+            <div className="flex flex-wrap gap-3">
+              {EXECUTION_ROLES.map((role) => (
+                <label key={role} className="flex items-center gap-1 text-xs text-ink-700">
+                  <input
+                    type="checkbox"
+                    checked={role === "creator" || teamRoles.includes(role)}
+                    disabled={readOnly || role === "creator"}
+                    onChange={(event) =>
+                      onChange({
+                        roles: event.target.checked
+                          ? [...teamRoles, role]
+                          : teamRoles.filter((item) => item !== role),
+                      })
+                    }
+                  />
+                  {roleLabel(role)}
+                  {role === "creator" && <span className="text-ink-500">（必选）</span>}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {TEAM_BUDGET_KEYS.map((key) => (
+              <label key={key} className="block space-y-1 text-xs text-ink-500">
+                <span>{key}</span>
+                <input
+                  className="input text-xs text-ink-900"
+                  disabled={readOnly}
+                  min={1}
+                  type="number"
+                  value={
+                    typeof budget[key] === "number" ? String(budget[key]) : ""
+                  }
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    const next: Record<string, unknown> = { ...budget };
+                    if (raw === "") {
+                      delete next[key];
+                    } else {
+                      next[key] = Number(raw);
+                    }
+                    onChange({ budget: next });
+                  }}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
       {node.type === "condition" && (
         <div className="space-y-2">
           <div className="space-y-1 text-xs text-ink-500">
@@ -578,7 +649,7 @@ export default function NodeInspector({
         </div>
       )}
 
-      {(node.type === "tool" || node.type === "agent") && (
+      {(node.type === "tool" || node.type === "agent" || node.type === "team") && (
         <label className="block space-y-1 text-xs text-ink-500">
           <span>失败重试（0–3）</span>
           <select

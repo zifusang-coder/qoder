@@ -17,6 +17,7 @@ const nodeTypes = {
   input: WorkflowNodeView,
   tool: WorkflowNodeView,
   agent: WorkflowNodeView,
+  team: WorkflowNodeView,
   condition: WorkflowNodeView,
   review: WorkflowNodeView,
   output: WorkflowNodeView,

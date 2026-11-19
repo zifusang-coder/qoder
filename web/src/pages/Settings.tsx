@@ -224,6 +224,15 @@ export default function Settings() {
           {create.isPending ? "保存中…" : "保存"}
         </button>
       </form>
+      <Link
+        className="card block p-6 hover:border-sage-500"
+        to="/settings/team-roles"
+      >
+        <span className="block font-medium">协作团队角色配置</span>
+        <span className="block text-sm text-ink-500">
+          收窄各角色的工具与预算（仅管理员）
+        </span>
+      </Link>
       <section className="space-y-2">
         <h2 className="font-medium">已配置</h2>
         {providers.isLoading && <p className="text-sm text-ink-500">加载中…</p>}

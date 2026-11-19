@@ -18,6 +18,7 @@ import Projects from "./pages/Projects";
 import Publish from "./pages/Publish";
 import Settings from "./pages/Settings";
 import Team from "./pages/Team";
+import TeamRoles from "./pages/TeamRoles";
 import TeamRunDetailPage from "./pages/TeamRunDetail";
 import Tenants from "./pages/Tenants";
 import Workflows from "./pages/Workflows";
@@ -107,6 +108,14 @@ export default function App() {
             element={
               <RequireRole minRole="admin">
                 <Settings />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/settings/team-roles"
+            element={
+              <RequireRole minRole="admin">
+                <TeamRoles />
               </RequireRole>
             }
           />

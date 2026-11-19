@@ -343,6 +343,14 @@ export default function WorkflowRunDetail() {
                         {attempt.duration_ms}ms
                         {attempt.error && ` · ${attempt.error}`}
                       </p>
+                      {attempt.kind === "team" && attempt.agent_run_id && (
+                        <Link
+                          className="text-xs text-sage-700"
+                          to={`/assistant/teams/${attempt.agent_run_id}`}
+                        >
+                          查看团队运行
+                        </Link>
+                      )}
                       <pre className="max-h-32 overflow-auto rounded bg-paper p-2 text-[11px] text-ink-700">
                         {pretty(attempt.input)}
                       </pre>

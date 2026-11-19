@@ -3,6 +3,7 @@ import { nodeKindLabel } from "../../workflows";
 const PALETTE: { type: string; hint: string }[] = [
   { type: "tool", hint: "调用注册表工具" },
   { type: "agent", hint: "自主规划并调用工具" },
+  { type: "team", hint: "多角色协作产出内容" },
   { type: "condition", hint: "按比较结果分支" },
   { type: "review", hint: "人工通过后继续" },
   { type: "output", hint: "汇总结果与产物" },
