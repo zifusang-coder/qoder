@@ -27,7 +27,7 @@ from app.agent.team_contracts import (
 )
 from app.config import Settings
 from app.errors import AppError
-from app.models.agent import AgentRun, AgentTeamEntry
+from app.models.agent import AgentApproval, AgentRun, AgentStep, AgentTeamEntry
 from app.models.user import User
 from app.services.audit import record_best_effort
 
@@ -125,8 +125,51 @@ async def _budget_stop(session, run, settings, state) -> str | None:
     return None
 
 
+async def cancel_children(session, parent_id, tenant_id, *, moment=None) -> None:
+    """非终态子运行置 cancelled；running 步骤标 interrupted，pending 审批过期。"""
+    now = moment or _now()
+    children = (
+        await session.execute(
+            select(AgentRun).where(
+                AgentRun.parent_run_id == parent_id,
+                AgentRun.tenant_id == tenant_id,
+                AgentRun.status.in_(ACTIVE),
+            )
+        )
+    ).scalars().all()
+    child_ids = [child.id for child in children]
+    if not child_ids:
+        return
+    running_steps = (
+        await session.execute(
+            select(AgentStep).where(
+                AgentStep.run_id.in_(child_ids), AgentStep.status == "running"
+            )
+        )
+    ).scalars().all()
+    for step in running_steps:
+        step.status = "interrupted"
+        step.finished_at = now
+    await session.execute(
+        update(AgentRun)
+        .where(AgentRun.id.in_(child_ids), AgentRun.status.in_(ACTIVE))
+        .values(status="cancelled", finished_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(
+        update(AgentApproval)
+        .where(
+            AgentApproval.tenant_id == tenant_id,
+            AgentApproval.run_id.in_(child_ids),
+            AgentApproval.status == "pending",
+        )
+        .values(status="expired", decided_at=now, note="团队运行已结束")
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+
+
 async def _fail_team(session, run, code: str, message: str) -> None:
-    """Task 7 会在此追加子运行收敛；本任务先落父运行终态。"""
     moment = _now()
     await session.execute(
         update(AgentRun)
@@ -140,6 +183,7 @@ async def _fail_team(session, run, code: str, message: str) -> None:
         .execution_options(synchronize_session=False)
     )
     await session.commit()
+    await cancel_children(session, run.id, run.tenant_id, moment=moment)
     # record() 需要 User | str 作为 actor；与 runtime._audit 同一口径，
     # 找不到用户时退化为 user_id 字符串，避免审计静默丢失。
     user = await session.get(User, run.user_id)
@@ -149,6 +193,36 @@ async def _fail_team(session, run, code: str, message: str) -> None:
         actor=actor, resource_type="agent_run", resource_id=str(run.id),
         detail={"error_code": code},
     )
+
+
+async def cancel_team_run(session, run: AgentRun) -> bool:
+    moment = _now()
+    cancelled = await session.execute(
+        update(AgentRun)
+        .where(AgentRun.id == run.id, AgentRun.tenant_id == run.tenant_id,
+               AgentRun.status.in_(ACTIVE))
+        .values(status="cancelled", finished_at=moment)
+        .execution_options(synchronize_session=False)
+    )
+    if cancelled.rowcount == 0:
+        await session.rollback()
+        return False
+    await cancel_children(session, run.id, run.tenant_id, moment=moment)
+    # record() 需要 User | str 作为 actor；与 _fail_team 同一口径。
+    user = await session.get(User, run.user_id)
+    actor: User | str = user if user is not None else str(run.user_id)
+    await record_best_effort(
+        session, tenant_id=run.tenant_id, action="agent.team.cancel",
+        actor=actor, resource_type="agent_run", resource_id=str(run.id),
+    )
+    return True
+
+
+async def fail_team_run(session, run_id, *, error_code: str, message: str) -> None:
+    run = await session.get(AgentRun, run_id)
+    if run is None or run.status not in ACTIVE:
+        return
+    await _fail_team(session, run, error_code, message)
 
 
 async def _park_parent(session, run) -> None:
@@ -404,12 +478,15 @@ async def _finish_team(session, run, state, summary: str) -> None:
 
 async def _team_loop(session, run, *, gateway, tool_registry, skill_registry,
                      storage, queue, settings, session_factory) -> None:
-    if run.status != "queued":
+    # queued 首次认领；running 为崩溃/重启后的续跑（与 runtime 恢复同口径），
+    # 两者都经 CAS 认领，终态或已被取消的运行不会进入循环。
+    if run.status not in {"queued", "running"}:
         return
     moment = _now()
     claimed = await session.execute(
         update(AgentRun)
-        .where(AgentRun.id == run.id, AgentRun.status == "queued",
+        .where(AgentRun.id == run.id,
+               AgentRun.status.in_(("queued", "running")),
                AgentRun.mode == "team")
         .values(status="running", started_at=run.started_at or moment,
                 heartbeat_at=moment)

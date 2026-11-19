@@ -421,3 +421,54 @@ async def test_critic_disabled_skips_review(team_env):
         select(AgentRun).where(AgentRun.parent_run_id == parent.id)
     )).scalars().all()
     assert [c.role for c in children] == ["creator"]
+
+
+@pytest.mark.asyncio
+async def test_child_failure_propagates_and_closes_siblings(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    # 手工构造：一个失败子运行 + 一个排队子运行，父 running
+    bad = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID, user_id=parent.user_id, goal="t",
+        mode="role", role="scout", parent_run_id=parent.id,
+        status="failed", error_code="agent_budget_exhausted",
+        error_message="预算用尽",
+    )
+    pending = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID, user_id=parent.user_id, goal="t2",
+        mode="role", role="creator", parent_run_id=parent.id, status="queued",
+    )
+    team_env.session.add_all([bad, pending])
+    await team_env.session.commit()
+    await team_env.session.refresh(bad)
+    parent.status = "running"
+    parent.team_state = {"turn": 1, "phase": "role",
+                         "current_child_id": str(bad.id)}
+    await team_env.session.commit()
+    gateway = ScriptedGateway([])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    await team_env.session.refresh(pending)
+    assert parent.status == "failed"
+    assert parent.error_code == "agent_budget_exhausted"
+    assert pending.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_team_run(team_env):
+    from app.agent.team import cancel_team_run
+    parent = await make_parent(team_env)
+    child = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID, user_id=parent.user_id, goal="t",
+        mode="role", role="scout", parent_run_id=parent.id, status="running",
+    )
+    team_env.session.add(child)
+    parent.status = "running"
+    await team_env.session.commit()
+    assert await cancel_team_run(team_env.session, parent) is True
+    await team_env.session.refresh(parent)
+    await team_env.session.refresh(child)
+    assert parent.status == "cancelled"
+    assert child.status == "cancelled"
+    assert await cancel_team_run(team_env.session, parent) is False
