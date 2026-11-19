@@ -32,7 +32,7 @@ from app.agent.runtime import (
     fail_run,
     run_agent,
 )
-from app.agent.team import cancel_children, fail_team_run
+from app.agent.team import cancel_children, fail_team_run, run_team
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
@@ -402,6 +402,9 @@ async def run_agent_job(
             run = await session.get(AgentRun, run_uuid)
             if run is None or run.status != "queued":
                 return
+            if run.mode == "role":
+                # 角色子运行只由团队编排器驱动，绝不单独执行。
+                return
             tenant = await session.get(Tenant, run.tenant_id)
             if tenant is None or tenant.status != "active":
                 await fail_run(session, run, "tenant_suspended", "租户已停用")
@@ -422,7 +425,8 @@ async def run_agent_job(
             await _fail_active_agent_run(session, run_uuid, run_id)
             return
         try:
-            await run_agent(
+            executor = run_team if run.mode == "team" else run_agent
+            await executor(
                 session,
                 run,
                 gateway=active_gateway,

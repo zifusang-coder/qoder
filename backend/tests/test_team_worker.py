@@ -149,3 +149,62 @@ async def test_stale_scan_skips_role_children(db_session):
         select(AgentRun.id).where(AgentRun.mode == "role")
     )).scalars().all()
     assert not set(children) & set(ids)
+
+
+@pytest.mark.asyncio
+async def test_job_dispatches_team(db_session, monkeypatch):
+    import app.worker as worker_module
+    from app.models.tenant import Tenant
+
+    # db_session 夹具不预置租户；run_agent_job 在分派前校验租户活跃。
+    db_session.add(
+        Tenant(
+            id=DEFAULT_TENANT_ID, name="默认租户", slug="default",
+            status="active",
+        )
+    )
+    await db_session.commit()
+    parent = await make_parent(db_session, "queued")
+    called = {}
+
+    async def fake_run_team(session, run, **kwargs):
+        called["team"] = str(run.id)
+
+    async def fake_run_agent(session, run, **kwargs):
+        called["single"] = str(run.id)
+
+    monkeypatch.setattr(worker_module, "run_team", fake_run_team)
+    monkeypatch.setattr(worker_module, "run_agent", fake_run_agent)
+
+    class StubGateway:
+        pass
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    await worker_module.run_agent_job(
+        None, str(parent.id), session_factory=factory, gateway=StubGateway(),
+    )
+    assert called == {"team": str(parent.id)}
+
+
+@pytest.mark.asyncio
+async def test_job_never_runs_role_child(db_session, monkeypatch):
+    import app.worker as worker_module
+    parent = await make_parent(db_session, "running")
+    child = await make_child(db_session, parent, "queued")
+    called = {}
+
+    async def fake_run_team(session, run, **kwargs):
+        called["team"] = True
+
+    async def fake_run_agent(session, run, **kwargs):
+        called["single"] = True
+
+    monkeypatch.setattr(worker_module, "run_team", fake_run_team)
+    monkeypatch.setattr(worker_module, "run_agent", fake_run_agent)
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    await worker_module.run_agent_job(
+        None, str(child.id), session_factory=factory, gateway=object(),
+    )
+    assert called == {}
