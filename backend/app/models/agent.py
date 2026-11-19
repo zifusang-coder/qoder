@@ -168,5 +168,5 @@ class AgentTeamRole(TenantScoped):
 
     role: Mapped[str] = mapped_column(String(16))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    tools: Mapped[dict] = mapped_column(JSONType, default=list)
+    tools: Mapped[list] = mapped_column(JSONType, default=list)
     budget: Mapped[dict] = mapped_column(JSONType, default=dict)
