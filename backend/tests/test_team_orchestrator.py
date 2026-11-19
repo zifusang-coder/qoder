@@ -1,4 +1,10 @@
+import json as _json
+import uuid as _uuid
+
 import pytest
+import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.agent.team_contracts import (
     critic_task,
@@ -6,6 +12,13 @@ from app.agent.team_contracts import (
     parse_critic_verdict,
     parse_lead_decision,
 )
+from app.config import get_settings
+from app.llm.tools import ToolTurn
+from app.llm.types import Usage
+from app.models.agent import AgentRun, AgentTeamEntry
+from app.models.base import DEFAULT_TENANT_ID
+from app.skills.registry import SkillRegistry
+from app.storage import get_storage
 
 
 def test_parse_delegate():
@@ -73,3 +86,163 @@ def test_prompt_builders():
     assert "scout" in messages[1]["content"]
     task = critic_task(goal="做一篇内容", summary="已写稿", artifacts=[], note="")
     assert "verdict" in task and "做一篇内容" in task
+
+
+class ScriptedGateway:
+    """Lead 用 complete()，角色子运行用 complete_tool_calls()；按脚本顺序消费。"""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.last_usage = Usage(10, 5)
+        self.complete_calls = []
+
+    async def complete(self, messages, **kwargs):
+        self.complete_calls.append(messages)
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    async def complete_tool_calls(self, messages, *, tools):
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def role_turn(content):
+    return ToolTurn(content=content, tool_calls=[], finish_reason="stop",
+                    usage=Usage(20, 10))
+
+
+def lead(action, **kw):
+    return _json.dumps({"action": action, **kw}, ensure_ascii=False)
+
+
+@pytest_asyncio.fixture
+async def team_env(db_session):
+    settings = get_settings()
+
+    class Env:
+        pass
+
+    holder = Env()
+    holder.factory = async_sessionmaker(db_session.bind, expire_on_commit=False)
+    holder.settings = settings
+    holder.session = db_session
+    return holder
+
+
+async def make_parent(env, *, roles=("scout", "creator"), budget=None):
+    run = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID, user_id=_uuid.uuid4(),
+        goal="围绕主题产出一篇内容", mode="team", status="queued",
+        plan={"roles": list(roles)},
+        budget=budget or {
+            "max_tokens": 120000, "max_tool_calls": 40,
+            "max_turns": 12, "max_seconds": 900,
+        },
+    )
+    env.session.add(run)
+    await env.session.commit()
+    await env.session.refresh(run)
+    return run
+
+
+def deps(env, gateway):
+    from app.agent.registry import get_tool_registry
+    return {
+        "gateway": gateway, "tool_registry": get_tool_registry(),
+        "skill_registry": SkillRegistry(env.settings.skills_dir),
+        "storage": get_storage(), "queue": None, "settings": env.settings,
+        "session_factory": env.factory,
+    }
+
+
+@pytest.mark.asyncio
+async def test_delegate_then_finalize(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    gateway = ScriptedGateway([
+        lead("delegate", role="scout", task="调研选题"),
+        role_turn("调研结论：主题可行"),
+        lead("finalize", summary="已交付"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    assert parent.result["summary"] == "已交付"
+    children = (await team_env.session.execute(
+        select(AgentRun).where(AgentRun.parent_run_id == parent.id)
+    )).scalars().all()
+    assert [(c.role, c.status) for c in children] == [("scout", "succeeded")]
+    entries = (await team_env.session.execute(
+        select(AgentTeamEntry).where(AgentTeamEntry.run_id == parent.id)
+        .order_by(AgentTeamEntry.seq)
+    )).scalars().all()
+    kinds = [e.kind for e in entries]
+    assert kinds[0] == "goal" and "delegation" in kinds and "result" in kinds
+    assert kinds[-1] == "final"
+    # 父 usage 只记 Lead 用量，不并入子运行
+    assert parent.usage["prompt_tokens"] == 20  # 两次 Lead 调用 × 10
+
+
+@pytest.mark.asyncio
+async def test_turn_budget_exhausted(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, budget={
+        "max_tokens": 120000, "max_tool_calls": 40,
+        "max_turns": 1, "max_seconds": 900,
+    })
+    gateway = ScriptedGateway([
+        lead("delegate", role="scout", task="调研"),
+        role_turn("完成"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "team_budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_lead_invalid_twice_fails(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    gateway = ScriptedGateway(["不是 JSON", "还不是 JSON"])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "team_lead_invalid"
+
+
+@pytest.mark.asyncio
+async def test_resume_settled_child_no_redelegate(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    child = AgentRun(
+        tenant_id=DEFAULT_TENANT_ID, user_id=parent.user_id, goal="调研",
+        mode="role", role="scout", parent_run_id=parent.id,
+        status="succeeded", result_text="调研完成",
+        result={"artifacts": []},
+    )
+    team_env.session.add(child)
+    await team_env.session.commit()
+    await team_env.session.refresh(child)
+    parent.team_state = {
+        "turn": 1, "phase": "role",
+        "current_child_id": str(child.id), "current_role": "scout",
+    }
+    parent.status = "queued"
+    await team_env.session.commit()
+    gateway = ScriptedGateway([lead("finalize", summary="交付")])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    children = (await team_env.session.execute(
+        select(AgentRun).where(AgentRun.parent_run_id == parent.id)
+    )).scalars().all()
+    assert len(children) == 1  # 没有重复委派
