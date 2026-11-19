@@ -18,18 +18,21 @@ from typing import ClassVar
 
 from arq import cron
 from arq.connections import ArqRedis, RedisSettings
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.agent.policy import load_overrides, snapshot_policy
 from app.agent.registry import ToolRegistry, get_tool_registry
 from app.agent.runtime import (
+    APPROVAL_EXPIRED,
     INTERNAL_ERROR,
     _expire_approval,
     fail_run,
     run_agent,
 )
+from app.agent.team import cancel_children, fail_team_run
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError
@@ -846,6 +849,9 @@ async def _stale_agent_run_ids(
         select(AgentRun.id)
         .where(
             AgentRun.status == "running",
+            # role 子运行由团队编排器驱动，心跳对账只处理独立/团队运行，
+            # 避免把等待 Lead 调度的子运行误判为崩溃并重排。
+            AgentRun.mode != "role",
             or_(
                 AgentRun.heartbeat_at.is_(None),
                 AgentRun.heartbeat_at < cutoff,
@@ -979,6 +985,147 @@ async def _expire_due_agent_approvals(
     return expired
 
 
+async def _team_pending_count(session: AsyncSession, parent_id: uuid.UUID) -> int:
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(AgentApproval)
+            .join(AgentRun, AgentRun.id == AgentApproval.run_id)
+            .where(
+                AgentRun.parent_run_id == parent_id,
+                AgentApproval.status == "pending",
+            )
+        )
+    ).scalar_one()
+
+
+async def _team_approved_count(session: AsyncSession, parent_id: uuid.UUID) -> int:
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(AgentApproval)
+            .join(AgentRun, AgentRun.id == AgentApproval.run_id)
+            .where(
+                AgentRun.parent_run_id == parent_id,
+                AgentApproval.status == "approved",
+            )
+        )
+    ).scalar_one()
+
+
+async def _settle_waiting_team_parents(
+    session: AsyncSession,
+    *,
+    moment: datetime,
+    queue: ArqRedis | None,
+    limit: int = 100,
+) -> int:
+    """结算零 pending 的等待团队父运行：有 approved 重排，否则判审批过期。
+
+    与 ``lifecycle.requeue_settled_orphan`` 同一口径：行锁 + 谓词重评估，
+    等待时长按 ``heartbeat_at``（挂起时刻）计入 ``paused_ms``；CAS 落败或
+    仍有 pending 时回滚释放锁，交给下一次对账。
+    """
+    ids = (
+        await session.execute(
+            select(AgentRun.id)
+            .where(
+                AgentRun.mode == "team",
+                AgentRun.status == "waiting_approval",
+            )
+            .order_by(AgentRun.updated_at)
+            .limit(limit)
+        )
+    ).scalars().all()
+    handled = 0
+    for run_id in ids:
+        parent = (
+            await session.execute(
+                select(AgentRun)
+                .where(AgentRun.id == run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if parent is None or parent.status != "waiting_approval":
+            await session.rollback()
+            continue
+        # 先取标量：rollback 会过期 session 内全部实例，之后读 ORM 属性
+        # 会触发 MissingGreenlet（与 lifecycle._fail_orphans 同一口径）。
+        parent_id = parent.id
+        if await _team_pending_count(session, parent_id) > 0:
+            await session.rollback()
+            continue
+        if await _team_approved_count(session, parent_id) == 0:
+            await session.rollback()
+            await fail_team_run(
+                session, parent_id,
+                error_code="approval_expired",
+                message=APPROVAL_EXPIRED,
+            )
+            handled += 1
+            continue
+        paused_at = parent.heartbeat_at or moment
+        if paused_at.tzinfo is None:
+            paused_at = paused_at.replace(tzinfo=UTC)
+        waited_ms = int(
+            max(0.0, (moment - min(paused_at, moment)).total_seconds()) * 1000
+        )
+        usage = dict(parent.usage or {})
+        usage["paused_ms"] = int(usage.get("paused_ms") or 0) + waited_ms
+        resumed = await session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.id == parent.id,
+                AgentRun.status == "waiting_approval",
+            )
+            .values(status="queued", usage=usage, heartbeat_at=moment)
+            .execution_options(synchronize_session=False)
+        )
+        if resumed.rowcount == 0:
+            await session.rollback()
+            continue
+        await session.commit()
+        if queue is not None:
+            try:
+                await queue.enqueue_job("run_agent_job", str(parent.id))
+            except Exception:
+                logger.exception("team requeue enqueue failed run=%s", parent.id)
+        handled += 1
+    return handled
+
+
+async def _close_terminal_team_stragglers(
+    session: AsyncSession,
+    *,
+    limit: int = 100,
+) -> int:
+    """终态团队仍有活跃子运行时，复用 cancel_children 收敛残留。"""
+    child = aliased(AgentRun)
+    ids = (
+        await session.execute(
+            select(AgentRun.id)
+            .where(
+                AgentRun.mode == "team",
+                AgentRun.status.in_(("succeeded", "failed", "cancelled")),
+                exists().where(
+                    child.parent_run_id == AgentRun.id,
+                    child.status.in_(("queued", "running", "waiting_approval")),
+                ),
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    handled = 0
+    for run_id in ids:
+        parent = await session.get(AgentRun, run_id)
+        if parent is None:
+            continue
+        await cancel_children(session, parent.id, parent.tenant_id)
+        handled += 1
+    return handled
+
+
 async def reconcile_agent_runs(
     _ctx: dict | None = None,
     *,
@@ -1039,6 +1186,18 @@ async def reconcile_agent_runs(
             await _expire_due_agent_approvals(session, moment=moment)
     except Exception:
         logger.exception("agent approval expiry sweep failed")
+    # 团队对账同样是独立阶段：结算零 pending 的等待父运行，并收敛终态
+    # 团队遗留的活跃子运行；任一失败不影响前面两个阶段的结果。
+    try:
+        async with session_factory() as session:
+            settled = await _settle_waiting_team_parents(
+                session, moment=moment, queue=worker_queue,
+            )
+            closed = await _close_terminal_team_stragglers(session)
+            if settled or closed:
+                logger.info("团队对账：结算 %s 个等待父运行，收敛 %s 个残留", settled, closed)
+    except Exception:
+        logger.exception("team reconciliation sweep failed")
     return handled
 
 
