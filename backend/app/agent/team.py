@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -18,7 +19,12 @@ from app.agent.runtime import (
     _heartbeat_loop,
     run_agent,
 )
-from app.agent.team_contracts import lead_messages, parse_lead_decision
+from app.agent.team_contracts import (
+    critic_task,
+    lead_messages,
+    parse_critic_verdict,
+    parse_lead_decision,
+)
 from app.config import Settings
 from app.errors import AppError
 from app.models.agent import AgentRun, AgentTeamEntry
@@ -212,6 +218,13 @@ async def _drive_child(session, parent, child, *, roles, gateway, tool_registry,
 async def _start_role(session, run, *, role, task, reason, state, roles,
                       gateway, tool_registry, skill_registry, storage, queue,
                       settings, session_factory) -> None:
+    normalized = " ".join(task.split())[:500]
+    key = f"{role}|{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
+    counts = state.setdefault("loop_guard", {})
+    counts[key] = int(counts.get(key, 0)) + 1
+    if counts[key] >= 3:
+        await _fail_team(session, run, TEAM_LOOP_DETECTED, "同一任务连续委派三次")
+        raise _TeamStop()
     child = AgentRun(
         tenant_id=run.tenant_id, user_id=run.user_id, goal=task[:4000],
         mode="role", role=role, parent_run_id=run.id, status="queued",
@@ -233,7 +246,31 @@ async def _start_role(session, run, *, role, task, reason, state, roles,
                        session_factory=session_factory)
 
 
-async def _on_child_succeeded(session, run, child, state) -> None:
+async def _start_critic(session, run, state, *, roles, gateway, tool_registry,
+                        skill_registry, storage, queue, settings, session_factory):
+    state["turn"] = int(state.get("turn", 0)) + 1
+    _save_state(run, state)
+    await session.commit()
+    artifacts = state.get("artifact_index") or []
+    summary = ""
+    last = await recent_entries(session, run.id, settings.agent_team_blackboard_inject)
+    for entry in reversed(last):
+        if entry.kind == "result" and entry.role == "creator":
+            summary = str((entry.content or {}).get("summary") or "")
+            break
+    task = critic_task(
+        goal=run.goal, summary=summary, artifacts=artifacts,
+        note=state.get("critic_note", ""),
+    )
+    await _start_role(
+        session, run, role="critic", task=task, reason="强制审稿", state=state,
+        roles=roles, gateway=gateway, tool_registry=tool_registry,
+        skill_registry=skill_registry, storage=storage, queue=queue,
+        settings=settings, session_factory=session_factory,
+    )
+
+
+async def _on_child_succeeded(session, run, child, state, *, settings) -> None:
     result = child.result if isinstance(child.result, dict) else {}
     artifacts = [a for a in result.get("artifacts") or [] if isinstance(a, dict)]
     entry = await append_entry(
@@ -250,7 +287,52 @@ async def _on_child_succeeded(session, run, child, state) -> None:
     state["roles_run"] = sorted(set(state["roles_run"]) | {child.role})
     state["current_child_id"] = None
     state["current_role"] = ""
-    state["phase"] = "lead"
+    if child.role == "creator":
+        state["creator_task"] = state.get("creator_task") or child.goal
+        critic_enabled = (await effective_roles(session, run.tenant_id))["critic"].enabled
+        state["phase"] = "critic" if critic_enabled else "lead"
+    elif child.role == "critic":
+        try:
+            verdict = parse_critic_verdict(child.result_text)
+        except ValueError:
+            if int(state.get("critic_invalid", 0)) >= 1:
+                await _fail_team(session, run, CRITIC_INVALID, "Critic 连续两次输出无效")
+                raise _TeamStop()
+            state["critic_invalid"] = int(state.get("critic_invalid", 0)) + 1
+            state["critic_note"] = "上次输出无效，只输出 JSON 裁决"
+            state["phase"] = "critic"
+            _save_state(run, state)
+            await session.commit()
+            return
+        await append_entry(session, run=run, kind="critic", role="critic",
+                           content={"verdict": verdict.verdict, "issues": verdict.issues})
+        state["critic_verdicts"].append({
+            "child_id": str(child.id), "verdict": verdict.verdict,
+            "issues": verdict.issues,
+        })
+        state["critic"] = {
+            "verdict": verdict.verdict,
+            "rework_rounds": int(state.get("rework", 0)),
+            "issues": verdict.issues,
+        }
+        if verdict.verdict == "pass":
+            state["phase"] = "lead"
+        else:
+            if int(state.get("rework", 0)) >= settings.agent_team_rework_limit:
+                await _fail_team(session, run, CRITIC_REJECTED,
+                                 "Critic 返工上限仍未通过")
+                raise _TeamStop()
+            state["rework"] = int(state.get("rework", 0)) + 1
+            state["critic"]["rework_rounds"] = state["rework"]
+            state["turn"] = int(state.get("turn", 0)) + 1
+            issues = "\n".join(f"- {item}" for item in verdict.issues)
+            state["forced_role"] = "creator"
+            state["forced_task"] = (
+                f"按审稿问题清单返工：\n{issues}\n原任务：{state.get('creator_task', '')}"
+            )[:2000]
+            state["phase"] = "role"
+    else:
+        state["phase"] = "lead"
     _save_state(run, state)
     await session.commit()
 
@@ -277,7 +359,7 @@ async def _settle_child(session, run, state, *, roles, gateway, tool_registry,
     if child.status != "succeeded":
         await _fail_team(session, run, INTERNAL_ERROR, INTERNAL_MESSAGE)
         return "failed"
-    await _on_child_succeeded(session, run, child, state)
+    await _on_child_succeeded(session, run, child, state, settings=settings)
     return "ok"
 
 
@@ -372,6 +454,25 @@ async def _team_loop(session, run, *, gateway, tool_registry, skill_registry,
             if outcome in {"waiting", "failed"}:
                 return
             continue
+        if state.get("forced_role"):
+            role = state.pop("forced_role")
+            task = state.pop("forced_task", "")
+            await _start_role(
+                session, run, role=role, task=task, reason="Critic 否决后强制返工",
+                state=state, roles=roles, gateway=gateway,
+                tool_registry=tool_registry, skill_registry=skill_registry,
+                storage=storage, queue=queue, settings=settings,
+                session_factory=session_factory,
+            )
+            continue
+        if state.get("phase") == "critic":
+            await _start_critic(
+                session, run, state, roles=roles, gateway=gateway,
+                tool_registry=tool_registry, skill_registry=skill_registry,
+                storage=storage, queue=queue, settings=settings,
+                session_factory=session_factory,
+            )
+            continue
         decision = await _lead_decide(
             session, run, gateway=gateway, settings=settings,
             state=state, participants=participants,
@@ -382,6 +483,8 @@ async def _team_loop(session, run, *, gateway, tool_registry, skill_registry,
         if decision.action == "finalize":
             await _finish_team(session, run, state, decision.summary)
             return
+        if decision.action == "rework":
+            state["creator_task"] = state.get("creator_task") or decision.task
         await _start_role(
             session, run, role=decision.role, task=decision.task,
             reason=decision.reason, state=state, roles=roles, gateway=gateway,

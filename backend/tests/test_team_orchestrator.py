@@ -246,3 +246,134 @@ async def test_resume_settled_child_no_redelegate(team_env):
         select(AgentRun).where(AgentRun.parent_run_id == parent.id)
     )).scalars().all()
     assert len(children) == 1  # 没有重复委派
+
+
+@pytest.mark.asyncio
+async def test_forced_critic_pass(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, roles=("creator", "critic"))
+    gateway = ScriptedGateway([
+        lead("delegate", role="creator", task="写稿"),
+        role_turn("稿件完成"),
+        role_turn('{"verdict":"pass","issues":[]}'),
+        lead("finalize", summary="交付"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    children = (await team_env.session.execute(
+        select(AgentRun).where(AgentRun.parent_run_id == parent.id)
+        .order_by(AgentRun.created_at)
+    )).scalars().all()
+    assert [c.role for c in children] == ["creator", "critic"]
+    assert parent.result["critic"]["verdict"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_critic_fail_forces_rework_then_pass(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, roles=("creator", "critic"))
+    gateway = ScriptedGateway([
+        lead("delegate", role="creator", task="写稿"),
+        role_turn("稿件 v1"),
+        role_turn('{"verdict":"fail","issues":["标题太长"]}'),
+        role_turn("稿件 v2"),
+        role_turn('{"verdict":"pass","issues":[]}'),
+        lead("finalize", summary="交付"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    children = (await team_env.session.execute(
+        select(AgentRun).where(AgentRun.parent_run_id == parent.id)
+        .order_by(AgentRun.created_at)
+    )).scalars().all()
+    assert [c.role for c in children] == ["creator", "critic", "creator", "critic"]
+    assert children[2].goal.find("标题太长") >= 0
+    assert parent.result["critic"]["rework_rounds"] == 1
+
+
+@pytest.mark.asyncio
+async def test_critic_rejected_after_two_reworks(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, roles=("creator", "critic"))
+    gateway = ScriptedGateway([
+        lead("delegate", role="creator", task="写稿"),
+        role_turn("v1"),
+        role_turn('{"verdict":"fail","issues":["问题"]}'),
+        role_turn("v2"),
+        role_turn('{"verdict":"fail","issues":["问题"]}'),
+        role_turn("v3"),
+        role_turn('{"verdict":"fail","issues":["问题"]}'),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "critic_rejected"
+    # 现场保留：黑板与子运行仍在
+    entries = (await team_env.session.execute(
+        select(AgentTeamEntry).where(AgentTeamEntry.run_id == parent.id)
+    )).scalars().all()
+    assert len(entries) > 0
+
+
+@pytest.mark.asyncio
+async def test_critic_invalid_twice(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, roles=("creator", "critic"))
+    gateway = ScriptedGateway([
+        lead("delegate", role="creator", task="写稿"),
+        role_turn("稿件"),
+        role_turn("不是 JSON"),
+        role_turn("还不是 JSON"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "critic_invalid"
+
+
+@pytest.mark.asyncio
+async def test_loop_detected_same_task_three_times(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    gateway = ScriptedGateway([
+        lead("delegate", role="scout", task="同样的任务"),
+        role_turn("r1"),
+        lead("delegate", role="scout", task="同样的任务"),
+        role_turn("r2"),
+        lead("delegate", role="scout", task="同样的任务"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "team_loop_detected"
+
+
+@pytest.mark.asyncio
+async def test_critic_disabled_skips_review(team_env):
+    from app.agent.team import run_team
+    from app.models.agent import AgentTeamRole
+
+    team_env.session.add(AgentTeamRole(
+        tenant_id=DEFAULT_TENANT_ID, role="critic", enabled=False,
+    ))
+    await team_env.session.commit()
+    parent = await make_parent(team_env, roles=("creator", "critic"))
+    gateway = ScriptedGateway([
+        lead("delegate", role="creator", task="写稿"),
+        role_turn("稿件"),
+        lead("finalize", summary="交付"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    children = (await team_env.session.execute(
+        select(AgentRun).where(AgentRun.parent_run_id == parent.id)
+    )).scalars().all()
+    assert [c.role for c in children] == ["creator"]
