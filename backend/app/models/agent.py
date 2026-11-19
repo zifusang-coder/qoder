@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -63,6 +64,14 @@ class AgentRun(TenantScoped):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(16), default="")
+    team_state: Mapped[dict] = mapped_column(JSONType, default=dict)
 
 
 class AgentStep(TenantScoped):
@@ -132,3 +141,32 @@ class AgentPolicy(TenantScoped):
     )
 
     overrides: Mapped[dict] = mapped_column(JSONType, default=dict)
+
+
+class AgentTeamEntry(TenantScoped):
+    __tablename__ = "agent_team_entries"
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_agent_team_entries_run_seq"),
+    )
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        index=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(16))
+    role: Mapped[str] = mapped_column(String(16), default="")
+    content: Mapped[dict] = mapped_column(JSONType, default=dict)
+
+
+class AgentTeamRole(TenantScoped):
+    __tablename__ = "agent_team_roles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "role", name="uq_agent_team_roles_tenant_role"),
+    )
+
+    role: Mapped[str] = mapped_column(String(16))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    tools: Mapped[dict] = mapped_column(JSONType, default=list)
+    budget: Mapped[dict] = mapped_column(JSONType, default=dict)

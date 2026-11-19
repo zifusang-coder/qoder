@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     agent_daily_token_quota: int = 500000
     agent_approval_ttl_hours: int = 24
     agent_run_stale_seconds: int = 300
+    # 团队（第 3 层）预算与编排上限
+    agent_team_max_turns: int = 12
+    agent_team_rework_limit: int = 2
+    agent_team_blackboard_inject: int = 12
+    agent_team_max_tokens: int = 120000
+    agent_team_max_tool_calls: int = 40
+    agent_team_max_seconds: int = 900
+    agent_team_token_ceiling: int = 200000
+    agent_team_seconds_ceiling: int = 1800
     workflow_max_parallel_nodes: int = 3
     workflow_time_slice_seconds: int = 480
     workflow_max_seconds: int = 3600
