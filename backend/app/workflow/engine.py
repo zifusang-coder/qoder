@@ -31,7 +31,12 @@ from app.agent.contracts import ToolContext
 from app.agent.policy import resolve_policy
 from app.agent.quota import ensure_daily_quota
 from app.agent.registry import ToolRegistry
-from app.agent.roles import EXECUTION_ROLES, team_budget_ceilings, team_budget_defaults
+from app.agent.roles import (
+    EXECUTION_ROLES,
+    effective_roles,
+    team_budget_ceilings,
+    team_budget_defaults,
+)
 from app.agent.runtime import run_agent
 from app.agent.sanitize import fit_bytes, scrub
 from app.agent.team import run_team
@@ -220,7 +225,7 @@ def _rejection_code(node: GraphNode, approval: WorkflowApproval | None) -> str:
 
 
 def _retry_budget(node: GraphNode) -> int:
-    if node.kind not in {"tool", "agent"}:
+    if node.kind not in {"tool", "agent", "team"}:
         return 0
     try:
         return max(0, min(MAX_RETRY, int(node.data.get("retry") or 0)))
@@ -353,6 +358,8 @@ def _estimate(node: GraphNode, deps: EngineDeps) -> float:
     if node.kind == "agent":
         budget = _agent_budget(node, deps.settings)
         return float(budget.get("max_seconds") or 0)
+    if node.kind == "team":
+        return float(_team_budget(node, deps.settings).get("max_seconds") or 0)
     return 0.0
 
 
@@ -732,6 +739,8 @@ async def _run_node(
         attempt = node_run.attempt
         step_index = node_run.tool_step_index
 
+    # team 节点重试沿用同一父运行断点：旧尝试的 agent_run_id 继承到新行。
+    team_parent_id: uuid.UUID | None = None
     for index in range(retry + 1):
         if node_run is None or index > 0:
             attempt += 1
@@ -743,6 +752,7 @@ async def _run_node(
                 kind=node.kind,
                 status="running",
                 tool_step_index=step_index,
+                agent_run_id=team_parent_id,
                 started_at=_now(),
             )
             session.add(node_run)
@@ -768,6 +778,9 @@ async def _run_node(
             moment = _now()
             row = await session.get(WorkflowNodeRun, node_run_id)
             if row is not None:
+                # 回滚后从库里重读旧尝试已提交的父运行 id，供新尝试继承。
+                if node.kind == "team":
+                    team_parent_id = row.agent_run_id
                 row.status = "error"
                 row.error = _error_message(exc)
                 row.finished_at = moment
@@ -1041,6 +1054,93 @@ async def _execute_agent(
     return await _agent_failed(session, run, node_run, child)
 
 
+async def _settle_team_parent(
+    session: AsyncSession,
+    run: WorkflowRun,
+    node_run: WorkflowNodeRun,
+    parent: AgentRun,
+) -> str | None:
+    """把已有团队父运行领回可续跑状态。
+
+    返回 ``None`` 表示父运行已就绪（queued），调用方接着 ``run_team``；
+    否则返回终态结果（ok/error）。CAS 落败说明别的写入者改了状态，refresh
+    后按新状态重新分支（cancelled 不复活）。
+    """
+    while True:
+        if parent.status == "succeeded":
+            return await _agent_succeeded(session, node_run, parent)
+        if parent.status == "waiting_approval":
+            # 审批通过后续跑：等待时长按 heartbeat_at 锚点计入 paused_ms
+            # （公式镜像 api/agent.py _wake_parent_team），再 CAS 回 queued。
+            moment = _now()
+            paused_at = _aware(parent.heartbeat_at) or moment
+            waited_ms = int(
+                max(0.0, (moment - min(paused_at, moment)).total_seconds()) * 1000
+            )
+            usage = dict(parent.usage or {})
+            usage["paused_ms"] = int(usage.get("paused_ms") or 0) + waited_ms
+            resumed = await session.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.id == parent.id,
+                    AgentRun.tenant_id == parent.tenant_id,
+                    AgentRun.status == "waiting_approval",
+                )
+                .values(
+                    status="queued",
+                    usage=usage,
+                    heartbeat_at=moment,
+                    finished_at=None,
+                    error_code="",
+                    error_message="",
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if resumed.rowcount:
+                await session.commit()
+                await session.refresh(parent)
+                return None
+            await session.refresh(parent)
+            continue
+        if parent.status == "failed" and node_run.attempt > 1:
+            # 重试沿用断点：保留 team_state 与 usage，清错误后 CAS 回 queued。
+            moment = _now()
+            resumed = await session.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.id == parent.id,
+                    AgentRun.tenant_id == parent.tenant_id,
+                    AgentRun.status == "failed",
+                )
+                .values(
+                    status="queued",
+                    error_code="",
+                    error_message="",
+                    finished_at=None,
+                    heartbeat_at=moment,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            if resumed.rowcount:
+                await session.commit()
+                await session.refresh(parent)
+                return None
+            await session.refresh(parent)
+            continue
+        if parent.status in {"failed", "cancelled"}:
+            return await _agent_failed(session, run, node_run, parent)
+        if parent.status == "queued":
+            return None
+        await _abort_node(
+            session,
+            run,
+            node_run,
+            "workflow_internal_error",
+            f"团队运行状态异常: {parent.status}",
+        )
+        return "error"
+
+
 async def _execute_team(
     session: AsyncSession,
     run: WorkflowRun,
@@ -1062,11 +1162,22 @@ async def _execute_team(
         await _abort_node(session, run, node_run, exc.code, exc.message)
         return "error"
 
+    # 租户角色收窄：被禁用的执行角色直接中止，不创建团队父运行。
+    # 错误码与 roles.validate_participants 一致；未知角色维持静默过滤。
+    roles_cfg = await effective_roles(session, run.tenant_id)
+    for role in node.data.get("roles") or []:
+        if role in EXECUTION_ROLES and not roles_cfg[role].enabled:
+            await _abort_node(
+                session, run, node_run, "team_roles_invalid",
+                f"角色已被租户禁用: {role}",
+            )
+            return "error"
+
     roles = [r for r in (node.data.get("roles") or []) if r in EXECUTION_ROLES]
     if "creator" not in roles:
         roles.append("creator")
     parent: AgentRun | None = None
-    if resume and node_run.agent_run_id is not None:
+    if node_run.agent_run_id is not None:
         parent = await session.get(AgentRun, node_run.agent_run_id)
     if parent is None:
         goal = _agent_goal(node, state)
@@ -1089,19 +1200,10 @@ async def _execute_team(
         node_run.input = _safe_dict({"goal": goal, "roles": roles})
         node_run.status = "running"
         await session.commit()
-    elif parent.status == "succeeded":
-        return await _agent_succeeded(session, node_run, parent)
-    elif parent.status in {"failed", "cancelled"}:
-        return await _agent_failed(session, run, node_run, parent)
-    elif parent.status not in {"queued", "waiting_approval"}:
-        await _abort_node(
-            session,
-            run,
-            node_run,
-            "workflow_internal_error",
-            f"团队运行状态异常: {parent.status}",
-        )
-        return "error"
+    else:
+        outcome = await _settle_team_parent(session, run, node_run, parent)
+        if outcome is not None:
+            return outcome
 
     await run_team(
         session,
@@ -1442,8 +1544,10 @@ async def _resume_waiting(
                 )
                 await session.commit()
                 return "stopped"
-            if node.kind == "agent":
-                # 子运行的审批在 agent_approvals，没有 workflow_approvals 行
+            if node.kind in {"agent", "team"}:
+                # 子运行的审批在 agent_approvals，没有 workflow_approvals 行；
+                # team 节点的 role 子审批同样在 agent_approvals（继承外键后
+                # 已被 has_pending 看见），这里一并交给子运行续跑通道。
                 active.append(item.node_id)
                 continue
             node_run = await _latest_node_run(

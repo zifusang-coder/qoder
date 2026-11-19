@@ -589,6 +589,22 @@ async def requeue_settled_orphan(
         )
     ).first()
     if settled is None:
+        # 子运行审批通道（agent/team 节点）：approved 的 AgentApproval 同样
+        # 说明运行已被结算，丢失唤醒时也要救回，而不是误杀 approval_expired。
+        settled = (
+            await session.execute(
+                select(AgentApproval.id)
+                .join(AgentRun, AgentRun.id == AgentApproval.run_id)
+                .where(
+                    AgentRun.workflow_run_id == run.id,
+                    AgentRun.tenant_id == run.tenant_id,
+                    AgentApproval.tenant_id == run.tenant_id,
+                    AgentApproval.status == "approved",
+                )
+                .limit(1)
+            )
+        ).first()
+    if settled is None:
         await session.rollback()
         return False
     usage = dict(run.usage or {})

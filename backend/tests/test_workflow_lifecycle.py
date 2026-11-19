@@ -617,3 +617,34 @@ async def test_fail_orphans_survives_lost_cas_and_processes_rest(db_session):
     assert second.status == "failed"
     assert second.error_code == "approval_expired"
     assert second_node.status == "denied"
+
+
+async def test_requeue_settled_orphan_rescues_agent_channel(factory, db_session):
+    # 仅有 approved 的 AgentApproval（子运行审批通道），没有 WorkflowApproval：
+    # 对账兜底也要把丢失唤醒的挂起运行重排回 queued，而不是误杀 approval_expired。
+    run = await make_run(
+        db_session,
+        status="waiting_approval",
+        heartbeat_at=NOW - timedelta(minutes=5),
+    )
+    child, _step, approval = await add_waiting_child(db_session, run)
+    approval.status = "approved"
+    approval.decided_at = NOW - timedelta(minutes=4)
+    child.status = "queued"
+    await db_session.commit()
+    seen = []
+
+    async def on_requeue(run_id):
+        seen.append(run_id)
+
+    counts = await lifecycle.reconcile(
+        factory, settings=get_settings(), now=NOW, on_requeue=on_requeue
+    )
+    await db_session.refresh(run)
+    assert run.status == "queued"
+    assert run.error_code == ""
+    assert run.finished_at is None
+    assert counts["requeued"] == 1
+    assert counts["approval_expired"] == 0
+    assert seen == [run.id]
+    assert int((run.usage or {}).get("paused_ms") or 0) >= 300_000

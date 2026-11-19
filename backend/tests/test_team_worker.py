@@ -208,3 +208,31 @@ async def test_job_never_runs_role_child(db_session, monkeypatch):
         None, str(child.id), session_factory=factory, gateway=object(),
     )
     assert called == {}
+
+
+@pytest.mark.asyncio
+async def test_settle_waiting_team_parents_skips_workflow_owned(db_session):
+    from app.worker import _settle_waiting_team_parents
+    from tests.test_workflow_lifecycle import make_run as make_wf_run
+
+    # workflow 持有的团队父：由工作流通道结算，worker 不投运（唯一执行者）。
+    wf_run = await make_wf_run(db_session, status="waiting_approval")
+    owned = await make_parent(db_session, "waiting_approval")
+    owned.workflow_run_id = wf_run.id
+    await db_session.commit()
+    await make_child(db_session, owned, "waiting_approval",
+                     approval_status="approved")
+    # 同批 standalone 团队父仍应被重排。
+    standalone = await make_parent(db_session, "waiting_approval")
+    await make_child(db_session, standalone, "waiting_approval",
+                     approval_status="approved")
+    queue = FakeQueue()
+    handled = await _settle_waiting_team_parents(
+        db_session, moment=datetime.now(UTC), queue=queue,
+    )
+    assert handled == 1
+    await db_session.refresh(owned)
+    await db_session.refresh(standalone)
+    assert owned.status == "waiting_approval"
+    assert standalone.status == "queued"
+    assert queue.jobs == [("run_agent_job", str(standalone.id))]

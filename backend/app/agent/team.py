@@ -307,6 +307,10 @@ async def _start_role(session, run, *, role, task, reason, state, roles,
         tenant_id=run.tenant_id, user_id=run.user_id, goal=task[:4000],
         mode="role", role=role, parent_run_id=run.id, status="queued",
         budget=dict(roles[role].budget), policy=dict(run.policy or {}),
+        # 继承工作流外键：team 子审批据此进入 L1 的 has_pending/approve 唤醒/
+        # 详情可见/_close_children 通道（standalone 团队父两者为 None，行为不变）。
+        workflow_run_id=run.workflow_run_id,
+        workflow_node_id=run.workflow_node_id,
     )
     session.add(child)
     await session.commit()

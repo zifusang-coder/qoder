@@ -1038,6 +1038,9 @@ async def _settle_waiting_team_parents(
             .where(
                 AgentRun.mode == "team",
                 AgentRun.status == "waiting_approval",
+                # workflow 持有的团队父由工作流通道结算（唯一执行者原则），
+                # worker 不投运，避免两个执行器续跑同一父运行。
+                AgentRun.workflow_run_id.is_(None),
             )
             .order_by(AgentRun.updated_at)
             .limit(limit)

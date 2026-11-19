@@ -1264,26 +1264,30 @@ async def decide(
             # possible; a 503 tells the reviewer to retry.
             await _compensate_approval(session, approval, run)
             raise
-    elif run.workflow_run_id is not None:
-        # 子运行已由第 1 层落 failed/approval_rejected；这里终结父运行，
-        # 保证没有审批或子运行比父运行活得更久。
-        await lifecycle.fail_waiting_run(
-            session,
-            run.workflow_run_id,
-            error_code="approval_rejected",
-            message=APPROVAL_REJECTED,
-            actor=str(user.id),
-        )
+    else:
+        # 子运行已由第 1 层落 failed/approval_rejected。驳回分派顺序：
+        # 先终结父团队（保留现场），再终结父工作流——这样 fail_waiting_run
+        # 的 _close_children 不会把已 failed 的团队父改成 cancelled。
+        # 先取标量：fail_team_run 的提交/回滚可能 expire 子运行实例。
+        parent_run_id = run.parent_run_id
+        workflow_run_id = run.workflow_run_id
+        if parent_run_id is not None:
+            # 终结父团队并保留现场（cancel_children 收敛其余子运行与审批）。
+            await fail_team_run(
+                session,
+                parent_run_id,
+                error_code="approval_rejected",
+                message=APPROVAL_REJECTED,
+            )
+        if workflow_run_id is not None:
+            # 终结父工作流，保证没有审批或子运行比父运行活得更久。
+            await lifecycle.fail_waiting_run(
+                session,
+                workflow_run_id,
+                error_code="approval_rejected",
+                message=APPROVAL_REJECTED,
+                actor=str(user.id),
+            )
         # 父运行 CAS 落败时 fail_waiting_run 会 rollback 并 expire 子运行。
-        run = await session.get(AgentRun, child_id)
-    elif run.parent_run_id is not None:
-        # 子运行已由第 1 层落 failed/approval_rejected；这里终结父团队并
-        # 保留现场（cancel_children 收敛其余子运行与 pending 审批）。
-        await fail_team_run(
-            session,
-            run.parent_run_id,
-            error_code="approval_rejected",
-            message=APPROVAL_REJECTED,
-        )
         run = await session.get(AgentRun, child_id)
     return _run_out(run)
