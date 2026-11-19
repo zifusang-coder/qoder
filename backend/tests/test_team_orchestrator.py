@@ -472,3 +472,50 @@ async def test_cancel_team_run(team_env):
     assert parent.status == "cancelled"
     assert child.status == "cancelled"
     assert await cancel_team_run(team_env.session, parent) is False
+
+
+@pytest.mark.asyncio
+async def test_running_parent_with_fresh_heartbeat_not_reclaimed(team_env):
+    """单飞认领：心跳仍新鲜的 running 父运行不能被第二个 run_team 再次认领。"""
+    from datetime import UTC, datetime
+
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env)
+    parent.status = "running"
+    parent.heartbeat_at = datetime.now(UTC)
+    await team_env.session.commit()
+    # 脚本为空：一旦认领成功进入循环，任何 gateway 消费都会 IndexError。
+    gateway = ScriptedGateway([])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "running"
+    assert gateway.complete_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_team_run_persists_without_children_and_audit(
+    team_env, monkeypatch
+):
+    """取消持久化不依赖子运行收敛或审计提交：无子运行 + 审计失败仍须落库。"""
+    from app.agent.team import cancel_team_run
+    from app.services import audit
+
+    parent = await make_parent(team_env)
+    parent.status = "running"
+    await team_env.session.commit()
+    parent_id = parent.id
+
+    async def broken_record(*args, **kwargs):
+        raise RuntimeError("audit unavailable")
+
+    # 真实 record_best_effort 会吞掉 record 的异常并跳过提交（见 audit.py），
+    # 这里让内部 record 抛错，模拟审计失败的真实路径。
+    monkeypatch.setattr(audit, "record", broken_record)
+    assert await cancel_team_run(team_env.session, parent) is True
+    # 模拟会话随后回滚/连接丢失：CAS 必须已独立提交，不能被回滚抹掉。
+    await team_env.session.rollback()
+    async with team_env.factory() as fresh:
+        row = await fresh.get(AgentRun, parent_id)
+        assert row is not None
+        assert row.status == "cancelled"

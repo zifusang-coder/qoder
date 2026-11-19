@@ -5,9 +5,9 @@ import contextlib
 import hashlib
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.blackboard import append_entry, recent_entries, render_entries
@@ -207,6 +207,9 @@ async def cancel_team_run(session, run: AgentRun) -> bool:
     if cancelled.rowcount == 0:
         await session.rollback()
         return False
+    # 取消必须独立落库：不能依赖 cancel_children（无子运行时跳过提交）
+    # 或审计提交（失败时跳过/回滚），否则零子运行 + 审计失败会丢失取消。
+    await session.commit()
     await cancel_children(session, run.id, run.tenant_id, moment=moment)
     # record() 需要 User | str 作为 actor；与 _fail_team 同一口径。
     user = await session.get(User, run.user_id)
@@ -478,16 +481,24 @@ async def _finish_team(session, run, state, summary: str) -> None:
 
 async def _team_loop(session, run, *, gateway, tool_registry, skill_registry,
                      storage, queue, settings, session_factory) -> None:
-    # queued 首次认领；running 为崩溃/重启后的续跑（与 runtime 恢复同口径），
-    # 两者都经 CAS 认领，终态或已被取消的运行不会进入循环。
+    # queued 首次认领；running 仅在心跳缺失/过期（崩溃或重启）时续跑，
+    # 与 worker._reconcile_agent_run 同一 CAS 口径：认领同时写入新心跳，
+    # 行锁 + 谓词重评估保证并发下只有一个认领者胜出（单飞）。
     if run.status not in {"queued", "running"}:
         return
     moment = _now()
+    stale = or_(
+        AgentRun.heartbeat_at.is_(None),
+        AgentRun.heartbeat_at
+        < moment - timedelta(seconds=settings.agent_run_stale_seconds),
+    )
     claimed = await session.execute(
         update(AgentRun)
         .where(AgentRun.id == run.id,
-               AgentRun.status.in_(("queued", "running")),
-               AgentRun.mode == "team")
+               AgentRun.tenant_id == run.tenant_id,
+               AgentRun.mode == "team",
+               or_(AgentRun.status == "queued",
+                   and_(AgentRun.status == "running", stale)))
         .values(status="running", started_at=run.started_at or moment,
                 heartbeat_at=moment)
         .execution_options(synchronize_session=False)
