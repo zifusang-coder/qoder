@@ -24,6 +24,7 @@ from app.agent.runtime import (
     decide_approval,
     fail_run,
 )
+from app.agent.team import fail_team_run
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.errors import AppError
@@ -637,6 +638,183 @@ async def _wake_parent_workflow(
         raise
 
 
+async def _team_has_pending(
+    session: AsyncSession, parent_id: uuid.UUID, tenant_id: str
+) -> bool:
+    """Whether any child of the team still has a pending approval."""
+    row = (
+        await session.execute(
+            select(AgentApproval.id)
+            .join(AgentRun, AgentRun.id == AgentApproval.run_id)
+            .where(
+                AgentRun.parent_run_id == parent_id,
+                AgentRun.tenant_id == tenant_id,
+                AgentApproval.status == "pending",
+            )
+            .limit(1)
+        )
+    ).first()
+    return row is not None
+
+
+async def _restore_team_wait(
+    session: AsyncSession,
+    parent: AgentRun,
+    child: AgentRun,
+    approval: AgentApproval,
+    *,
+    previous_paused_ms: int,
+    paused_at: datetime,
+) -> None:
+    """Undo a woke parent team whose worker never saw the job.
+
+    Same contract as ``_restore_child_wait``: all three rows move together and
+    only while each still holds the value this request wrote, so a concurrent
+    cancel or a sibling decision is never resurrected. The row identities are
+    captured up front because a losing CAS rolls the session back and expires
+    every ORM instance.
+    """
+    parent_id, child_id, approval_id = parent.id, child.id, approval.id
+    tenant = parent.tenant_id
+    usage = dict(parent.usage or {})
+    usage["paused_ms"] = previous_paused_ms
+    reset_parent = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == parent_id,
+            AgentRun.tenant_id == tenant,
+            AgentRun.status == "queued",
+        )
+        .values(
+            status="waiting_approval",
+            usage=usage,
+            heartbeat_at=paused_at,
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    reset_child = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == child_id,
+            AgentRun.tenant_id == tenant,
+            AgentRun.status == "queued",
+        )
+        .values(
+            status="waiting_approval",
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    reset_approval = await session.execute(
+        update(AgentApproval)
+        .where(
+            AgentApproval.id == approval_id,
+            AgentApproval.tenant_id == tenant,
+            AgentApproval.status == "approved",
+        )
+        .values(status="pending", decided_by=None, decided_at=None, note="")
+        .execution_options(synchronize_session=False)
+    )
+    if reset_parent.rowcount and reset_child.rowcount and reset_approval.rowcount:
+        await session.commit()
+        return
+    await session.rollback()
+    logger.warning(
+        "team approval compensation skipped run=%s approval=%s",
+        child_id,
+        approval_id,
+    )
+
+
+async def _wake_parent_team(
+    session: AsyncSession,
+    queue: ArqRedis | None,
+    child: AgentRun,
+    approval: AgentApproval,
+) -> None:
+    """Wake the parent team that owns ``child`` -- never the child itself.
+
+    The team orchestrator resumes its children inline (``_settle_child``), so
+    enqueueing the child as well would let two executors run the same child.
+    While a sibling approval is still pending the parent keeps waiting;
+    whoever decides the last one wakes it.
+
+    The wait is credited to the parent's ``paused_ms`` so resuming does not
+    bill the approval wait to the team's wall-clock budget. The parent is read
+    with a row lock so this check-then-CAS serializes with sibling decisions
+    and with cancel/fail writers on the same parent row.
+    """
+    parent = (
+        await session.execute(
+            select(AgentRun)
+            .where(
+                AgentRun.id == child.parent_run_id,
+                AgentRun.tenant_id == child.tenant_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if parent is None:
+        raise AppError("not_found", "运行不存在", 404)
+    if parent.status != "waiting_approval":
+        await session.rollback()
+        return
+    if await _team_has_pending(session, parent.id, parent.tenant_id):
+        await session.rollback()
+        return
+    moment = datetime.now(UTC)
+    paused_at = _utc(parent.heartbeat_at) or moment
+    # Capture the pre-credit value: the CAS below runs with
+    # synchronize_session=False, so a compensation must write this back rather
+    # than subtract from a stale total it never saw added.
+    previous_paused_ms = int((parent.usage or {}).get("paused_ms") or 0)
+    waited_ms = int(
+        max(0.0, (moment - min(paused_at, moment)).total_seconds()) * 1000
+    )
+    usage = dict(parent.usage or {})
+    usage["paused_ms"] = previous_paused_ms + waited_ms
+    resumed = await session.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == parent.id,
+            AgentRun.tenant_id == parent.tenant_id,
+            AgentRun.status == "waiting_approval",
+        )
+        .values(
+            status="queued",
+            usage=usage,
+            heartbeat_at=moment,
+            finished_at=None,
+            error_code="",
+            error_message="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if resumed.rowcount == 0:
+        # 父团队已被取消、已被另一个审批唤醒或已终态：它的写入者负责子运行。
+        await session.rollback()
+        return
+    await session.commit()
+    try:
+        await _enqueue(queue, parent)
+    except AppError:
+        await _restore_team_wait(
+            session,
+            parent,
+            child,
+            approval,
+            previous_paused_ms=previous_paused_ms,
+            paused_at=paused_at,
+        )
+        raise
+
+
 async def _compensate_approval(
     session: AsyncSession, approval: AgentApproval, run: AgentRun
 ) -> None:
@@ -1067,6 +1245,11 @@ async def decide(
             # 重新加载后才能安全序列化响应。
             run = await session.get(AgentRun, child_id)
             return _run_out(run)
+        elif run.parent_run_id is not None:
+            # 父团队是子运行的唯一执行者：只唤醒父团队，子运行由编排器续跑。
+            await _wake_parent_team(session, queue, run, approval)
+            run = await session.get(AgentRun, child_id)
+            return _run_out(run)
         try:
             await _enqueue(queue, run)
         except AppError:
@@ -1086,5 +1269,15 @@ async def decide(
             actor=str(user.id),
         )
         # 父运行 CAS 落败时 fail_waiting_run 会 rollback 并 expire 子运行。
+        run = await session.get(AgentRun, child_id)
+    elif run.parent_run_id is not None:
+        # 子运行已由第 1 层落 failed/approval_rejected；这里终结父团队并
+        # 保留现场（cancel_children 收敛其余子运行与 pending 审批）。
+        await fail_team_run(
+            session,
+            run.parent_run_id,
+            error_code="approval_rejected",
+            message=APPROVAL_REJECTED,
+        )
         run = await session.get(AgentRun, child_id)
     return _run_out(run)
