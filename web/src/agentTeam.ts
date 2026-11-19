@@ -1,4 +1,4 @@
-import { canWrite, isAdmin, type Role } from "./auth";
+import { canWrite, isAdmin, type Me, type Role } from "./auth";
 import type { AgentRun } from "./agent";
 
 export type TeamRole = "planner" | "scout" | "creator" | "critic" | "publisher";
@@ -44,6 +44,20 @@ export function roleLabel(role: string): string { return ROLE_LABELS[role] ?? ro
 export function entryKindLabel(kind: string): string { return ENTRY_LABELS[kind] ?? kind; }
 export function canEditTeamRoles(role: Role): boolean { return isAdmin(role); }
 export function canStartTeamRun(role: Role): boolean { return canWrite(role); }
+
+/** 团队口径（spec §8）：admin/owner 可取消任意活跃团队运行，不同于单 Agent 仅发起人可取消。 */
+export function canCancelTeamRun(
+  run: Pick<AgentRun, "status" | "user_id">,
+  viewer: Pick<Me, "id" | "role">,
+): boolean {
+  const live =
+    run.status === "queued" ||
+    run.status === "running" ||
+    run.status === "waiting_approval";
+  if (!live) return false;
+  if (isAdmin(viewer.role)) return true;
+  return viewer.id === run.user_id && canWrite(viewer.role);
+}
 
 export function validateParticipants(selected: string[], configs: TeamRoleConfig[]): string | null {
   if (selected.length === 0) return "至少选择一个执行角色";

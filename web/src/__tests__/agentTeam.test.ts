@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  canEditTeamRoles, canStartTeamRun, defaultTeamBudget, entryKindLabel,
+  canCancelTeamRun, canEditTeamRoles, canStartTeamRun, defaultTeamBudget, entryKindLabel,
   roleLabel, teamTotals, validateParticipants, validateTeamBudget,
   type TeamRoleConfig,
 } from "../agentTeam";
@@ -53,5 +53,30 @@ describe("team pure functions", () => {
     ] as never);
     expect(totals.tokens).toBe(45);
     expect(totals.tool_calls).toBe(5);
+  });
+});
+
+describe("canCancelTeamRun", () => {
+  const run = { status: "running", user_id: "u1" };
+  it("admin/owner may cancel others' live team runs", () => {
+    expect(canCancelTeamRun(run, { id: "u2", role: "admin" })).toBe(true);
+    expect(canCancelTeamRun(run, { id: "u2", role: "owner" })).toBe(true);
+  });
+  it("editor may cancel only own live team runs", () => {
+    expect(canCancelTeamRun(run, { id: "u1", role: "editor" })).toBe(true);
+    expect(canCancelTeamRun(run, { id: "u2", role: "editor" })).toBe(false);
+  });
+  it("viewer may never cancel", () => {
+    expect(canCancelTeamRun(run, { id: "u1", role: "viewer" })).toBe(false);
+  });
+  it("live statuses include queued and waiting_approval", () => {
+    expect(canCancelTeamRun({ status: "queued", user_id: "u1" }, { id: "u1", role: "editor" })).toBe(true);
+    expect(canCancelTeamRun({ status: "waiting_approval", user_id: "u1" }, { id: "u1", role: "editor" })).toBe(true);
+  });
+  it("terminal statuses hide cancel for everyone", () => {
+    for (const status of ["succeeded", "failed", "cancelled"]) {
+      expect(canCancelTeamRun({ status, user_id: "u1" }, { id: "u1", role: "editor" })).toBe(false);
+      expect(canCancelTeamRun({ status, user_id: "u1" }, { id: "u2", role: "admin" })).toBe(false);
+    }
   });
 });

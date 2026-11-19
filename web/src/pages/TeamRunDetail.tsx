@@ -4,12 +4,11 @@ import { Link, useParams } from "react-router-dom";
 import {
   agentStatusLabel,
   artifactLink,
-  canCancelRun,
   isRunTerminal,
   usageTokens,
   type AgentRun,
 } from "../agent";
-import { entryKindLabel, roleLabel, teamTotals, type TeamRunDetail } from "../agentTeam";
+import { canCancelTeamRun, entryKindLabel, roleLabel, teamTotals, type TeamRunDetail } from "../agentTeam";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
 import { errorText } from "../types";
@@ -56,7 +55,7 @@ export default function TeamRunDetailPage() {
         {run.error_code && (
           <p className="text-sm text-wine-700">{run.error_code}：{run.error_message}</p>
         )}
-        {me && canCancelRun(run, me) && (
+        {me && canCancelTeamRun(run, me) && (
           <div>
             <button
               type="button"
