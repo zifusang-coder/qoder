@@ -68,6 +68,10 @@ export interface AgentRun {
   >;
   /** 后端 `RunOut` 目前不序列化该字段，因此线上可能缺省。 */
   step_count?: number;
+  /** 团队子运行携带的角色；单 Agent 运行缺省。 */
+  role?: string;
+  /** 团队子运行指向父运行 id；单 Agent 运行为 null 或缺省。 */
+  parent_run_id?: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
