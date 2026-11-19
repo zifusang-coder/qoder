@@ -19,6 +19,7 @@ from app.agent.runtime import (
     _heartbeat_loop,
     run_agent,
 )
+from app.agent.sanitize import fit_bytes
 from app.agent.team_contracts import (
     critic_task,
     lead_messages,
@@ -239,16 +240,22 @@ async def _park_parent(session, run) -> None:
     await session.commit()
 
 
-async def _lead_decide(session, run, *, gateway, settings, state, participants):
+async def _lead_decide(session, run, *, gateway, settings, state, participants,
+                       planner_max_tokens: int):
     entries = render_entries(
         await recent_entries(session, run.id, settings.agent_team_blackboard_inject)
     )
+    # Lead 提示词预算：按 1 token ≈ 1 字节保守估计（CJK UTF-8），黑板注入
+    # 总量不得超过 planner 单次决策预算；completion 同样受其约束。
+    entries, _ = fit_bytes(entries, planner_max_tokens)
     messages = lead_messages(
         goal=run.goal, participants=participants, entries=entries,
         state=state, budget=_budget_of(run, settings),
     )
     for _attempt in range(2):
-        text = await gateway.complete(messages, temperature=0.2, max_tokens=800)
+        text = await gateway.complete(
+            messages, temperature=0.2, max_tokens=min(800, planner_max_tokens)
+        )
         usage = dict(run.usage or {})
         last = getattr(gateway, "last_usage", None)
         usage["prompt_tokens"] = int(usage.get("prompt_tokens") or 0) + int(
@@ -572,6 +579,7 @@ async def _team_loop(session, run, *, gateway, tool_registry, skill_registry,
         decision = await _lead_decide(
             session, run, gateway=gateway, settings=settings,
             state=state, participants=participants,
+            planner_max_tokens=roles["planner"].budget["max_tokens"],
         )
         state["turn"] = int(state.get("turn", 0)) + 1
         _save_state(run, state)

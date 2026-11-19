@@ -95,9 +95,11 @@ class ScriptedGateway:
         self.script = list(script)
         self.last_usage = Usage(10, 5)
         self.complete_calls = []
+        self.complete_kwargs = []
 
     async def complete(self, messages, **kwargs):
         self.complete_calls.append(messages)
+        self.complete_kwargs.append(kwargs)
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -519,3 +521,93 @@ async def test_cancel_team_run_persists_without_children_and_audit(
         row = await fresh.get(AgentRun, parent_id)
         assert row is not None
         assert row.status == "cancelled"
+
+
+async def _narrow_planner(env, max_tokens=500):
+    from app.agent.roles import ROLES
+    from app.models.agent import AgentTeamRole
+    spec = ROLES["planner"]
+    env.session.add(AgentTeamRole(
+        tenant_id=DEFAULT_TENANT_ID, role="planner", enabled=True,
+        tools=list(spec.tools),
+        budget={**spec.budget, "max_tokens": max_tokens},
+    ))
+    await env.session.commit()
+
+
+@pytest.mark.asyncio
+async def test_lead_completion_capped_by_planner_budget(team_env):
+    from app.agent.team import run_team
+
+    await _narrow_planner(team_env, max_tokens=500)
+    parent = await make_parent(team_env)
+    gateway = ScriptedGateway([lead("finalize", summary="已交付")])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    assert gateway.complete_kwargs[0]["max_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_lead_board_injection_bounded(team_env):
+    import json as _json
+
+    from app.agent.blackboard import append_entry
+    from app.agent.team import run_team
+
+    await _narrow_planner(team_env, max_tokens=500)
+    parent = await make_parent(team_env)
+    for i in range(12):
+        await append_entry(
+            team_env.session, run=parent, kind="result", role="creator",
+            content={"text": f"第{i}段" + "长" * 2000},
+        )
+    await team_env.session.commit()
+    gateway = ScriptedGateway([lead("finalize", summary="已交付")])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "succeeded"
+    user = gateway.complete_calls[0][1]["content"]
+    # 黑板注入按 planner 预算（500） fit_bytes；整条 user 消息远小于未截断的 ~48KB。
+    assert len(user.encode()) < 2000
+    board = user.split("黑板（最近条目）：", 1)[1].split("\n请输出", 1)[0]
+    assert len(board.encode()) <= 500
+    assert _json.loads(board) == [] or isinstance(_json.loads(board), list)
+
+
+@pytest.mark.asyncio
+async def test_token_budget_exhausted(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, budget={
+        "max_tokens": 10, "max_tool_calls": 40,
+        "max_turns": 12, "max_seconds": 900,
+    })
+    gateway = ScriptedGateway([
+        lead("delegate", role="scout", task="调研"),
+        role_turn("完成"),
+    ])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "team_budget_exhausted"
+    assert "token" in parent.error_message
+
+
+@pytest.mark.asyncio
+async def test_tool_call_budget_exhausted(team_env):
+    from app.agent.team import run_team
+
+    parent = await make_parent(team_env, budget={
+        "max_tokens": 120000, "max_tool_calls": 1,
+        "max_turns": 12, "max_seconds": 900,
+    })
+    parent.usage = {"prompt_tokens": 0, "completion_tokens": 0, "tool_calls": 2}
+    await team_env.session.commit()
+    gateway = ScriptedGateway([])
+    await run_team(team_env.session, parent, **deps(team_env, gateway))
+    await team_env.session.refresh(parent)
+    assert parent.status == "failed"
+    assert parent.error_code == "team_budget_exhausted"
+    assert "工具调用" in parent.error_message
+    assert gateway.complete_calls == []
