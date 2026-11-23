@@ -1,15 +1,18 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 import jsonschema
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, StringConstraints
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
 from app.errors import AppError
 from app.llm.gateway import load_gateway_default
+from app.models.chat import ChatConversation, ChatMessage
 from app.models.user import User
 from app.permissions import editor_access
 from app.services.outputs import (
@@ -44,6 +47,7 @@ class ChatIn(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)
     ]
     profile_id: uuid.UUID | None = None
+    conversation_id: uuid.UUID | None = None
     inputs: dict | None = None
 
 
@@ -54,6 +58,182 @@ class ChatOut(BaseModel):
     run_id: str | None = None
     data: dict | None = None
     missing: list[str] | None = None
+    conversation_id: str | None = None
+
+
+class ConversationOut(BaseModel):
+    id: uuid.UUID
+    title: str
+    profile_id: uuid.UUID | None = None
+    updated_at: datetime
+
+
+class ConversationList(BaseModel):
+    items: list[ConversationOut]
+
+
+class ChatMessageOut(BaseModel):
+    id: uuid.UUID
+    role: str
+    content: str
+    intent: str | None = None
+    skill_id: str | None = None
+    run_id: str | None = None
+    data: dict | None = None
+    missing: list[str] | None = None
+    created_at: datetime
+
+
+class ConversationDetail(ConversationOut):
+    messages: list[ChatMessageOut]
+
+
+HISTORY_LIMIT = 10
+
+
+async def _owned_conversation(
+    session: AsyncSession, conversation_id: uuid.UUID, user: User
+) -> ChatConversation:
+    conversation = (
+        await session.execute(
+            select(ChatConversation).where(
+                ChatConversation.id == conversation_id,
+                ChatConversation.tenant_id == user.tenant_id,
+                ChatConversation.user_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if conversation is None:
+        raise AppError("not_found", "对话不存在", 404)
+    return conversation
+
+
+async def _history(session: AsyncSession, conversation_id: uuid.UUID) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation_id)
+            .order_by(ChatMessage.seq.desc())
+            .limit(HISTORY_LIMIT)
+        )
+    ).scalars()
+    return [{"role": row.role, "content": row.content} for row in reversed(list(rows))]
+
+
+async def _last_seq(session: AsyncSession, conversation_id: uuid.UUID) -> int:
+    value = await session.scalar(
+        select(func.max(ChatMessage.seq)).where(
+            ChatMessage.conversation_id == conversation_id
+        )
+    )
+    return value or 0
+
+
+def _add_message(
+    session: AsyncSession,
+    conversation: ChatConversation,
+    *,
+    seq: int,
+    role: str,
+    content: str,
+    intent: str | None = None,
+    skill_id: str | None = None,
+    run_id: str | None = None,
+    data: dict | None = None,
+    missing: list[str] | None = None,
+) -> ChatMessage:
+    message = ChatMessage(
+        tenant_id=conversation.tenant_id,
+        conversation_id=conversation.id,
+        seq=seq,
+        role=role,
+        content=content,
+        intent=intent,
+        skill_id=skill_id,
+        run_id=run_id,
+        data=data,
+        missing=missing,
+    )
+    session.add(message)
+    conversation.updated_at = datetime.now(UTC)
+    return message
+
+
+@router.get("/conversations", response_model=ConversationList)
+async def list_conversations(
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ConversationList:
+    rows = (
+        await session.execute(
+            select(ChatConversation)
+            .where(
+                ChatConversation.tenant_id == user.tenant_id,
+                ChatConversation.user_id == user.id,
+            )
+            .order_by(ChatConversation.updated_at.desc())
+            .limit(50)
+        )
+    ).scalars()
+    return ConversationList(
+        items=[
+            ConversationOut(
+                id=row.id,
+                title=row.title,
+                profile_id=row.profile_id,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ]
+    )
+
+
+@router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
+async def get_conversation(
+    conversation_id: uuid.UUID,
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> ConversationDetail:
+    conversation = await _owned_conversation(session, conversation_id, user)
+    rows = (
+        await session.execute(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == conversation.id)
+            .order_by(ChatMessage.seq)
+        )
+    ).scalars()
+    return ConversationDetail(
+        id=conversation.id,
+        title=conversation.title,
+        profile_id=conversation.profile_id,
+        updated_at=conversation.updated_at,
+        messages=[
+            ChatMessageOut(
+                id=row.id,
+                role=row.role,
+                content=row.content,
+                intent=row.intent,
+                skill_id=row.skill_id,
+                run_id=row.run_id,
+                data=row.data,
+                missing=row.missing,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    conversation = await _owned_conversation(session, conversation_id, user)
+    await session.delete(conversation)
+    await session.commit()
+    return Response(status_code=204)
 
 
 def _score_value(data: dict) -> str | None:
@@ -137,13 +317,51 @@ async def chat(
     settings = get_settings()
     output_dir = str(adhoc_output_dir(user.tenant_id))
     intent = route_intent(payload.message, output_dir=output_dir)
-    if intent.kind == "chat":
-        profile_block = await profile_block_for(
-            session,
-            payload.profile_id,
-            user.tenant_id,
-            query=payload.message,
+
+    conversation: ChatConversation | None = None
+    history: list[dict] = []
+    if payload.conversation_id is not None:
+        conversation = await _owned_conversation(
+            session, payload.conversation_id, user
         )
+        history = await _history(session, conversation.id)
+
+    profile_id = payload.profile_id
+    if profile_id is None and conversation is not None:
+        profile_id = conversation.profile_id
+    # 画像校验放在落库之前，未知画像不应留下空对话
+    profile_block = await profile_block_for(
+        session,
+        profile_id,
+        user.tenant_id,
+        query=payload.message,
+    )
+
+    if conversation is None:
+        conversation = ChatConversation(
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            title=payload.message.splitlines()[0][:100],
+            profile_id=payload.profile_id,
+        )
+        session.add(conversation)
+        await session.flush()
+        seq = 0
+    else:
+        if payload.profile_id is not None:
+            conversation.profile_id = payload.profile_id
+        seq = await _last_seq(session, conversation.id)
+    conversation_id = str(conversation.id)
+
+    _add_message(
+        session,
+        conversation,
+        seq=seq + 1,
+        role="user",
+        content=payload.message,
+    )
+
+    if intent.kind == "chat":
         system_prompt = (
             f"{SYSTEM_CHAT}\n\n{profile_block}" if profile_block else SYSTEM_CHAT
         )
@@ -151,12 +369,22 @@ async def chat(
         reply = await gateway.complete(
             [
                 {"role": "system", "content": system_prompt},
+                *history,
                 {"role": "user", "content": payload.message},
             ],
             tier="standard",
             temperature=0.6,
         )
-        return ChatOut(reply=reply, intent="chat")
+        _add_message(
+            session,
+            conversation,
+            seq=seq + 2,
+            role="assistant",
+            content=reply,
+            intent="chat",
+        )
+        await session.commit()
+        return ChatOut(reply=reply, intent="chat", conversation_id=conversation_id)
 
     skill_id = intent.skill_id or ""
     try:
@@ -173,26 +401,33 @@ async def chat(
         for key in skill.manifest.inputs.get("required", [])
         if key not in inputs or _is_blank(inputs[key])
     ]
-    profile_block = await profile_block_for(
-        session,
-        payload.profile_id,
-        user.tenant_id,
-        query=payload.message,
-    )
     if missing:
         labels = []
         for key in missing:
             spec = declared.get(key)
             desc = spec.get("description") if isinstance(spec, dict) else None
             labels.append(f"{key}（{desc}）" if desc else key)
-        return ChatOut(
-            reply=(
-                f"要执行「{skill.manifest.name}」，还需要：{'、'.join(labels)}。"
-                "请通过 inputs 补充后重试。"
-            ),
+        reply = (
+            f"要执行「{skill.manifest.name}」，还需要：{'、'.join(labels)}。"
+            "请通过 inputs 补充后重试。"
+        )
+        _add_message(
+            session,
+            conversation,
+            seq=seq + 2,
+            role="assistant",
+            content=reply,
             intent="skill",
             skill_id=skill_id,
             missing=missing,
+        )
+        await session.commit()
+        return ChatOut(
+            reply=reply,
+            intent="skill",
+            skill_id=skill_id,
+            missing=missing,
+            conversation_id=conversation_id,
         )
     try:
         jsonschema.validate(inputs, skill.manifest.inputs)
@@ -224,10 +459,23 @@ async def chat(
 
     data = public_output_data(result.data, settings.outputs_dir)
     reply = result.text if data is None else _summarize(data)
+    _add_message(
+        session,
+        conversation,
+        seq=seq + 2,
+        role="assistant",
+        content=reply,
+        intent="skill",
+        skill_id=skill_id,
+        run_id=str(result.run_id),
+        data=data,
+    )
+    await session.commit()
     return ChatOut(
         reply=reply,
         intent="skill",
         skill_id=skill_id,
         run_id=result.run_id,
         data=data,
+        conversation_id=conversation_id,
     )

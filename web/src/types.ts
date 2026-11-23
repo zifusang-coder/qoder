@@ -218,6 +218,34 @@ export interface ChatOut {
   run_id?: string | null;
   data?: Record<string, unknown> | null;
   missing?: string[] | null;
+  conversation_id?: string | null;
+}
+
+export interface ChatConversation {
+  id: string;
+  title: string;
+  profile_id?: string | null;
+  updated_at: string;
+}
+
+export interface ChatConversationList {
+  items: ChatConversation[];
+}
+
+export interface ChatMessageItem {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  intent?: string | null;
+  skill_id?: string | null;
+  run_id?: string | null;
+  data?: Record<string, unknown> | null;
+  missing?: string[] | null;
+  created_at: string;
+}
+
+export interface ChatConversationDetail extends ChatConversation {
+  messages: ChatMessageItem[];
 }
 
 export interface MediaFile {
