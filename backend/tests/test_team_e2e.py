@@ -68,7 +68,7 @@ async def test_team_reaches_draft_with_real_llm(db_session):
     await _copy_default_provider(db_session, user.tenant_id)
     gateway = await load_gateway_default(db_session, user.tenant_id)
 
-    # 工具集没有 content.create 入口，先种既有项目与内容供 content.create_version 落点。
+    # 本用例固定走 content.create_version 路径，先种既有项目与内容作落点。
     seeded_project = Project(
         tenant_id=user.tenant_id, title="E2E 团队既有项目", topic="秋季护肤"
     )

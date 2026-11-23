@@ -243,6 +243,7 @@ class ToolResult:
 | read | `publish.job.list` / `publish.job.get` | 任务状态 |
 | read | `media.job.get` | 轮询媒体任务 |
 | low | `project.create` | 新建项目 |
+| low | `content.create` | 在项目下新建内容；传 title/body 时同时写入第 1 版 |
 | low | `content.create_version` | 追加内容版本，不改历史版本 |
 | low | `skill.run` | 复用 SkillExecutor，写技能审计 |
 | low | `media.generate` | 入队媒体任务，返回 job_id |

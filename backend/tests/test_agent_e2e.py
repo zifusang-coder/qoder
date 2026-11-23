@@ -70,7 +70,7 @@ async def test_agent_reaches_draft_with_real_llm(db_session):
     await _copy_default_provider(db_session, user.tenant_id)
     gateway = await load_gateway_default(db_session, user.tenant_id)
 
-    # 工具集没有创建内容的入口（规格只列 15 个工具，不含 content.create），
+    # 本用例固定走 content.create_version 路径，
     # 因此先为租户种一条既有项目与既有内容，让 content.create_version 有落点。
     seeded_project = Project(
         tenant_id=user.tenant_id, title="E2E 既有项目", topic="演示"

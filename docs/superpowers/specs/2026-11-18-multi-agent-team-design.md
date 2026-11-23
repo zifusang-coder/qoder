@@ -47,9 +47,9 @@
 |---|---|---|---|
 | `planner` | Lead：首轮出计划，之后决定派谁、是否返工、何时交付 | `project.get`、`project.list`、`content.get`、`content.list`、`profile.get`、`profile.list`、`platform.capabilities`、`analytics.summary`、`calendar.list`、`publish.job.get`、`publish.job.list` | 12000 / 4 / 4 / 180（按每次 Lead 决策计量） |
 | `scout` | 调研：查画像、历史内容、数据表现与平台能力，产出事实与约束 | `planner` 白名单 + `media.job.get` | 20000 / 8 / 6 / 240 |
-| `creator` | 创作：建项目、写内容版本、跑创作技能、生成媒体 | `project.create`、`project.get`、`project.list`、`content.get`、`content.list`、`content.create_version`、`profile.get`、`profile.list`、`skill.run`、`media.generate`、`media.job.get`、`platform.capabilities` | 40000 / 10 / 8 / 360 |
+| `creator` | 创作：建项目、新建内容、写内容版本、跑创作技能、生成媒体 | `project.create`、`project.get`、`project.list`、`content.get`、`content.list`、`content.create`、`content.create_version`、`profile.get`、`profile.list`、`skill.run`、`media.generate`、`media.job.get`、`platform.capabilities` | 40000 / 10 / 16 / 360 |
 | `critic` | 审稿：只读评审，输出通过/不通过与问题清单 | `content.get`、`content.list`、`platform.capabilities`、`publish.job.get`、`publish.job.list`、`analytics.summary` | 15000 / 4 / 4 / 180 |
-| `publisher` | 交付：建发布草稿并预检；不排期、不发布 | `content.get`、`content.list`、`platform.capabilities`、`publish.create_draft_job`、`publish.precheck`、`publish.job.get`、`publish.job.list` | 12000 / 6 / 5 / 180 |
+| `publisher` | 交付：建发布草稿并预检；不排期、不发布 | `content.get`、`content.list`、`platform.capabilities`、`publish.create_draft_job`、`publish.precheck`、`publish.job.get`、`publish.job.list` | 12000 / 6 / 8 / 180 |
 
 约束：
 

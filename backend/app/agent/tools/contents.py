@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.contracts import ToolContext, ToolResult, ToolSpec
 from app.agent.tools._common import int_arg, owned_content, owned_project, schema
@@ -108,6 +109,111 @@ def _version_result(version: ContentVersion, *, replay: bool) -> ToolResult:
     )
 
 
+def _created_result(
+    content: Content, version: ContentVersion | None, *, replay: bool
+) -> ToolResult:
+    title = content.title or "未命名内容"
+    summary = f"内容已存在：「{title}」" if replay else f"已创建「{title}」"
+    artifact: dict = {"type": "content", "id": str(content.id), "title": title}
+    if version is not None:
+        artifact["version_id"] = str(version.id)
+        artifact["version"] = version.version
+    return ToolResult(
+        summary=summary,
+        data={
+            "content": {
+                "id": str(content.id),
+                "project_id": str(content.project_id),
+                "platform": content.platform,
+                "kind": content.kind,
+                "title": content.title,
+                "current_version": content.current_version,
+                "status": content.status,
+            }
+        },
+        artifacts=[artifact],
+    )
+
+
+async def _created_replay(
+    session: AsyncSession, tenant_id: str, key: str
+) -> ToolResult | None:
+    content = (
+        await session.execute(
+            select(Content).where(
+                Content.tenant_id == tenant_id,
+                Content.meta["agent_key"].as_string() == key,
+            )
+        )
+    ).scalars().first()
+    if content is None:
+        return None
+    version = None
+    if content.current_version:
+        version = (
+            await session.execute(
+                select(ContentVersion).where(
+                    ContentVersion.tenant_id == tenant_id,
+                    ContentVersion.content_id == content.id,
+                    ContentVersion.version == content.current_version,
+                )
+            )
+        ).scalar_one_or_none()
+    return _created_result(content, version, replay=True)
+
+
+async def create_content(ctx: ToolContext, args: dict) -> ToolResult:
+    key = f"{ctx.run_id}:{ctx.step_index}"
+    replayed = await _created_replay(ctx.session, ctx.tenant_id, key)
+    if replayed is not None:
+        return replayed
+    project = await owned_project(
+        ctx.session, ctx.tenant_id, args.get("project_id")
+    )
+    platform = str(args.get("platform") or "").strip()[:32]
+    if not platform:
+        raise AppError("invalid_arguments", "platform 不能为空", 422)
+    kind = str(args.get("kind") or "article").strip()[:32] or "article"
+    title = str(args.get("title") or "").strip()[:300]
+    body = str(args.get("body") or "")
+    content = Content(
+        tenant_id=ctx.tenant_id,
+        project_id=project.id,
+        platform=platform,
+        kind=kind,
+        title=title,
+        current_version=0,
+        meta={"agent_key": key},
+    )
+    ctx.session.add(content)
+    version = None
+    if body or title:
+        await ctx.session.flush()
+        version = ContentVersion(
+            tenant_id=ctx.tenant_id,
+            content_id=content.id,
+            version=1,
+            title=title,
+            body=body,
+            source="agent",
+            meta={"agent_key": key},
+        )
+        ctx.session.add(version)
+        content.current_version = 1
+    try:
+        await ctx.session.commit()
+    except IntegrityError:
+        await ctx.session.rollback()
+        replayed = await _created_replay(ctx.session, ctx.tenant_id, key)
+        if replayed is None:
+            raise AppError("conflict", "内容创建冲突，请重试", 409) from None
+        return replayed
+    await ctx.session.refresh(content)
+    if version is not None:
+        await ctx.session.refresh(version)
+    return _created_result(content, version, replay=False)
+
+
 async def create_version(ctx: ToolContext, args: dict) -> ToolResult:
     key = f"{ctx.run_id}:{ctx.step_index}"
     existing = (
@@ -199,6 +305,22 @@ SPECS = [
         ),
         risk="read",
         handler=get_content,
+    ),
+    ToolSpec(
+        name="content.create",
+        description="在项目下新建内容；传 title/body 时同时写入第 1 版。",
+        input_schema=schema(
+            {
+                "project_id": {"type": "string", "minLength": 1},
+                "platform": {"type": "string", "minLength": 1, "maxLength": 32},
+                "kind": {"type": "string", "minLength": 1, "maxLength": 32},
+                "title": {"type": "string", "maxLength": 300},
+                "body": {"type": "string", "maxLength": 100000},
+            },
+            ("project_id", "platform"),
+        ),
+        risk="low",
+        handler=create_content,
     ),
     ToolSpec(
         name="content.create_version",

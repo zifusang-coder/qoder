@@ -65,17 +65,17 @@ ROLES: dict[str, RoleSpec] = {
         key="creator",
         label="Creator 创作",
         system_prompt=(
-            "你是内容团队的创作角色。建项目、写内容版本、跑创作技能、生成媒体；"
+            "你是内容团队的创作角色。建项目、新建内容、写内容版本、跑创作技能、生成媒体；"
             "发布相关操作只能创建草稿，不能声称已经发布。"
         ),
         tools=(
             "project.create", "project.get", "project.list",
-            "content.get", "content.list", "content.create_version",
+            "content.get", "content.list", "content.create", "content.create_version",
             "profile.get", "profile.list",
             "skill.run", "media.generate", "media.job.get",
             "platform.capabilities",
         ),
-        budget={"max_steps": 8, "max_tokens": 40000, "max_tool_calls": 10, "max_seconds": 360},
+        budget={"max_steps": 16, "max_tokens": 40000, "max_tool_calls": 10, "max_seconds": 360},
         required=True,
     ),
     "critic": RoleSpec(
@@ -102,7 +102,7 @@ ROLES: dict[str, RoleSpec] = {
             "publish.create_draft_job", "publish.precheck",
             "publish.job.get", "publish.job.list",
         ),
-        budget={"max_steps": 5, "max_tokens": 12000, "max_tool_calls": 6, "max_seconds": 180},
+        budget={"max_steps": 8, "max_tokens": 12000, "max_tool_calls": 6, "max_seconds": 180},
     ),
 }
 

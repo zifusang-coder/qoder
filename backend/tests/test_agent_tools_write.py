@@ -111,6 +111,7 @@ async def test_build_registry_has_all_tools():
         "project.create",
         "content.list",
         "content.get",
+        "content.create",
         "content.create_version",
         "calendar.list",
         "analytics.summary",
@@ -239,6 +240,100 @@ async def test_content_create_version_conflict_is_error_clean(db_session, monkey
         {"content_id": str(content_id), "title": "新标题", "body": "新正文"},
     )
     assert retried.data["version"]["version"] == 3
+
+
+async def test_content_create_creates_content_with_first_version(db_session):
+    seeded = await _seed(db_session)
+    ctx = await _ctx(db_session)
+    args = {
+        "project_id": str(seeded["project"].id),
+        "platform": "xiaohongshu",
+        "title": "露营护肤清单",
+        "body": "便携修护清单正文",
+    }
+    first = await _call("content.create", ctx, args)
+    second = await _call("content.create", ctx, args)
+    assert first.data["content"]["id"] == second.data["content"]["id"]
+    contents = (await db_session.execute(select(Content))).scalars().all()
+    new_rows = [row for row in contents if row.id != seeded["content"].id]
+    assert len(new_rows) == 1
+    content = new_rows[0]
+    assert str(content.id) == first.data["content"]["id"]
+    assert content.project_id == seeded["project"].id
+    assert content.platform == "xiaohongshu"
+    assert content.kind == "article"
+    assert content.title == "露营护肤清单"
+    assert content.current_version == 1
+    assert content.status == "draft"
+    versions = (
+        await db_session.execute(
+            select(ContentVersion).where(ContentVersion.content_id == content.id)
+        )
+    ).scalars().all()
+    assert len(versions) == 1
+    version = versions[0]
+    assert version.version == 1
+    assert version.title == "露营护肤清单"
+    assert version.body == "便携修护清单正文"
+    assert version.source == "agent"
+    assert first.data["content"]["current_version"] == 1
+    assert first.artifacts == [
+        {
+            "type": "content",
+            "id": str(content.id),
+            "title": "露营护肤清单",
+            "version_id": str(version.id),
+            "version": 1,
+        }
+    ]
+    assert second.artifacts == first.artifacts
+
+    other_step = await _call(
+        "content.create", await _ctx(db_session, step_index=2), args
+    )
+    assert other_step.data["content"]["id"] != first.data["content"]["id"]
+
+
+async def test_content_create_without_body_creates_empty_content(db_session):
+    seeded = await _seed(db_session)
+    result = await _call(
+        "content.create",
+        await _ctx(db_session),
+        {"project_id": str(seeded["project"].id), "platform": "wechat"},
+    )
+    content = await db_session.get(Content, uuid.UUID(result.data["content"]["id"]))
+    assert content.current_version == 0
+    assert content.title == ""
+    assert (
+        await db_session.execute(
+            select(ContentVersion).where(ContentVersion.content_id == content.id)
+        )
+    ).scalars().all() == []
+    assert result.artifacts == [
+        {"type": "content", "id": str(content.id), "title": "未命名内容"}
+    ]
+
+
+async def test_content_create_requires_platform_and_owned_project(db_session):
+    seeded = await _seed(db_session)
+    with pytest.raises(AppError) as missing:
+        await _call(
+            "content.create",
+            await _ctx(db_session),
+            {"project_id": str(seeded["project"].id), "body": "正文"},
+        )
+    assert missing.value.code == "invalid_arguments"
+    assert missing.value.status == 422
+    with pytest.raises(AppError) as foreign:
+        await _call(
+            "content.create",
+            await _ctx(db_session),
+            {"project_id": str(uuid.uuid4()), "platform": "wechat"},
+        )
+    assert foreign.value.code == "not_found"
+    assert foreign.value.status == 404
+    contents = (await db_session.execute(select(Content))).scalars().all()
+    assert len(contents) == 1
 
 
 async def test_media_generate_enqueues_and_is_idempotent(db_session):
@@ -379,6 +474,7 @@ async def test_get_tool_registry_lists_every_tool_once():
     write_tools = {spec.name for spec in registry.all() if spec.risk != "read"}
     assert write_tools == {
         "project.create",
+        "content.create",
         "content.create_version",
         "media.generate",
         "publish.create_draft_job",
@@ -393,6 +489,7 @@ async def test_get_tool_registry_lists_every_tool_once():
     ("tool", "args", "seed_key"),
     [
         ("content.create_version", "content_id", "content"),
+        ("content.create", "project_id", "project"),
         ("publish.create_draft_job", "content_id", "content"),
         ("project.create", "profile_id", "profile"),
     ],
@@ -404,7 +501,7 @@ async def test_write_tools_cannot_touch_other_tenant_rows(
     payload = {args: str(seeded[seed_key].id)}
     if tool == "content.create_version":
         payload["body"] = "跨租户正文"
-    elif tool == "publish.create_draft_job":
+    elif tool in {"content.create", "publish.create_draft_job"}:
         payload["platform"] = "wechat"
     else:
         payload["title"] = "跨租户项目"
@@ -414,6 +511,7 @@ async def test_write_tools_cannot_touch_other_tenant_rows(
     assert exc.value.status == 404
 
     assert len((await db_session.execute(select(Project))).scalars().all()) == 1
+    assert len((await db_session.execute(select(Content))).scalars().all()) == 1
     assert len((await db_session.execute(select(ContentVersion))).scalars().all()) == 1
     assert (await db_session.execute(select(PublishJob))).scalars().all() == []
 
@@ -455,6 +553,16 @@ async def test_write_tools_stamp_tenant_on_created_rows(db_session):
     ctx = await _ctx(db_session, queue=queue)
     await _call("project.create", ctx, {"title": "本租户项目"})
     await _call(
+        "content.create",
+        await _ctx(db_session, step_index=6, queue=queue),
+        {
+            "project_id": str(seeded["project"].id),
+            "platform": "wechat",
+            "title": "本租户内容",
+            "body": "新内容正文",
+        },
+    )
+    await _call(
         "content.create_version",
         ctx,
         {"content_id": str(seeded["content"].id), "body": "新正文"},
@@ -473,7 +581,7 @@ async def test_write_tools_stamp_tenant_on_created_rows(db_session):
         ctx,
         {"content_id": str(seeded["content"].id), "platform": "wechat"},
     )
-    for model in (Project, ContentVersion, MediaJob, PublishJob):
+    for model in (Project, Content, ContentVersion, MediaJob, PublishJob):
         rows = (await db_session.execute(select(model))).scalars().all()
         assert rows, model.__name__
         assert {row.tenant_id for row in rows} == {TENANT}
@@ -488,6 +596,21 @@ async def test_write_artifact_shape_carries_title(db_session):
         (
             await _call("project.create", ctx, {"title": "选题"}),
             "选题",
+        ),
+        (
+            await _call(
+                "content.create",
+                await _ctx(
+                    db_session, step_index=6, queue=queue, gateway=FakeGateway("生成结果")
+                ),
+                {
+                    "project_id": str(seeded["project"].id),
+                    "platform": "wechat",
+                    "title": "新建内容",
+                    "body": "内容正文",
+                },
+            ),
+            "新建内容",
         ),
         (
             await _call(
