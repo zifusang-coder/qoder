@@ -1,0 +1,25 @@
+id: quality-gate
+name: 文本质检
+version: "0.1.0"
+layer: produce
+description: 检查标题、段落长度、禁忌词与空泛表达，返回结构化质检报告
+inputs:
+  type: object
+  required: [text]
+  properties:
+    text:
+      type: string
+    platform:
+      type: string
+      default: wechat
+context:
+  profile: true
+  references: []
+outputs:
+  format: json
+llm:
+  tier: fast
+  temperature: 0.2
+tools: [llm, script]
+postprocess: scripts/format_check.py
+cost_estimate_tokens: 800

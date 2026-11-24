@@ -1,0 +1,37 @@
+id: short-video
+name: 短视频（测试）
+version: "0.1.0"
+layer: produce
+description: 测试用短视频技能，产出固定文件
+inputs:
+  type: object
+  required: [topic, output_dir]
+  properties:
+    topic:
+      type: string
+    output_dir:
+      type: string
+    platform:
+      type: string
+    duration_seconds:
+      type: integer
+    voice:
+      type: boolean
+    voice_name:
+      type: string
+    theme:
+      type: string
+    instructions:
+      type: string
+context:
+  profile: false
+  references: []
+outputs:
+  format: json
+llm:
+  tier: fast
+  temperature: 0.2
+tools: [llm, script]
+postprocess: scripts/render.py
+postprocess_timeout: 30
+cost_estimate_tokens: 10

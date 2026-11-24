@@ -1,0 +1,21 @@
+id: output-skill
+name: 路径产物技能
+version: "0.1.0"
+layer: produce
+description: 后处理返回 outputs 下的绝对路径，用于验证接口脱敏
+inputs:
+  type: object
+  properties:
+    output_dir:
+      type: string
+context:
+  profile: false
+  references: []
+outputs:
+  format: json
+llm:
+  tier: fast
+  temperature: 0.2
+tools: [llm, script]
+postprocess: scripts/emit_path.py
+cost_estimate_tokens: 100

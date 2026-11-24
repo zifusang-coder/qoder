@@ -1,0 +1,26 @@
+id: xhs-note
+name: 小红书笔记
+version: "0.1.0"
+layer: produce
+description: 生成小红书图文笔记，含标题、正文、标签与配图建议
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic:
+      type: string
+    materials:
+      type: string
+    style:
+      type: string
+      default: 经验分享
+context:
+  profile: true
+  references: []
+outputs:
+  format: markdown
+llm:
+  tier: standard
+  temperature: 0.8
+tools: [llm]
+cost_estimate_tokens: 2000

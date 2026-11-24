@@ -1,0 +1,21 @@
+id: demo-skill
+name: 演示技能
+version: "0.1.0"
+layer: produce
+description: 用于测试的最小技能
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic:
+      type: string
+context:
+  profile: true
+  references: []
+outputs:
+  format: markdown
+llm:
+  tier: fast
+  temperature: 0.5
+tools: [llm]
+cost_estimate_tokens: 800

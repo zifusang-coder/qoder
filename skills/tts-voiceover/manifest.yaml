@@ -1,0 +1,57 @@
+id: tts-voiceover
+name: 口播配音
+version: "0.1.0"
+layer: produce
+description: 将口播稿合成为 MP3 与 SRT 字幕，供短视频、播客或图文配音使用
+inputs:
+  type: object
+  required: [text, output_dir]
+  properties:
+    text:
+      type: string
+      description: 口播稿，最多 2000 字
+    output_dir:
+      type: string
+      description: 项目产物目录，必须位于 outputs 下
+    title:
+      type: string
+      description: 配音标题，可留空
+    voice_name:
+      type: string
+      enum:
+        - zh-CN-XiaoxiaoNeural
+        - zh-CN-XiaoyiNeural
+        - zh-CN-YunxiNeural
+        - zh-CN-YunyangNeural
+        - zh-CN-YunjianNeural
+        - zh-HK-HiuMaanNeural
+        - zh-TW-HsiaoChenNeural
+      default: zh-CN-XiaoxiaoNeural
+    rate:
+      type: string
+      pattern: "^[+-][0-9]{1,2}%$"
+      default: "+0%"
+      description: 语速，如 +10% 或 -5%
+    instructions:
+      type: string
+      description: 额外语气或断句要求，可留空
+context:
+  profile: false
+  references: []
+outputs:
+  format: json
+  schema:
+    type: object
+    required: [narration]
+    properties:
+      title:
+        type: string
+      narration:
+        type: string
+llm:
+  tier: fast
+  temperature: 0.3
+tools: [llm, script]
+postprocess: scripts/render_voiceover.py
+postprocess_timeout: 180
+cost_estimate_tokens: 500

@@ -1,0 +1,45 @@
+id: title-hook
+name: 标题与钩子
+version: "0.1.0"
+layer: produce
+description: 为一个内容主题生成多个平台化标题并标注适用理由
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic:
+      type: string
+    platform:
+      type: string
+      default: wechat
+    count:
+      type: integer
+      default: 8
+context:
+  profile: true
+  references: []
+outputs:
+  format: json
+  schema:
+    type: object
+    required: [titles]
+    properties:
+      titles:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          required: [text, style, reason]
+          properties:
+            text:
+              type: string
+            style:
+              type: string
+              enum: [信息型, 故事型, 反常识型, 清单型]
+            reason:
+              type: string
+llm:
+  tier: fast
+  temperature: 0.9
+tools: [llm]
+cost_estimate_tokens: 800

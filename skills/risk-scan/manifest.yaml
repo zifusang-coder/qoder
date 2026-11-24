@@ -1,0 +1,25 @@
+id: risk-scan
+name: 风险扫描
+version: "0.1.0"
+layer: publish
+description: 扫描广告法禁用词、绝对化表述与平台高风险词，定位到字符位置
+inputs:
+  type: object
+  required: [text]
+  properties:
+    text:
+      type: string
+    platform:
+      type: string
+      default: wechat
+context:
+  profile: true
+  references: [words.txt]
+outputs:
+  format: json
+llm:
+  tier: fast
+  temperature: 0.1
+tools: [llm, script]
+postprocess: scripts/keyword_scan.py
+cost_estimate_tokens: 600
