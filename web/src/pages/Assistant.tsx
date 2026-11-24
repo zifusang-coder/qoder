@@ -215,7 +215,7 @@ export default function Assistant() {
             <button
               type="button"
               className={`flex-1 rounded-md px-2 py-1 ${
-                tab === "single" ? "bg-sage-50 text-sage-700" : "text-ink-500"
+                tab === "single" ? "bg-brand-50 text-brand-700" : "text-ink-500"
               }`}
               onClick={() => setTab("single")}
             >
@@ -224,7 +224,7 @@ export default function Assistant() {
             <button
               type="button"
               className={`flex-1 rounded-md px-2 py-1 ${
-                tab === "team" ? "bg-sage-50 text-sage-700" : "text-ink-500"
+                tab === "team" ? "bg-brand-50 text-brand-700" : "text-ink-500"
               }`}
               onClick={() => setTab("team")}
             >
@@ -287,7 +287,7 @@ export default function Assistant() {
                       {config?.label ?? roleLabel(role)}
                       {locked && <span className="text-xs text-ink-500">（必选）</span>}
                       {config && !config.enabled && (
-                        <span className="text-xs text-wine-600">（已关闭）</span>
+                        <span className="text-xs text-coral-600">（已关闭）</span>
                       )}
                     </label>
                   );
@@ -317,7 +317,7 @@ export default function Assistant() {
                   ))}
                 </div>
               </details>
-              {teamError && <p className="text-sm text-wine-600">{teamError}</p>}
+              {teamError && <p className="text-sm text-coral-600">{teamError}</p>}
               <div className="flex items-center justify-between">
                 <span className="text-xs text-ink-500">{teamGoal.length}/4000</span>
                 <button
@@ -334,7 +334,7 @@ export default function Assistant() {
         </section>
       )}
 
-      {error && <p className="text-sm text-wine-600">{error}</p>}
+      {error && <p className="text-sm text-coral-600">{error}</p>}
 
       <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
         <aside className="card divide-y divide-line">
@@ -352,12 +352,12 @@ export default function Assistant() {
                   : setSelected(item.id)
               }
               className={`block w-full p-3 text-left ${
-                item.id === activeId ? "bg-sage-50" : ""
+                item.id === activeId ? "bg-brand-50" : ""
               }`}
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1">
-                  <span className="badge bg-sage-100 text-sage-700">
+                  <span className="badge bg-brand-100 text-brand-700">
                     {agentStatusLabel(item.status)}
                   </span>
                   {item.mode === "team" && (
@@ -370,7 +370,7 @@ export default function Assistant() {
               </div>
               <p className="mt-1 line-clamp-2 text-sm">{firstLine(item.goal)}</p>
               {item.pending_approval && (
-                <p className="mt-1 text-xs text-wine-600">等待审批</p>
+                <p className="mt-1 text-xs text-coral-600">等待审批</p>
               )}
             </button>
           ))}
@@ -383,7 +383,7 @@ export default function Assistant() {
               <div className="card space-y-3 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h2 className="text-lg font-medium">{firstLine(run.goal, 80)}</h2>
-                  <span className="badge bg-sage-100 text-sage-700">
+                  <span className="badge bg-brand-100 text-brand-700">
                     {agentStatusLabel(run.status)}
                   </span>
                 </div>
@@ -399,7 +399,7 @@ export default function Assistant() {
                   </div>
                 )}
                 {run.error_code && (
-                  <p className="text-sm text-wine-600">
+                  <p className="text-sm text-coral-600">
                     {run.error_message || run.error_code}
                   </p>
                 )}
@@ -445,7 +445,7 @@ export default function Assistant() {
                       </div>
                       <div className="h-2 rounded bg-line">
                         <div
-                          className="h-2 rounded bg-sage-500"
+                          className="h-2 rounded bg-brand-500"
                           style={{ width: `${percent}%` }}
                         />
                       </div>
@@ -455,7 +455,7 @@ export default function Assistant() {
               </div>
 
               {pending && (
-                <div className="card space-y-3 border border-wine-100 bg-wine-50 p-4">
+                <div className="card space-y-3 border border-coral-100 bg-coral-50 p-4">
                   <h3 className="text-sm font-medium">
                     待确认：{pending.tool_name}
                   </h3>
@@ -463,7 +463,7 @@ export default function Assistant() {
                     <p className="text-xs text-ink-500">
                       团队 · {roleLabel(run.role ?? "")}
                       <Link
-                        className="ml-2 text-sage-700 underline"
+                        className="ml-2 text-brand-700 underline"
                         to={`/assistant/teams/${run.parent_run_id}`}
                       >
                         查看团队运行
@@ -553,7 +553,7 @@ export default function Assistant() {
                                     : `${step.duration_ms}ms`}
                                 </span>
                               )}
-                              <span className="badge bg-sage-100 text-sage-700">
+                              <span className="badge bg-brand-100 text-brand-700">
                                 {stepStatusLabel(step.status)}
                               </span>
                             </span>
@@ -562,7 +562,7 @@ export default function Assistant() {
                             <p className="mt-1 text-xs text-ink-700">{summary}</p>
                           )}
                           {step.error && (
-                            <p className="mt-1 text-xs text-wine-600">{step.error}</p>
+                            <p className="mt-1 text-xs text-coral-600">{step.error}</p>
                           )}
                         </div>
                       );
@@ -585,7 +585,7 @@ export default function Assistant() {
                     {artifacts.map((artifact, index) => (
                       <li key={`${artifact.type}-${artifact.id}-${index}`}>
                         <a
-                          className="text-sm text-sage-700 underline"
+                          className="text-sm text-brand-700 underline"
                           href={artifactLink(artifact)}
                         >
                           {artifactLabel(artifact.type ?? "")}

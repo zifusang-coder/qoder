@@ -11,10 +11,10 @@ function WorkflowNodeView({ data, selected }: NodeProps) {
     <div
       className={[
         "relative min-w-[150px] rounded-lg border bg-surface px-3 py-2 text-xs shadow-sm",
-        selected ? "border-sage-500 ring-2 ring-sage-100" : "border-line",
+        selected ? "border-brand-500 ring-2 ring-brand-100" : "border-line",
         status === "skipped" ? "opacity-50" : "",
-        status === "running" ? "border-sage-500" : "",
-        status === "error" || status === "denied" ? "border-wine-500" : "",
+        status === "running" ? "border-brand-500" : "",
+        status === "error" || status === "denied" ? "border-coral-500" : "",
       ]
         .filter(Boolean)
         .join(" ")}
@@ -39,8 +39,8 @@ function WorkflowNodeView({ data, selected }: NodeProps) {
             position={Position.Right}
             style={{ top: "70%" }}
           />
-          <span className="absolute right-1 top-[22%] text-[9px] text-sage-700">是</span>
-          <span className="absolute right-1 top-[57%] text-[9px] text-wine-700">否</span>
+          <span className="absolute right-1 top-[22%] text-[9px] text-brand-700">是</span>
+          <span className="absolute right-1 top-[57%] text-[9px] text-coral-700">否</span>
         </>
       ) : (
         kind !== "output" && <Handle type="source" position={Position.Right} />

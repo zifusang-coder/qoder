@@ -21,22 +21,22 @@ const MAX_VISIBLE = 3;
 
 function itemTone(status: string): string {
   if (status === "published") {
-    return "border-sage-100 bg-sage-50 text-sage-600";
+    return "border-mint-100 bg-mint-50 text-mint-700";
   }
   if (
     status === "precheck_failed" ||
     status === "export_failed" ||
     status === "publish_failed"
   ) {
-    return "border-wine-100 bg-wine-50 text-wine-600";
+    return "border-coral-100 bg-coral-50 text-coral-600";
   }
   if (status === "awaiting_review" || status === "approved") {
-    return "border-wine-100 bg-wine-50 text-warm-600";
+    return "border-honey-100 bg-honey-50 text-honey-700";
   }
   if (status === "exported") {
-    return "border-sage-100 bg-sage-50 text-sage-700";
+    return "border-brand-100 bg-brand-50 text-brand-700";
   }
-  return "border-sage-100 bg-sage-50 text-sage-700";
+  return "border-brand-100 bg-brand-50 text-brand-700";
 }
 
 function itemTime(item: CalendarItem): string {
@@ -104,7 +104,7 @@ export default function Calendar() {
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <button
             type="button"
-            className="whitespace-nowrap rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
+            className="whitespace-nowrap rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-brand-50"
             onClick={() => shift(-1)}
           >
             上个月
@@ -114,14 +114,14 @@ export default function Calendar() {
           </span>
           <button
             type="button"
-            className="whitespace-nowrap rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-sage-50"
+            className="whitespace-nowrap rounded border border-line px-3 py-1.5 text-ink-700 hover:bg-brand-50"
             onClick={() => shift(1)}
           >
             下个月
           </button>
           <button
             type="button"
-            className="whitespace-nowrap rounded px-2 py-1.5 text-sage-700 hover:underline"
+            className="whitespace-nowrap rounded px-2 py-1.5 text-brand-700 hover:underline"
             onClick={() =>
               setCursor({
                 year: now.getFullYear(),
@@ -143,18 +143,18 @@ export default function Calendar() {
           已发布 <strong className="text-ink-700">{publishedCount}</strong> 项
         </span>
         <span className="flex items-center gap-1">
-          <i className="h-2 w-2 rounded-full bg-sage-600" /> 已发布
+          <i className="h-2 w-2 rounded-full bg-brand-600" /> 已发布
         </span>
         <span className="flex items-center gap-1">
-          <i className="h-2 w-2 rounded-full bg-warm-600" /> 待审核/已通过
+          <i className="h-2 w-2 rounded-full bg-honey-600" /> 待审核/已通过
         </span>
         <span className="flex items-center gap-1">
-          <i className="h-2 w-2 rounded-full bg-wine-500" /> 失败
+          <i className="h-2 w-2 rounded-full bg-coral-500" /> 失败
         </span>
       </div>
 
       {calendar.isError && (
-        <p className="rounded border border-wine-100 bg-wine-50 px-3 py-2 text-sm text-wine-600">
+        <p className="rounded border border-coral-100 bg-coral-50 px-3 py-2 text-sm text-coral-600">
           {errorText(calendar.error)}
         </p>
       )}
@@ -182,14 +182,14 @@ export default function Calendar() {
               <span
                 className={
                   cell.isToday
-                    ? "rounded-full bg-sage-600 px-1.5 py-0.5 font-semibold text-white"
+                    ? "rounded-full bg-brand-600 px-1.5 py-0.5 font-semibold text-white"
                     : ""
                 }
               >
                 {cell.date.getDate()}
               </span>
               {cell.isToday && (
-                <span className="text-[10px] text-sage-700">今天</span>
+                <span className="text-[10px] text-brand-700">今天</span>
               )}
             </div>
             <div className="space-y-1">
@@ -216,7 +216,7 @@ export default function Calendar() {
             >
               <p
                 className={`mb-2 text-xs ${
-                  cell.isToday ? "text-sage-700" : "text-ink-500"
+                  cell.isToday ? "text-brand-700" : "text-ink-500"
                 }`}
               >
                 {cell.date.getMonth() + 1} 月 {cell.date.getDate()} 日

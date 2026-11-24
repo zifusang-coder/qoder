@@ -134,7 +134,7 @@ export default function Audit() {
 
       {logs.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {logs.isError && (
-        <p className="text-sm text-wine-600">{errorText(logs.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(logs.error)}</p>
       )}
       {logs.isSuccess && logs.data.items.length === 0 && (
         <p className="text-sm text-ink-500">没有匹配的审计记录。</p>
@@ -173,8 +173,8 @@ export default function Audit() {
                   <td
                     className={`px-4 py-3 ${
                       row.status === "success"
-                        ? "text-sage-600"
-                        : "text-wine-600"
+                        ? "text-brand-600"
+                        : "text-coral-600"
                     }`}
                   >
                     {auditStatusLabel(row.status)}
@@ -190,7 +190,7 @@ export default function Audit() {
                       <span className="text-ink-500">—</span>
                     ) : (
                       <details>
-                        <summary className="cursor-pointer text-sage-700">
+                        <summary className="cursor-pointer text-brand-700">
                           查看
                         </summary>
                         <pre className="mt-2 max-w-md overflow-x-auto rounded bg-paper p-2 text-xs text-ink-700">

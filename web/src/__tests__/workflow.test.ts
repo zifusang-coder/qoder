@@ -236,8 +236,8 @@ describe("标签与状态", () => {
     expect(nodeStatusLabel("ok")).toBe("成功");
     expect(nodeStatusLabel("skipped")).toBe("已跳过");
     expect(nodeStatusLabel("mystery")).toBe("mystery");
-    expect(nodeStatusBadge("error")).toContain("wine");
-    expect(nodeStatusBadge("running")).toContain("sage");
+    expect(nodeStatusBadge("error")).toContain("coral");
+    expect(nodeStatusBadge("running")).toContain("mint");
   });
 
   it("运行状态、触发方式与审批来源", () => {
@@ -466,9 +466,9 @@ describe("运行状态汇总", () => {
       { node_id: "b", attempt: 1, status: "skipped" },
     ] as never;
     expect(latestNodeStatuses(runs)).toEqual({ a: "ok", b: "skipped" });
-    expect(runStatusBadge("succeeded")).toContain("sage");
-    expect(runStatusBadge("failed")).toContain("wine");
-    expect(runStatusBadge("waiting_approval")).toContain("sage-100");
-    expect(nodeStatusBadge("waiting")).toContain("warm");
+    expect(runStatusBadge("succeeded")).toContain("mint");
+    expect(runStatusBadge("failed")).toContain("coral");
+    expect(runStatusBadge("waiting_approval")).toContain("honey");
+    expect(nodeStatusBadge("waiting")).toContain("honey");
   });
 });

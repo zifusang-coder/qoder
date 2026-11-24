@@ -39,12 +39,12 @@ function statusLabel(status: string): string {
 
 function capabilityClass(capability: string): string {
   if (capability === "auto_publish") {
-    return "bg-sage-50 text-sage-700";
+    return "bg-mint-50 text-mint-700";
   }
   if (capability === "manual_export") {
-    return "bg-sage-50 text-ink-700";
+    return "bg-brand-50 text-brand-700";
   }
-  return "bg-sage-50 text-ink-500";
+  return "bg-brand-50 text-ink-500";
 }
 
 function credentialPayload(
@@ -445,8 +445,8 @@ export default function Accounts() {
               <p
                 className={
                   message.kind === "ok"
-                    ? "text-sm text-sage-600"
-                    : "text-sm text-wine-600"
+                    ? "text-sm text-brand-600"
+                    : "text-sm text-coral-600"
                 }
               >
                 {message.text}
@@ -467,7 +467,7 @@ export default function Accounts() {
             <p className="text-sm text-ink-500">加载中…</p>
           )}
           {accounts.isError && (
-            <p className="text-sm text-wine-600">
+            <p className="text-sm text-coral-600">
               {errorText(accounts.error)}
             </p>
           )}
@@ -513,7 +513,7 @@ export default function Accounts() {
                       <span
                         className={
                           active
-                            ? "text-xs text-sage-600"
+                            ? "text-xs text-brand-600"
                             : "text-xs text-ink-500"
                         }
                       >
@@ -560,11 +560,11 @@ export default function Accounts() {
                           </button>
                         )}
                         {revokingId === account.id ? (
-                          <span className="flex flex-wrap items-center gap-2 rounded border border-wine-100 px-3 py-1.5 text-sm text-wine-600">
+                          <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-3 py-1.5 text-sm text-coral-600">
                             停用后凭据销毁且无法恢复
                             <button
                               type="button"
-                              className="rounded bg-wine-600 px-2 py-1 text-xs font-medium text-white hover:bg-wine-700 disabled:opacity-50"
+                              className="rounded bg-coral-600 px-2 py-1 text-xs font-medium text-white hover:bg-coral-700 disabled:opacity-50"
                               disabled={revoke.isPending}
                               onClick={() => revokeAccount(account)}
                             >
@@ -581,7 +581,7 @@ export default function Accounts() {
                         ) : (
                           <button
                             type="button"
-                            className="rounded border border-wine-100 px-3 py-1.5 text-sm text-wine-600 hover:border-wine-100 disabled:opacity-50"
+                            className="rounded border border-coral-100 px-3 py-1.5 text-sm text-coral-600 hover:border-coral-100 disabled:opacity-50"
                             onClick={() => {
                               setRevokingId(account.id);
                               setEditing(null);
@@ -686,8 +686,8 @@ export default function Accounts() {
                       <p
                         className={
                           feedback.kind === "ok"
-                            ? "mt-3 text-sm text-sage-600"
-                            : "mt-3 text-sm text-wine-600"
+                            ? "mt-3 text-sm text-brand-600"
+                            : "mt-3 text-sm text-coral-600"
                         }
                       >
                         {feedback.text}

@@ -100,7 +100,7 @@ export default function Settings() {
     <section className="mx-auto max-w-3xl space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">系统设置</h1>
-        <Link className="text-sm text-sage-700" to="/chat">
+        <Link className="text-sm text-brand-700" to="/chat">
           返回对话
         </Link>
       </div>
@@ -213,7 +213,7 @@ export default function Settings() {
           设为默认提供商
         </label>
         {message && (
-          <p className={messageKind === "ok" ? "text-sm text-sage-600" : "text-sm text-wine-600"}>
+          <p className={messageKind === "ok" ? "text-sm text-brand-600" : "text-sm text-coral-600"}>
             {message}
           </p>
         )}
@@ -225,7 +225,7 @@ export default function Settings() {
         </button>
       </form>
       <Link
-        className="card block p-6 hover:border-sage-500"
+        className="card block p-6 hover:border-brand-500"
         to="/settings/team-roles"
       >
         <span className="block font-medium">协作团队角色配置</span>
@@ -237,7 +237,7 @@ export default function Settings() {
         <h2 className="font-medium">已配置</h2>
         {providers.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
         {providers.isError && (
-          <p className="text-sm text-wine-600">
+          <p className="text-sm text-coral-600">
             {providers.error instanceof Error ? providers.error.message : "加载失败"}
           </p>
         )}
@@ -247,7 +247,7 @@ export default function Settings() {
             <span className="font-medium">{p.name}</span>
             <span className="ml-2 text-ink-500">{p.base_url}</span>
             <span className="ml-2 font-mono text-ink-500">{p.api_key_masked}</span>
-            {p.is_default && <span className="ml-2 text-sage-600">默认</span>}
+            {p.is_default && <span className="ml-2 text-brand-600">默认</span>}
           </div>
         ))}
       </section>

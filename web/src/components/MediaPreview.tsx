@@ -42,7 +42,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
 
   const name = title || mediaFileName(path);
   if (error) {
-    return <p className="text-sm text-wine-600">{error}</p>;
+    return <p className="text-sm text-coral-600">{error}</p>;
   }
   if (kind === "text") {
     return (
@@ -71,7 +71,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
           src={url}
         />
         <a
-          className="text-xs text-sage-700"
+          className="text-xs text-brand-700"
           href={url}
           download={mediaFileName(path)}
         >
@@ -85,7 +85,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
       <div className="space-y-1">
         <audio className="w-full" controls src={url} />
         <a
-          className="text-xs text-sage-700"
+          className="text-xs text-brand-700"
           href={url}
           download={mediaFileName(path)}
         >
@@ -105,7 +105,7 @@ export default function MediaPreview({ projectId, path, title }: Props) {
   }
   return (
     <a
-      className="text-sm text-sage-700"
+      className="text-sm text-brand-700"
       href={url}
       download={mediaFileName(path)}
     >

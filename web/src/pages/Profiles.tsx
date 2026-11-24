@@ -284,7 +284,7 @@ export default function Profiles() {
               />
             </label>
             {(formMessage || createProfile.isError) && (
-              <p className="text-sm text-wine-600">
+              <p className="text-sm text-coral-600">
                 {formMessage || errorText(createProfile.error)}
               </p>
             )}
@@ -303,7 +303,7 @@ export default function Profiles() {
               <p className="text-sm text-ink-500">加载中…</p>
             )}
             {profiles.isError && (
-              <p className="text-sm text-wine-600">
+              <p className="text-sm text-coral-600">
                 {errorText(profiles.error)}
               </p>
             )}
@@ -318,7 +318,7 @@ export default function Profiles() {
                   type="button"
                   className={`w-full rounded border p-3 text-left text-sm ${
                     active
-                      ? "border-sage-500 bg-sage-50"
+                      ? "border-brand-500 bg-brand-50"
                       : "border-line bg-surface hover:border-ink-300"
                   }`}
                   onClick={() => {
@@ -412,7 +412,7 @@ export default function Profiles() {
                 </form>
                 )}
                 {(memoryMessage || addMemory.isError) && (
-                  <p className="text-sm text-wine-600">
+                  <p className="text-sm text-coral-600">
                     {memoryMessage || errorText(addMemory.error)}
                   </p>
                 )}
@@ -420,7 +420,7 @@ export default function Profiles() {
                   <p className="text-sm text-ink-500">加载中…</p>
                 )}
                 {memories.isError && (
-                  <p className="text-sm text-wine-600">
+                  <p className="text-sm text-coral-600">
                     {errorText(memories.error)}
                   </p>
                 )}
@@ -480,7 +480,7 @@ function Chips({ label, values }: { label: string; values: string[] }) {
         {values.map((value, index) => (
           <span
             key={`${value}-${index}`}
-            className="rounded bg-sage-50 px-2 py-0.5 text-xs text-ink-700"
+            className="rounded bg-brand-50 px-2 py-0.5 text-xs text-ink-700"
           >
             {value}
           </span>

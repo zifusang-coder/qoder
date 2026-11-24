@@ -294,7 +294,7 @@ export default function NodeInspector({
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold">{nodeKindLabel(node.type)}节点</h2>
         {!readOnly && (
-          <button className="text-xs text-wine-700" onClick={onDelete} type="button">
+          <button className="text-xs text-coral-700" onClick={onDelete} type="button">
             删除
           </button>
         )}
@@ -320,7 +320,7 @@ export default function NodeInspector({
             <span className="text-xs text-ink-500">入参字段</span>
             {!readOnly && (
               <button
-                className="text-xs text-sage-700"
+                className="text-xs text-brand-700"
                 type="button"
                 onClick={() =>
                   onChange({
@@ -403,7 +403,7 @@ export default function NodeInspector({
                 </label>
                 {!readOnly && (
                   <button
-                    className="ml-auto text-wine-700"
+                    className="ml-auto text-coral-700"
                     type="button"
                     onClick={() =>
                       onChange({

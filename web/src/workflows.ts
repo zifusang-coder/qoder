@@ -33,17 +33,17 @@ const NODE_STATUS_LABELS: Record<string, string> = {
 
 const NODE_STATUS_BADGES: Record<string, string> = {
   queued: "badge bg-line text-ink-500",
-  running: "badge bg-sage-50 text-sage-700",
-  waiting: "badge bg-surface text-warm-600 border border-line",
-  ok: "badge bg-sage-50 text-sage-700",
-  error: "badge bg-wine-50 text-wine-700",
-  denied: "badge bg-wine-50 text-wine-700",
+  running: "badge bg-mint-50 text-mint-700",
+  waiting: "badge bg-honey-50 text-honey-700 border border-honey-100",
+  ok: "badge bg-mint-50 text-mint-700",
+  error: "badge bg-coral-50 text-coral-700",
+  denied: "badge bg-coral-50 text-coral-700",
   skipped: "badge bg-line text-ink-300",
-  interrupted: "badge bg-surface text-warm-600 border border-line",
-  succeeded: "badge bg-sage-50 text-sage-700",
-  failed: "badge bg-wine-50 text-wine-700",
+  interrupted: "badge bg-honey-50 text-honey-700 border border-honey-100",
+  succeeded: "badge bg-mint-50 text-mint-700",
+  failed: "badge bg-coral-50 text-coral-700",
   cancelled: "badge bg-line text-ink-500",
-  waiting_approval: "badge bg-sage-100 text-sage-700",
+  waiting_approval: "badge bg-honey-50 text-honey-700",
 };
 
 const RUN_STATUS_LABELS: Record<string, string> = {

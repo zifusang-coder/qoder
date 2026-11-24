@@ -116,10 +116,10 @@ export default function WorkflowRunDetail() {
   if (detailQuery.isError) {
     return (
       <div className="space-y-3">
-        <Link className="text-sm text-sage-700" to={`/workflows/${id}`}>
+        <Link className="text-sm text-brand-700" to={`/workflows/${id}`}>
           ← 返回工作流
         </Link>
-        <p className="text-sm text-wine-700">{errorText(detailQuery.error)}</p>
+        <p className="text-sm text-coral-700">{errorText(detailQuery.error)}</p>
       </div>
     );
   }
@@ -181,9 +181,9 @@ export default function WorkflowRunDetail() {
         )}
       </header>
 
-      {error && <p className="text-sm text-wine-700">{error}</p>}
+      {error && <p className="text-sm text-coral-700">{error}</p>}
       {run.error_code && (
-        <div className="rounded-lg bg-wine-50 px-3 py-2 text-sm text-wine-700">
+        <div className="rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-700">
           <span className="font-medium">{run.error_code}</span>
           {run.error_message && <span> · {run.error_message}</span>}
         </div>
@@ -205,7 +205,7 @@ export default function WorkflowRunDetail() {
             <p className="text-sm text-ink-500">加载版本图…</p>
           )}
           {graphQuery.isError && (
-            <p className="text-sm text-wine-700">{errorText(graphQuery.error)}</p>
+            <p className="text-sm text-coral-700">{errorText(graphQuery.error)}</p>
           )}
           {artifacts.length > 0 && (
             <section className="card card-pad space-y-2">
@@ -213,7 +213,7 @@ export default function WorkflowRunDetail() {
               <ul className="space-y-1 text-sm">
                 {artifacts.map((artifact, index) => (
                   <li key={`${artifact.type}-${artifact.id ?? index}`}>
-                    <Link className="text-sage-700" to={artifactLink(artifact)}>
+                    <Link className="text-brand-700" to={artifactLink(artifact)}>
                       {artifactLabel(artifact.type ?? "")}
                       {artifact.title ? ` · ${artifact.title}` : ""}
                     </Link>
@@ -266,7 +266,7 @@ export default function WorkflowRunDetail() {
                   <div key={approval.id} className="space-y-2 rounded-lg border border-line p-3">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-medium">{approval.title}</span>
-                      <span className="badge bg-sage-100 text-sage-700">
+                      <span className="badge bg-brand-100 text-brand-700">
                         {approvalSourceLabel(approval.source)}
                       </span>
                     </div>
@@ -347,7 +347,7 @@ export default function WorkflowRunDetail() {
                       </p>
                       {attempt.kind === "team" && attempt.agent_run_id && (
                         <Link
-                          className="text-xs text-sage-700"
+                          className="text-xs text-brand-700"
                           to={`/assistant/teams/${attempt.agent_run_id}`}
                         >
                           查看团队运行

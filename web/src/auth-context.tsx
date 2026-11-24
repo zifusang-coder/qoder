@@ -77,7 +77,7 @@ export function RequireRole({
   const roleOk =
     minRole === undefined || (role !== null && atLeast(role, minRole));
   if (!roleOk || (platformAdmin && !isPlatformAdmin)) {
-    return <p className="text-sm text-wine-600">权限不足，请联系租户管理员。</p>;
+    return <p className="text-sm text-coral-600">权限不足，请联系租户管理员。</p>;
   }
   return <>{children}</>;
 }
@@ -96,8 +96,8 @@ export function ProtectedLayout() {
     (error.code === "tenant_suspended" || error.code === "account_disabled")
   ) {
     return (
-      <main className="mx-auto mt-24 max-w-md rounded-xl border border-wine-100 bg-wine-50 p-8">
-        <h1 className="text-lg font-semibold text-wine-700">无法继续访问</h1>
+      <main className="mx-auto mt-24 max-w-md rounded-xl border border-coral-100 bg-coral-50 p-8">
+        <h1 className="text-lg font-semibold text-coral-700">无法继续访问</h1>
         <p className="mt-2 text-sm text-ink-700">{error.message}</p>
         <button
           type="button"

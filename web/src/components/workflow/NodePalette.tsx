@@ -27,7 +27,7 @@ export default function NodePalette({
         return (
           <button
             key={item.type}
-            className="w-full rounded-lg border border-line bg-white px-3 py-2 text-left hover:border-sage-500 disabled:opacity-40"
+            className="w-full rounded-lg border border-line bg-white px-3 py-2 text-left hover:border-brand-500 disabled:opacity-40"
             disabled={blocked}
             onClick={() => onAdd(item.type)}
             type="button"

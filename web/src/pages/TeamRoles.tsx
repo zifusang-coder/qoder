@@ -50,7 +50,7 @@ export default function TeamRoles() {
 
   if (!me || !canEditTeamRoles(me.role)) {
     return (
-      <p className="text-sm text-wine-700">无权限：仅管理员可配置协作团队角色。</p>
+      <p className="text-sm text-coral-700">无权限：仅管理员可配置协作团队角色。</p>
     );
   }
 
@@ -66,7 +66,7 @@ export default function TeamRoles() {
     <section className="mx-auto max-w-3xl space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">协作团队角色配置</h1>
-        <Link className="text-sm text-sage-700" to="/settings">
+        <Link className="text-sm text-brand-700" to="/settings">
           返回设置
         </Link>
       </div>
@@ -75,7 +75,7 @@ export default function TeamRoles() {
       </p>
       {rolesQuery.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {rolesQuery.isError && (
-        <p className="text-sm text-wine-600">{errorText(rolesQuery.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(rolesQuery.error)}</p>
       )}
       {draft?.map((config) => {
         const locked = LOCKED_ROLES.includes(config.role);
@@ -156,8 +156,8 @@ export default function TeamRoles() {
           </div>
         );
       })}
-      {error && <p className="text-sm text-wine-600">{error}</p>}
-      {message && !error && <p className="text-sm text-sage-600">{message}</p>}
+      {error && <p className="text-sm text-coral-600">{error}</p>}
+      {message && !error && <p className="text-sm text-brand-600">{message}</p>}
       <button
         className="btn-primary"
         disabled={!draft || save.isPending}

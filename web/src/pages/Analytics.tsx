@@ -151,7 +151,7 @@ export default function Analytics() {
           <span>导入 CSV</span>
           <div className="flex min-w-0 items-center gap-2">
             <input
-              className="min-w-0 flex-1 text-sm text-ink-700 file:mr-3 file:rounded file:border-0 file:bg-sage-50 file:px-3 file:py-1.5 file:text-ink-700"
+              className="min-w-0 flex-1 text-sm text-ink-700 file:mr-3 file:rounded file:border-0 file:bg-brand-50 file:px-3 file:py-1.5 file:text-ink-700"
               type="file"
               accept=".csv"
               aria-label="导入 CSV 文件"
@@ -174,12 +174,12 @@ export default function Analytics() {
       </div>
 
       {projects.isError && (
-        <p className="text-sm text-wine-600">{errorText(projects.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(projects.error)}</p>
       )}
       {projects.isSuccess && projects.data.items.length === 0 && (
         <p className="card p-6 text-sm text-ink-500">
           还没有项目，请先
-          <Link className="ml-1 text-sage-700" to="/projects">
+          <Link className="ml-1 text-brand-700" to="/projects">
             创建项目
           </Link>
           。
@@ -190,17 +190,17 @@ export default function Analytics() {
         <p
           className={`text-sm ${
             importNotice.kind === "ok"
-              ? "text-sage-600"
+              ? "text-brand-600"
               : importNotice.kind === "warn"
-                ? "text-warm-600"
-                : "text-wine-600"
+                ? "text-honey-600"
+                : "text-coral-600"
           }`}
         >
           {importNotice.text}
         </p>
       )}
       {importCsv.data && importCsv.data.errors.length > 0 && (
-        <ul className="space-y-1 text-xs text-wine-600">
+        <ul className="space-y-1 text-xs text-coral-600">
           {importCsv.data.errors.slice(0, 10).map((error, index) => (
             <li key={index}>{error}</li>
           ))}
@@ -211,7 +211,7 @@ export default function Analytics() {
         <p className="text-sm text-ink-500">加载中…</p>
       )}
       {overview.isError && (
-        <p className="text-sm text-wine-600">{errorText(overview.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(overview.error)}</p>
       )}
 
       {overview.data && (
@@ -228,9 +228,9 @@ export default function Analytics() {
                 </p>
               </div>
             ))}
-            <div className="col-span-2 rounded-xl border border-sage-100 bg-surface p-4 sm:col-span-3 lg:col-span-6">
+            <div className="col-span-2 rounded-xl border border-brand-100 bg-surface p-4 sm:col-span-3 lg:col-span-6">
               <p className="text-xs text-ink-500">互动率</p>
-              <p className="mt-1 text-lg font-semibold text-sage-700">
+              <p className="mt-1 text-lg font-semibold text-brand-700">
                 {(overview.data.engagement_rate * 100).toFixed(2)}%
               </p>
             </div>
@@ -319,8 +319,8 @@ export default function Analytics() {
                           <p
                             className={`mt-1 text-xs ${
                               feedback.kind === "ok"
-                                ? "text-sage-600"
-                                : "text-wine-600"
+                                ? "text-brand-600"
+                                : "text-coral-600"
                             }`}
                           >
                             {feedback.text}

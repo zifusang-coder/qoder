@@ -168,8 +168,8 @@ export default function Team() {
       )}
 
       {created && (
-        <div className="rounded-xl border border-sage-100 bg-surface p-4 text-sm">
-          <p className="text-sage-600">
+        <div className="rounded-xl border border-brand-100 bg-surface p-4 text-sm">
+          <p className="text-brand-600">
             已创建 {created.email}，请立即把一次性临时密码交给成员：
           </p>
           <code className="mt-2 block break-all rounded bg-paper px-3 py-2 font-mono text-ink-900">
@@ -185,15 +185,15 @@ export default function Team() {
         <p
           className={
             message.kind === "error"
-              ? "text-sm text-wine-600"
-              : "text-sm text-sage-600"
+              ? "text-sm text-coral-600"
+              : "text-sm text-brand-600"
           }
         >
           {message.text}
         </p>
       )}
       {create.isError && (
-        <p className="text-sm text-wine-600">{errorText(create.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(create.error)}</p>
       )}
 
       <section className="space-y-2">
@@ -202,7 +202,7 @@ export default function Team() {
           <p className="text-sm text-ink-500">加载中…</p>
         )}
         {members.isError && (
-          <p className="text-sm text-wine-600">{errorText(members.error)}</p>
+          <p className="text-sm text-coral-600">{errorText(members.error)}</p>
         )}
         {members.data?.length === 0 && (
           <p className="text-sm text-ink-500">还没有其他成员。</p>
@@ -233,7 +233,7 @@ export default function Team() {
                 <span
                   className={
                     member.is_active
-                      ? "text-xs text-sage-600"
+                      ? "text-xs text-brand-600"
                       : "text-xs text-ink-500"
                   }
                 >
@@ -260,7 +260,7 @@ export default function Team() {
                 {member.is_active ? (
                   <button
                     type="button"
-                    className="rounded border border-wine-100 px-3 py-1.5 text-wine-600 hover:border-wine-100 disabled:opacity-50"
+                    className="rounded border border-coral-100 px-3 py-1.5 text-coral-600 hover:border-coral-100 disabled:opacity-50"
                     disabled={!editable || pending}
                     onClick={() => disable.mutate(member.id)}
                   >

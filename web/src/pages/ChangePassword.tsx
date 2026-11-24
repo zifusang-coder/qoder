@@ -93,7 +93,7 @@ export default function ChangePassword() {
           onChange={(e) => setConfirm(e.target.value)}
           placeholder="再次输入新密码"
         />
-        {error && <p className="text-sm text-wine-600">{error}</p>}
+        {error && <p className="text-sm text-coral-600">{error}</p>}
         <button
           className="btn-primary w-full"
           disabled={loading}

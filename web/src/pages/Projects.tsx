@@ -125,7 +125,7 @@ export default function Projects() {
           </select>
         </label>
         {profiles.isError && (
-          <p className="text-xs text-wine-600">{errorText(profiles.error)}</p>
+          <p className="text-xs text-coral-600">{errorText(profiles.error)}</p>
         )}
         <div className="flex items-end">
           <button
@@ -142,15 +142,15 @@ export default function Projects() {
         <p
           className={
             createProject.isError || message?.kind === "error"
-              ? "text-sm text-wine-600"
-              : "text-sm text-sage-600"
+              ? "text-sm text-coral-600"
+              : "text-sm text-brand-600"
           }
         >
           {createProject.isError
             ? errorText(createProject.error)
             : message?.text}
           {createdId && !createProject.isError && message?.kind === "ok" && (
-            <Link className="ml-2 text-sage-700" to={`/projects/${createdId}`}>
+            <Link className="ml-2 text-brand-700" to={`/projects/${createdId}`}>
               打开项目
             </Link>
           )}
@@ -163,7 +163,7 @@ export default function Projects() {
           <p className="text-sm text-ink-500">加载中…</p>
         )}
         {projects.isError && (
-          <p className="text-sm text-wine-600">
+          <p className="text-sm text-coral-600">
             {errorText(projects.error)}
           </p>
         )}

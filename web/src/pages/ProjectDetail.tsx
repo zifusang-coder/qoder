@@ -322,7 +322,7 @@ export default function ProjectDetail() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <Link className="text-sm text-sage-700" to="/projects">
+          <Link className="text-sm text-brand-700" to="/projects">
             ← 返回项目
           </Link>
           <h1 className="mt-2 text-xl font-semibold">
@@ -338,7 +338,7 @@ export default function ProjectDetail() {
       </div>
 
       {project.isError && (
-        <p className="text-sm text-wine-600">{errorText(project.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(project.error)}</p>
       )}
 
       <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
@@ -399,7 +399,7 @@ export default function ProjectDetail() {
               />
             </label>
             {createContent.isError && (
-              <p className="text-sm text-wine-600">
+              <p className="text-sm text-coral-600">
                 {errorText(createContent.error)}
               </p>
             )}
@@ -465,8 +465,8 @@ export default function ProjectDetail() {
               <p
                 className={
                   repurposeNotice.kind === "ok"
-                    ? "text-sm text-sage-600"
-                    : "text-sm text-wine-600"
+                    ? "text-sm text-brand-600"
+                    : "text-sm text-coral-600"
                 }
               >
                 {repurposeNotice.text}
@@ -638,8 +638,8 @@ export default function ProjectDetail() {
               <p
                 className={
                   mediaNotice.kind === "ok"
-                    ? "text-sm text-sage-600"
-                    : "text-sm text-wine-600"
+                    ? "text-sm text-brand-600"
+                    : "text-sm text-coral-600"
                 }
               >
                 {mediaNotice.text}
@@ -655,7 +655,7 @@ export default function ProjectDetail() {
                 </p>
                 {activeMediaJob.status === "failed" && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <span className="text-wine-600">
+                    <span className="text-coral-600">
                       {activeMediaJob.error_message || "生成失败"}
                     </span>
                     <button
@@ -671,7 +671,7 @@ export default function ProjectDetail() {
               </div>
             )}
             {mediaJob.isError && (
-              <p className="text-sm text-wine-600">
+              <p className="text-sm text-coral-600">
                 任务状态查询失败：{errorText(mediaJob.error)}
               </p>
             )}
@@ -685,7 +685,7 @@ export default function ProjectDetail() {
             <p className="text-sm text-ink-500">加载中…</p>
           )}
           {media.isError && (
-            <p className="text-sm text-wine-600">{errorText(media.error)}</p>
+            <p className="text-sm text-coral-600">{errorText(media.error)}</p>
           )}
           {media.isSuccess && media.data.items.length === 0 && (
             <p className="text-sm text-ink-500">
@@ -724,12 +724,12 @@ export default function ProjectDetail() {
                 )}
               </div>
               {item.audio.status === "failed" && (
-                <p className="mt-2 text-xs text-warm-600">
+                <p className="mt-2 text-xs text-honey-600">
                   配音生成失败，已输出静音视频。
                 </p>
               )}
               {item.audio.llm_fallback && (
-                <p className="mt-2 text-xs text-warm-600">
+                <p className="mt-2 text-xs text-honey-600">
                   LLM 调用失败（{item.audio.llm_fallback}
                   ），已直接使用原始口播稿完成配音。
                 </p>
@@ -747,7 +747,7 @@ export default function ProjectDetail() {
                   />
                   {item.subtitles && (
                     <details>
-                      <summary className="cursor-pointer text-xs text-sage-700">
+                      <summary className="cursor-pointer text-xs text-brand-700">
                         查看字幕
                       </summary>
                       <div className="mt-2">
@@ -770,12 +770,12 @@ export default function ProjectDetail() {
             <p className="text-sm text-ink-500">加载中…</p>
           )}
           {contents.isError && (
-            <p className="text-sm text-wine-600">
+            <p className="text-sm text-coral-600">
               {errorText(contents.error)}
             </p>
           )}
           {accounts.isError && (
-            <p className="text-sm text-wine-600">{errorText(accounts.error)}</p>
+            <p className="text-sm text-coral-600">{errorText(accounts.error)}</p>
           )}
           {contents.isSuccess && contents.data.length === 0 && (
             <p className="text-sm text-ink-500">
@@ -786,13 +786,13 @@ export default function ProjectDetail() {
             <p
               className={
                 jobNotice.kind === "ok"
-                  ? "text-sm text-sage-600"
-                  : "text-sm text-wine-600"
+                  ? "text-sm text-brand-600"
+                  : "text-sm text-coral-600"
               }
             >
               {jobNotice.text}
               {jobNotice.kind === "ok" && (
-                <Link className="ml-2 text-sage-700" to="/publish">
+                <Link className="ml-2 text-brand-700" to="/publish">
                   前往发布
                 </Link>
               )}
@@ -911,9 +911,9 @@ export default function ProjectDetail() {
                       </select>
                     </label>
                     {missingAccount && (
-                      <p className="text-xs text-warm-600">
+                      <p className="text-xs text-honey-600">
                         还没有可用的{contentSpec?.label ?? "平台"}账号，请先
-                        <a className="ml-1 text-sage-700" href="/accounts">
+                        <a className="ml-1 text-brand-700" href="/accounts">
                           添加账号
                         </a>
                       </p>
@@ -922,7 +922,7 @@ export default function ProjectDetail() {
                 )}
 
                 {capability === "pending" && (
-                  <p className="mt-2 text-xs text-warm-600">
+                  <p className="mt-2 text-xs text-honey-600">
                     {contentSpec?.note ?? "该平台暂不支持自动发布或导出"}
                   </p>
                 )}
@@ -933,7 +933,7 @@ export default function ProjectDetail() {
                       <p className="text-sm text-ink-500">版本加载中…</p>
                     )}
                     {versions.isError && (
-                      <p className="text-sm text-wine-600">
+                      <p className="text-sm text-coral-600">
                         {errorText(versions.error)}
                       </p>
                     )}

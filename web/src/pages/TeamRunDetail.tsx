@@ -58,7 +58,7 @@ export default function TeamRunDetailPage() {
     onError: (err) => setDecideError(errorText(err)),
   });
   if (detail.isLoading) return <p className="text-sm text-ink-500">加载中…</p>;
-  if (detail.isError || !detail.data) return <p className="text-sm text-wine-700">加载失败</p>;
+  if (detail.isError || !detail.data) return <p className="text-sm text-coral-700">加载失败</p>;
   const { run, children, entries, artifacts } = detail.data;
   const totals = teamTotals(children);
   return (
@@ -74,7 +74,7 @@ export default function TeamRunDetailPage() {
           Lead token {usageTokens(run.usage ?? {})}
         </p>
         {run.error_code && (
-          <p className="text-sm text-wine-700">{run.error_code}：{run.error_message}</p>
+          <p className="text-sm text-coral-700">{run.error_code}：{run.error_message}</p>
         )}
         {me && canCancelTeamRun(run, me) && (
           <div>
@@ -88,7 +88,7 @@ export default function TeamRunDetailPage() {
             </button>
           </div>
         )}
-        {cancelError && <p className="text-sm text-wine-700">{cancelError}</p>}
+        {cancelError && <p className="text-sm text-coral-700">{cancelError}</p>}
       </header>
 
       {children.some((child) => child.pending_approval) && (
@@ -101,7 +101,7 @@ export default function TeamRunDetailPage() {
               ? canDecideTeamChildApproval(child, run.user_id, me)
               : false;
             return (
-              <div key={child.id} className="space-y-2 rounded-lg border border-wine-100 bg-wine-50 p-3">
+              <div key={child.id} className="space-y-2 rounded-lg border border-coral-100 bg-coral-50 p-3">
                 <div className="flex items-center gap-2 text-sm">
                   <span className="badge bg-line text-ink-500">团队 · {roleLabel(child.role)}</span>
                   <span className="font-medium">待确认：{approval.tool_name}</span>
@@ -143,7 +143,7 @@ export default function TeamRunDetailPage() {
               </div>
             );
           })}
-          {decideError && <p className="text-sm text-wine-700">{decideError}</p>}
+          {decideError && <p className="text-sm text-coral-700">{decideError}</p>}
         </section>
       )}
 
@@ -158,7 +158,7 @@ export default function TeamRunDetailPage() {
               <span className="text-xs text-ink-500">尝试 {child.attempts}</span>
             </div>
             {child.result_text && <p className="text-xs text-ink-700">{child.result_text}</p>}
-            {child.error_code && <p className="text-xs text-wine-700">{child.error_code}</p>}
+            {child.error_code && <p className="text-xs text-coral-700">{child.error_code}</p>}
           </div>
         ))}
       </section>
@@ -186,7 +186,7 @@ export default function TeamRunDetailPage() {
           <Link
             key={index}
             to={artifactLink({ type: artifact.kind, id: artifact.id, title: artifact.title })}
-            className="block text-sm text-sage-700 underline"
+            className="block text-sm text-brand-700 underline"
           >
             {artifact.title || artifact.id}
           </Link>

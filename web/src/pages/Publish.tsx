@@ -222,7 +222,7 @@ export default function Publish() {
         </div>
         <div className="flex items-center gap-3 text-xs text-ink-500">
           {canWrite && (
-            <Link className="text-sage-700" to="/accounts">
+            <Link className="text-brand-700" to="/accounts">
               管理发布账号
             </Link>
           )}
@@ -232,7 +232,7 @@ export default function Publish() {
 
       {jobs.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {jobs.isError && (
-        <p className="text-sm text-wine-600">{errorText(jobs.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(jobs.error)}</p>
       )}
       {jobs.isSuccess && jobs.data.items.length === 0 && (
         <p className="card p-6 text-sm text-ink-500">
@@ -290,7 +290,7 @@ export default function Publish() {
                       ) : (
                         <>
                           未关联发布账号，
-                          <Link className="text-sage-700" to="/accounts">
+                          <Link className="text-brand-700" to="/accounts">
                             去授权
                           </Link>
                         </>
@@ -302,7 +302,7 @@ export default function Publish() {
                   {canReject(job) && isAdmin && (
                     <button
                       type="button"
-                      className="rounded border border-wine-100 px-4 py-2 text-sm text-warm-600 hover:border-warm-600 disabled:opacity-50"
+                      className="rounded border border-coral-100 px-4 py-2 text-sm text-honey-600 hover:border-honey-600 disabled:opacity-50"
                       disabled={act.isPending}
                       onClick={() => {
                         setFeedback(null);
@@ -319,11 +319,11 @@ export default function Publish() {
                   {canCancel(job) &&
                     isAdmin &&
                     (cancelingId === job.id ? (
-                      <span className="flex flex-wrap items-center gap-2 rounded border border-wine-100 px-3 py-1.5 text-sm text-wine-600">
+                      <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-3 py-1.5 text-sm text-coral-600">
                         取消后需重新创建任务
                         <button
                           type="button"
-                          className="rounded bg-wine-600 px-2 py-1 text-xs font-medium text-white hover:bg-wine-700 disabled:opacity-50"
+                          className="rounded bg-coral-600 px-2 py-1 text-xs font-medium text-white hover:bg-coral-700 disabled:opacity-50"
                           disabled={act.isPending}
                           onClick={() => cancelJob(job)}
                         >
@@ -340,7 +340,7 @@ export default function Publish() {
                     ) : (
                       <button
                         type="button"
-                        className="rounded border border-wine-100 px-4 py-2 text-sm text-wine-600 hover:border-wine-100 disabled:opacity-50"
+                        className="rounded border border-coral-100 px-4 py-2 text-sm text-coral-600 hover:border-coral-100 disabled:opacity-50"
                         disabled={act.isPending}
                         onClick={() => {
                           setFeedback(null);
@@ -395,7 +395,7 @@ export default function Publish() {
               </div>
 
               {missingAccount && job.status === "approved" && (
-                <p className="mt-3 text-sm text-warm-600">
+                <p className="mt-3 text-sm text-honey-600">
                   该任务创建时未关联账号，请取消后在项目详情重新创建并选择账号。
                 </p>
               )}
@@ -453,7 +453,7 @@ export default function Publish() {
               {job.checks.passed !== undefined && (
                 <p
                   className={`mt-3 text-sm ${
-                    job.checks.passed ? "text-sage-600" : "text-wine-600"
+                    job.checks.passed ? "text-brand-600" : "text-coral-600"
                   }`}
                 >
                   {job.checks.passed ? "发布前检查通过" : "发布前检查未通过"}
@@ -466,8 +466,8 @@ export default function Publish() {
                       key={`${issue.level}-${index}`}
                       className={
                         issue.level === "error"
-                          ? "text-sm text-wine-600"
-                          : "text-sm text-warm-600"
+                          ? "text-sm text-coral-600"
+                          : "text-sm text-honey-600"
                       }
                     >
                       [{issueLevelLabel(issue.level)}] {issue.message}
@@ -479,7 +479,7 @@ export default function Publish() {
               {job.error &&
                 (job.status === "publish_failed" ||
                   job.status === "export_failed") && (
-                  <p className="mt-3 whitespace-pre-wrap text-sm text-wine-600">
+                  <p className="mt-3 whitespace-pre-wrap text-sm text-coral-600">
                     {job.error}
                   </p>
                 )}
@@ -491,7 +491,7 @@ export default function Publish() {
                       外部 ID：
                       {job.external_url ? (
                         <a
-                          className="text-sage-700"
+                          className="text-brand-700"
                           href={job.external_url}
                           target="_blank"
                           rel="noreferrer"
@@ -520,10 +520,10 @@ export default function Publish() {
                 <p
                   className={`mt-3 text-sm ${
                     note.kind === "ok"
-                      ? "text-sage-600"
+                      ? "text-brand-600"
                       : note.kind === "warn"
-                        ? "text-warm-600"
-                        : "text-wine-600"
+                        ? "text-honey-600"
+                        : "text-coral-600"
                   }`}
                 >
                   {note.text}

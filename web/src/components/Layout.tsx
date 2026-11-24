@@ -20,11 +20,14 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen">
-      <header className="border-b border-line bg-surface">
-        <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-3 px-6 py-4">
-          <span className="text-sm font-semibold tracking-wide text-sage-700">
-            {APP_NAME}
-          </span>
+      <header className="sticky top-0 z-30 border-b border-white/70 bg-white/75 backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 px-6 py-3.5">
+          <Link className="flex items-center gap-2" to="/">
+            <span className="brand-mark">云</span>
+            <span className="text-sm font-semibold tracking-wide text-brand-700">
+              {APP_NAME}
+            </span>
+          </Link>
           <span className="text-xs text-ink-500">{user?.tenant_name}</span>
           <nav className="flex flex-1 flex-wrap gap-1">
             {navItems.map((item) => (
@@ -47,7 +50,7 @@ export default function Layout() {
           </button>
         </div>
       </header>
-      <main className="mx-auto max-w-5xl px-6 py-8">
+      <main className="mx-auto max-w-6xl px-6 py-8">
         <Outlet />
       </main>
     </div>

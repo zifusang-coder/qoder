@@ -1,57 +1,103 @@
 @import "tailwindcss";
 
+/* 浅色粉彩主题：淡蓝紫渐变背景 + 白卡片 + 紫罗兰主色，成功/等待/错误各自有色。 */
 @theme {
-  --color-paper: #f6f6f3;
+  --color-paper: #eef3ff;
   --color-surface: #ffffff;
-  --color-ink-900: #1c211e;
-  --color-ink-700: #3d4642;
-  --color-ink-500: #6b7570;
-  --color-ink-300: #a8b0ac;
-  --color-line: #e3e5e1;
-  --color-sage-50: #eef5f0;
-  --color-sage-100: #dcebe1;
-  --color-sage-500: #3f8a66;
-  --color-sage-600: #2f7554;
-  --color-sage-700: #245c43;
-  --color-wine-50: #f8eef0;
-  --color-wine-100: #efd9dd;
-  --color-wine-500: #8c3a4a;
-  --color-wine-600: #752f3d;
-  --color-wine-700: #5d2531;
-  --color-warm-600: #8a6a3b;
+  --color-ink-900: #1f2547;
+  --color-ink-700: #3f4770;
+  --color-ink-500: #6f78a3;
+  --color-ink-300: #aeb5d6;
+  --color-line: #e4e8fa;
+  --color-brand-50: #f2efff;
+  --color-brand-100: #e5e0ff;
+  --color-brand-200: #d6cffd;
+  --color-brand-300: #b9adfb;
+  --color-brand-500: #7b6cf6;
+  --color-brand-600: #6a54ef;
+  --color-brand-700: #5540d4;
+  --color-mint-50: #e9faf2;
+  --color-mint-100: #d2f4e4;
+  --color-mint-500: #34c98b;
+  --color-mint-600: #1fae72;
+  --color-mint-700: #188a5b;
+  --color-coral-50: #fff1ee;
+  --color-coral-100: #ffdfd8;
+  --color-coral-500: #f4705f;
+  --color-coral-600: #e25848;
+  --color-coral-700: #c4463a;
+  --color-honey-50: #fff6e6;
+  --color-honey-100: #ffedd0;
+  --color-honey-500: #f6a83c;
+  --color-honey-600: #d98a1c;
+  --color-honey-700: #b37210;
 }
 
 body {
   @apply bg-paper text-ink-900 antialiased;
+  min-height: 100vh;
+  background-image:
+    radial-gradient(60rem 40rem at 6% -12%, #d9e7ff 0%, transparent 62%),
+    radial-gradient(52rem 36rem at 102% -4%, #eadfff 0%, transparent 58%),
+    radial-gradient(46rem 32rem at 50% 112%, #dff6ff 0%, transparent 62%),
+    linear-gradient(180deg, #f1f6ff 0%, #f6f1ff 100%);
+  background-attachment: fixed;
+}
+
+:where(a, button, summary):focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
 }
 
 @layer components {
   .card {
-    @apply rounded-xl border border-line bg-surface;
+    @apply rounded-2xl border border-white/80 bg-white/90;
+    box-shadow: 0 22px 48px -30px rgba(85, 64, 212, 0.45);
   }
   .card-pad {
     @apply p-5;
   }
   .input {
-    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-ink-900 placeholder:text-ink-300 focus:border-sage-500 focus:outline-none focus:ring-2 focus:ring-sage-100;
+    @apply w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-ink-900 placeholder:text-ink-300 focus:border-brand-500 focus:outline-none focus:ring-4 focus:ring-brand-100;
   }
   .btn-primary {
-    @apply rounded-lg bg-sage-600 px-4 py-2 text-sm font-medium text-white hover:bg-sage-700 disabled:opacity-50;
+    @apply rounded-xl px-4 py-2 text-sm font-medium text-white transition-shadow disabled:opacity-50 disabled:shadow-none;
+    background-image: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-600));
+    box-shadow: 0 12px 26px -14px rgba(106, 84, 239, 0.85);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background-image: linear-gradient(135deg, var(--color-brand-600), var(--color-brand-700));
   }
   .btn-secondary {
-    @apply rounded-lg border border-line bg-white px-4 py-2 text-sm text-ink-700 hover:border-ink-300;
+    @apply rounded-xl border border-line bg-white/80 px-4 py-2 text-sm text-ink-700 transition-colors hover:border-brand-300 hover:text-ink-900;
   }
   .btn-danger {
-    @apply rounded-lg border border-wine-100 bg-wine-50 px-4 py-2 text-sm text-wine-700 hover:bg-wine-100;
+    @apply rounded-xl border border-coral-100 bg-coral-50 px-4 py-2 text-sm text-coral-700 transition-colors hover:bg-coral-100;
   }
   .badge {
-    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .brand-mark {
+    @apply flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white;
+    background-image: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-600));
+    box-shadow: 0 8px 16px -8px rgba(106, 84, 239, 0.9);
   }
   .nav-link {
-    @apply rounded-md px-3 py-1.5 text-sm text-ink-500 transition-colors hover:text-ink-900;
+    @apply rounded-full px-3.5 py-1.5 text-sm text-ink-500 transition-colors hover:bg-white/80 hover:text-ink-900;
   }
   .nav-link-active {
-    @apply rounded-md bg-sage-50 px-3 py-1.5 text-sm font-medium text-sage-700;
+    @apply rounded-full px-3.5 py-1.5 text-sm font-medium text-white;
+    background-image: linear-gradient(135deg, var(--color-brand-500), var(--color-brand-600));
+    box-shadow: 0 10px 20px -12px rgba(106, 84, 239, 0.9);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
   }
 }
 

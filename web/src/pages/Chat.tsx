@@ -32,11 +32,11 @@ function AssistantMeta({ meta }: { meta: ChatOut }) {
         {meta.run_id && ` · 运行 ${meta.run_id.slice(0, 8)}`}
       </p>
       {meta.missing && meta.missing.length > 0 && (
-        <p className="text-warm-600">还需要：{meta.missing.join("、")}</p>
+        <p className="text-honey-600">还需要：{meta.missing.join("、")}</p>
       )}
       {meta.data && (
         <details>
-          <summary className="cursor-pointer text-sage-700">
+          <summary className="cursor-pointer text-brand-700">
             查看结构化结果
           </summary>
           <pre className="mt-1 overflow-x-auto rounded border border-line bg-white p-2 text-ink-700">
@@ -227,7 +227,7 @@ export default function Chat() {
           <div
             key={item.id}
             className={`flex items-center gap-1 border-t border-line px-2 py-1 ${
-              item.id === activeId ? "bg-sage-50" : ""
+              item.id === activeId ? "bg-brand-50" : ""
             }`}
           >
             <button
@@ -243,7 +243,7 @@ export default function Chat() {
             </button>
             <button
               type="button"
-              className="shrink-0 px-1 text-xs text-ink-500 hover:text-wine-600"
+              className="shrink-0 px-1 text-xs text-ink-500 hover:text-coral-600"
               aria-label="删除对话"
               disabled={removeConversation.isPending}
               onClick={() => deleteConversation(item.id)}
@@ -262,7 +262,7 @@ export default function Chat() {
               关键词会路由到技能；未命中时使用通用问答。对话会自动保存。
             </p>
           </div>
-          <Link className="text-sm text-sage-700" to="/settings">
+          <Link className="text-sm text-brand-700" to="/settings">
             LLM 设置
           </Link>
         </div>
@@ -285,7 +285,7 @@ export default function Chat() {
               ))}
           </select>
           {profiles.isError && (
-            <span className="text-wine-600">{errorText(profiles.error)}</span>
+            <span className="text-coral-600">{errorText(profiles.error)}</span>
           )}
         </label>
 
@@ -307,8 +307,8 @@ export default function Chat() {
               <div
                 className={`inline-block max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 ${
                   turn.role === "user"
-                    ? "bg-sage-600 text-white"
-                    : "bg-sage-50 text-ink-900"
+                    ? "bg-brand-600 text-white"
+                    : "bg-brand-50 text-ink-900"
                 }`}
               >
                 {turn.text}
@@ -322,7 +322,7 @@ export default function Chat() {
           <div ref={endRef} />
         </div>
 
-        {error && <p className="mt-2 text-sm text-wine-600">{error}</p>}
+        {error && <p className="mt-2 text-sm text-coral-600">{error}</p>}
 
         <form className="mt-3 flex items-end gap-2" onSubmit={submit}>
           <textarea

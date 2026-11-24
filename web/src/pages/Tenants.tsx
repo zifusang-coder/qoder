@@ -166,20 +166,20 @@ export default function Tenants() {
         <p
           className={
             message.kind === "error"
-              ? "text-sm text-wine-600"
-              : "text-sm text-sage-600"
+              ? "text-sm text-coral-600"
+              : "text-sm text-brand-600"
           }
         >
           {message.text}
         </p>
       )}
       {create.isError && (
-        <p className="text-sm text-wine-600">{errorText(create.error)}</p>
+        <p className="text-sm text-coral-600">{errorText(create.error)}</p>
       )}
 
       {created && (
-        <div className="rounded-xl border border-sage-100 bg-surface p-4 text-sm">
-          <p className="text-sage-600">
+        <div className="rounded-xl border border-brand-100 bg-surface p-4 text-sm">
+          <p className="text-brand-600">
             已创建租户「{created.name}」，所有者 {created.owner.email}
           </p>
           <code className="mt-2 block break-all rounded bg-paper px-3 py-2 font-mono text-ink-900">
@@ -206,7 +206,7 @@ export default function Tenants() {
           <p className="text-sm text-ink-500">加载中…</p>
         )}
         {tenants.isError && (
-          <p className="text-sm text-wine-600">{errorText(tenants.error)}</p>
+          <p className="text-sm text-coral-600">{errorText(tenants.error)}</p>
         )}
         {tenants.data?.length === 0 && (
           <p className="text-sm text-ink-500">还没有租户。</p>
@@ -235,7 +235,7 @@ export default function Tenants() {
                 <span
                   className={
                     tenant.status === "active"
-                      ? "text-xs text-sage-600"
+                      ? "text-xs text-brand-600"
                       : "text-xs text-ink-500"
                   }
                 >
@@ -244,7 +244,7 @@ export default function Tenants() {
                 {canSuspendTenant(tenant, currentTenantId) && (
                   <button
                     type="button"
-                    className="rounded border border-wine-100 px-3 py-1.5 text-wine-600 hover:border-wine-100 disabled:opacity-50"
+                    className="rounded border border-coral-100 px-3 py-1.5 text-coral-600 hover:border-coral-100 disabled:opacity-50"
                     disabled={pending}
                     onClick={() =>
                       update.mutate({ id: tenant.id, status: "suspended" })

@@ -564,7 +564,7 @@ export default function WorkflowEditor() {
             <p className="text-xs text-ink-500">
               revision {revision} · {scale.text}
               {scale.level !== "ok" && (
-                <span className={scale.level === "over" ? "text-wine-600" : "text-warm-600"}>
+                <span className={scale.level === "over" ? "text-coral-600" : "text-honey-600"}>
                   {" "}
                   · {scale.level === "over" ? "已超过规模上限" : "接近规模上限"}
                 </span>
@@ -621,19 +621,19 @@ export default function WorkflowEditor() {
           </div>
         </div>
         {(error || detailQuery.isError) && (
-          <p className="text-sm text-wine-600">
+          <p className="text-sm text-coral-600">
             {error || errorText(detailQuery.error)}
           </p>
         )}
         {conflict && (
-          <div className="flex items-center gap-3 rounded-lg bg-wine-50 px-3 py-2 text-sm text-wine-600">
+          <div className="flex items-center gap-3 rounded-lg bg-coral-50 px-3 py-2 text-sm text-coral-600">
             <span>草稿已被其他人更新，保存冲突。</span>
             <button className="btn-secondary" type="button" onClick={reloadConflict}>
               重新加载
             </button>
           </div>
         )}
-        {notice && !error && <p className="text-sm text-sage-700">{notice}</p>}
+        {notice && !error && <p className="text-sm text-brand-700">{notice}</p>}
       </header>
 
       <div className="grid gap-4 lg:grid-cols-[160px_minmax(0,1fr)_300px]">
@@ -703,13 +703,13 @@ export default function WorkflowEditor() {
                 </button>
               </div>
               {issues.length === 0 ? (
-                <p className="text-sm text-sage-700">没有发现问题。</p>
+                <p className="text-sm text-brand-700">没有发现问题。</p>
               ) : (
                 <ul className="space-y-1">
                   {issues.map((issue, index) => (
                     <li key={`${issue.code}-${index}`}>
                       <button
-                        className="text-left text-sm text-ink-700 hover:text-sage-700"
+                        className="text-left text-sm text-ink-700 hover:text-brand-700"
                         type="button"
                         onClick={() => {
                           if (issue.node_id) {
@@ -736,7 +736,7 @@ export default function WorkflowEditor() {
           <div className="flex gap-1 rounded-lg border border-line bg-surface p-1 text-sm">
             <button
               className={`flex-1 rounded-md px-2 py-1 ${
-                tab === "props" ? "bg-sage-50 text-sage-700" : "text-ink-500"
+                tab === "props" ? "bg-brand-50 text-brand-700" : "text-ink-500"
               }`}
               type="button"
               onClick={() => setTab("props")}
@@ -745,7 +745,7 @@ export default function WorkflowEditor() {
             </button>
             <button
               className={`flex-1 rounded-md px-2 py-1 ${
-                tab === "schedule" ? "bg-sage-50 text-sage-700" : "text-ink-500"
+                tab === "schedule" ? "bg-brand-50 text-brand-700" : "text-ink-500"
               }`}
               type="button"
               onClick={() => setTab("schedule")}
@@ -776,7 +776,7 @@ export default function WorkflowEditor() {
                 <h2 className="font-semibold">定时</h2>
                 {editable && (
                   <button
-                    className="text-xs text-sage-700 disabled:text-ink-300"
+                    className="text-xs text-brand-700 disabled:text-ink-300"
                     disabled={!latest}
                     title={latest ? "" : "发布后才能创建定时"}
                     type="button"
@@ -825,7 +825,7 @@ export default function WorkflowEditor() {
                   {editable && (
                     <div className="flex gap-3 text-[11px]">
                       <button
-                        className="text-sage-700"
+                        className="text-brand-700"
                         type="button"
                         onClick={() =>
                           openSchedule({
@@ -843,7 +843,7 @@ export default function WorkflowEditor() {
                         编辑
                       </button>
                       <button
-                        className="text-wine-700"
+                        className="text-coral-700"
                         type="button"
                         onClick={() => {
                           if (window.confirm("删除这个定时？运行历史会保留。")) {
@@ -875,7 +875,7 @@ export default function WorkflowEditor() {
               </button>
             </div>
             {versionsQuery.isError && (
-              <p className="text-sm text-wine-600">{errorText(versionsQuery.error)}</p>
+              <p className="text-sm text-coral-600">{errorText(versionsQuery.error)}</p>
             )}
             {(versionsQuery.data ?? []).length === 0 && (
               <p className="text-sm text-ink-500">还没有发布版本。</p>
@@ -894,7 +894,7 @@ export default function WorkflowEditor() {
                 {item.note && <p className="text-xs text-ink-700">{item.note}</p>}
                 {editable && (
                   <button
-                    className="text-xs text-sage-700"
+                    className="text-xs text-brand-700"
                     disabled={restore.isPending}
                     type="button"
                     onClick={() => restore.mutate(item.version)}
@@ -924,7 +924,7 @@ export default function WorkflowEditor() {
                 onChange={(event) => setPublishNote(event.target.value)}
               />
             </label>
-            {modalError && <p className="text-sm text-wine-600">{modalError}</p>}
+            {modalError && <p className="text-sm text-coral-600">{modalError}</p>}
             <div className="flex justify-end gap-2">
               <button className="btn-secondary" type="button" onClick={closePublish}>
                 取消
@@ -950,7 +950,7 @@ export default function WorkflowEditor() {
               <p className="text-sm text-ink-500">加载中…</p>
             )}
             {runVersionQuery.isError && (
-              <p className="text-sm text-wine-600">
+              <p className="text-sm text-coral-600">
                 {errorText(runVersionQuery.error)}
               </p>
             )}
@@ -984,7 +984,7 @@ export default function WorkflowEditor() {
                   )}
                 </label>
               ))}
-            {modalError && <p className="text-sm text-wine-600">{modalError}</p>}
+            {modalError && <p className="text-sm text-coral-600">{modalError}</p>}
             <div className="flex justify-end gap-2">
               <button className="btn-secondary" type="button" onClick={closeRun}>
                 取消
@@ -1073,7 +1073,7 @@ export default function WorkflowEditor() {
               <p className="text-sm text-ink-500">加载中…</p>
             )}
             {scheduleVersionQuery.isError && (
-              <p className="text-sm text-wine-600">
+              <p className="text-sm text-coral-600">
                 {errorText(scheduleVersionQuery.error)}
               </p>
             )}
@@ -1117,7 +1117,7 @@ export default function WorkflowEditor() {
                 ))}
               </div>
             )}
-            {modalError && <p className="text-sm text-wine-600">{modalError}</p>}
+            {modalError && <p className="text-sm text-coral-600">{modalError}</p>}
             <div className="flex justify-end gap-2">
               <button
                 className="btn-secondary"
