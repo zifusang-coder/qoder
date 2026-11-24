@@ -32,6 +32,9 @@ class ChatMessage(TenantScoped):
             ["chat_conversations.tenant_id", "chat_conversations.id"],
             ondelete="CASCADE",
         ),
+        UniqueConstraint(
+            "conversation_id", "seq", name="uq_chat_messages_conversation_seq"
+        ),
         Index("ix_chat_messages_conversation_seq", "conversation_id", "seq"),
     )
 

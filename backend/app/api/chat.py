@@ -1,4 +1,7 @@
+import json
+import logging
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -7,9 +10,10 @@ from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
-from app.config import get_settings
-from app.db import get_session
+from app.config import Settings, get_settings
+from app.db import SessionLocal, get_session
 from app.errors import AppError
 from app.llm.gateway import load_gateway_default
 from app.models.chat import ChatConversation, ChatMessage
@@ -21,7 +25,7 @@ from app.services.outputs import (
     public_output_data,
 )
 from app.services.profiles import profile_block_for
-from app.services.router import route_intent
+from app.services.router import Intent, route_intent
 from app.services.skill_settings import require_enabled
 from app.skills.executor import SkillExecutor
 from app.skills.manifest import ManifestError
@@ -29,6 +33,7 @@ from app.skills.registry import SkillRegistry, get_registry
 from app.skills.runner import ScriptError
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
 
 SYSTEM_CHAT = (
     "你是云AI新媒体运营系统的助理，服务对象是个人或小团队运营者。"
@@ -92,17 +97,22 @@ HISTORY_LIMIT = 10
 
 
 async def _owned_conversation(
-    session: AsyncSession, conversation_id: uuid.UUID, user: User
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+    user: User,
+    *,
+    lock: bool = False,
 ) -> ChatConversation:
-    conversation = (
-        await session.execute(
-            select(ChatConversation).where(
-                ChatConversation.id == conversation_id,
-                ChatConversation.tenant_id == user.tenant_id,
-                ChatConversation.user_id == user.id,
-            )
-        )
-    ).scalar_one_or_none()
+    stmt = select(ChatConversation).where(
+        ChatConversation.id == conversation_id,
+        ChatConversation.tenant_id == user.tenant_id,
+        ChatConversation.user_id == user.id,
+    )
+    if lock:
+        # 写入路径锁住会话行，使同一对话的并发发送串行分配 seq；
+        # 唯一约束是数据库层兜底。
+        stmt = stmt.with_for_update()
+    conversation = (await session.execute(stmt)).scalar_one_or_none()
     if conversation is None:
         raise AppError("not_found", "对话不存在", 404)
     return conversation
@@ -307,22 +317,18 @@ def _summarize(data: dict) -> str:
     return "已完成，请查看结构化结果。"
 
 
-@router.post("", response_model=ChatOut)
-async def chat(
+async def _open_conversation(
+    session: AsyncSession,
+    user: User,
     payload: ChatIn,
-    user: User = Depends(editor_access),  # noqa: B008
-    session: AsyncSession = Depends(get_session),  # noqa: B008
-    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
-) -> ChatOut:
-    settings = get_settings()
-    output_dir = str(adhoc_output_dir(user.tenant_id))
-    intent = route_intent(payload.message, output_dir=output_dir)
-
+    *,
+    lock: bool = False,
+) -> tuple[ChatConversation, list[dict], str, int]:
     conversation: ChatConversation | None = None
     history: list[dict] = []
     if payload.conversation_id is not None:
         conversation = await _owned_conversation(
-            session, payload.conversation_id, user
+            session, payload.conversation_id, user, lock=lock
         )
         history = await _history(session, conversation.id)
 
@@ -351,41 +357,21 @@ async def chat(
         if payload.profile_id is not None:
             conversation.profile_id = payload.profile_id
         seq = await _last_seq(session, conversation.id)
+    return conversation, history, profile_block, seq
+
+
+async def _skill_turn(
+    session: AsyncSession,
+    user: User,
+    registry: SkillRegistry,
+    settings: Settings,
+    conversation: ChatConversation,
+    seq: int,
+    profile_block: str,
+    payload: ChatIn,
+    intent: Intent,
+) -> ChatOut:
     conversation_id = str(conversation.id)
-
-    _add_message(
-        session,
-        conversation,
-        seq=seq + 1,
-        role="user",
-        content=payload.message,
-    )
-
-    if intent.kind == "chat":
-        system_prompt = (
-            f"{SYSTEM_CHAT}\n\n{profile_block}" if profile_block else SYSTEM_CHAT
-        )
-        gateway = await load_gateway_default(session, user.tenant_id)
-        reply = await gateway.complete(
-            [
-                {"role": "system", "content": system_prompt},
-                *history,
-                {"role": "user", "content": payload.message},
-            ],
-            tier="standard",
-            temperature=0.6,
-        )
-        _add_message(
-            session,
-            conversation,
-            seq=seq + 2,
-            role="assistant",
-            content=reply,
-            intent="chat",
-        )
-        await session.commit()
-        return ChatOut(reply=reply, intent="chat", conversation_id=conversation_id)
-
     skill_id = intent.skill_id or ""
     try:
         skill = registry.get(skill_id)
@@ -479,3 +465,189 @@ async def chat(
         data=data,
         conversation_id=conversation_id,
     )
+
+
+@router.post("", response_model=ChatOut)
+async def chat(
+    payload: ChatIn,
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+) -> ChatOut:
+    settings = get_settings()
+    output_dir = str(adhoc_output_dir(user.tenant_id))
+    intent = route_intent(payload.message, output_dir=output_dir)
+
+    conversation, history, profile_block, seq = await _open_conversation(
+        session, user, payload, lock=True
+    )
+    conversation_id = str(conversation.id)
+
+    _add_message(
+        session,
+        conversation,
+        seq=seq + 1,
+        role="user",
+        content=payload.message,
+    )
+
+    if intent.kind == "chat":
+        system_prompt = (
+            f"{SYSTEM_CHAT}\n\n{profile_block}" if profile_block else SYSTEM_CHAT
+        )
+        gateway = await load_gateway_default(session, user.tenant_id)
+        reply = await gateway.complete(
+            [
+                {"role": "system", "content": system_prompt},
+                *history,
+                {"role": "user", "content": payload.message},
+            ],
+            tier="standard",
+            temperature=0.6,
+        )
+        _add_message(
+            session,
+            conversation,
+            seq=seq + 2,
+            role="assistant",
+            content=reply,
+            intent="chat",
+        )
+        await session.commit()
+        return ChatOut(reply=reply, intent="chat", conversation_id=conversation_id)
+
+    return await _skill_turn(
+        session,
+        user,
+        registry,
+        settings,
+        conversation,
+        seq,
+        profile_block,
+        payload,
+        intent,
+    )
+
+
+@router.post("/stream")
+async def stream_chat(
+    payload: ChatIn,
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    registry: SkillRegistry = Depends(get_registry),  # noqa: B008
+) -> EventSourceResponse:
+    settings = get_settings()
+    tenant_id = user.tenant_id
+    output_dir = str(adhoc_output_dir(tenant_id))
+    intent = route_intent(payload.message, output_dir=output_dir)
+
+    conversation, history, profile_block, seq = await _open_conversation(
+        session, user, payload, lock=True
+    )
+    conversation_id = str(conversation.id)
+    _add_message(
+        session,
+        conversation,
+        seq=seq + 1,
+        role="user",
+        content=payload.message,
+    )
+
+    if intent.kind != "chat":
+        # 技能调用不是逐字生成：执行完成后一次给出完整结果，
+        # 前端仍只需处理 done 事件。
+        result = await _skill_turn(
+            session,
+            user,
+            registry,
+            settings,
+            conversation,
+            seq,
+            profile_block,
+            payload,
+            intent,
+        )
+
+        async def skill_events() -> AsyncIterator[dict[str, str]]:
+            yield {
+                "data": json.dumps(
+                    {"done": result.model_dump()}, ensure_ascii=False
+                )
+            }
+            yield {"data": "[DONE]"}
+
+        return EventSourceResponse(skill_events())
+
+    system_prompt = (
+        f"{SYSTEM_CHAT}\n\n{profile_block}" if profile_block else SYSTEM_CHAT
+    )
+    gateway = await load_gateway_default(session, tenant_id)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *history,
+        {"role": "user", "content": payload.message},
+    ]
+    # 先提交用户消息：流式期间客户端刷新也能看到这条，且 seq 已确定。
+    await session.commit()
+    conversation_uuid = conversation.id
+    assistant_seq = seq + 2
+
+    async def event_gen() -> AsyncIterator[dict[str, str]]:
+        chunks: list[str] = []
+        try:
+            async for delta in gateway.stream(
+                messages, tier="standard", temperature=0.6
+            ):
+                chunks.append(delta)
+                yield {
+                    "data": json.dumps({"delta": delta}, ensure_ascii=False)
+                }
+            reply = "".join(chunks)
+            # 流的生命周期长于请求依赖，落库使用独立会话。
+            async with SessionLocal() as write_session:
+                stored = await write_session.get(
+                    ChatConversation, conversation_uuid
+                )
+                if stored is not None:
+                    _add_message(
+                        write_session,
+                        stored,
+                        seq=assistant_seq,
+                        role="assistant",
+                        content=reply,
+                        intent="chat",
+                    )
+                    await write_session.commit()
+            done = ChatOut(
+                reply=reply, intent="chat", conversation_id=conversation_id
+            )
+            yield {
+                "data": json.dumps(
+                    {"done": done.model_dump()}, ensure_ascii=False
+                )
+            }
+        except AppError as exc:
+            yield {
+                "data": json.dumps(
+                    {"error": {"code": exc.code, "message": exc.message}},
+                    ensure_ascii=False,
+                )
+            }
+        except Exception:
+            logger.exception(
+                "对话流式生成失败 conversation_id=%s", conversation_id
+            )
+            yield {
+                "data": json.dumps(
+                    {
+                        "error": {
+                            "code": "chat_stream_failed",
+                            "message": "流式生成失败",
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        yield {"data": "[DONE]"}
+
+    return EventSourceResponse(event_gen())

@@ -4,13 +4,13 @@ import { Link, useParams } from "react-router-dom";
 import {
   agentStatusLabel,
   artifactLink,
-  isRunTerminal,
   usageTokens,
   type AgentRun,
 } from "../agent";
 import { canCancelTeamRun, canDecideTeamChildApproval, entryKindLabel, roleLabel, teamTotals, type TeamRunDetail } from "../agentTeam";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import { useLiveSnapshot } from "../live";
 import { errorText } from "../types";
 import { runStatusBadge } from "../workflows";
 
@@ -24,12 +24,17 @@ export default function TeamRunDetailPage() {
   const detail = useQuery({
     queryKey: ["team-run", id],
     queryFn: () => api<TeamRunDetail>(`/agent/team/runs/${id}`),
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      if (!data) return 2000;
-      return isRunTerminal(data.run.status) ? false : 2000;
-    },
   });
+  useLiveSnapshot<TeamRunDetail>(
+    ["team-run", id],
+    id ? `/agent/team/runs/${id}/stream` : null,
+    {
+      onSettled: () => {
+        void queryClient.invalidateQueries({ queryKey: ["team-run", id] });
+        void queryClient.invalidateQueries({ queryKey: ["agent-runs"] });
+      },
+    },
+  );
   const cancelRun = useMutation({
     mutationFn: () => api<AgentRun>(`/agent/team/runs/${id}/cancel`, { method: "POST" }),
     onSuccess: () => {

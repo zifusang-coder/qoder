@@ -1,6 +1,7 @@
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, Header, Query
@@ -8,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
 from app.agent.policy import load_overrides, snapshot_policy
 from app.agent.quota import ensure_daily_quota
@@ -27,6 +29,7 @@ from app.models.workflow import (
 from app.permissions import admin_access, editor_access, viewer_access
 from app.queue import get_queue
 from app.services.audit import record_best_effort
+from app.services.live import snapshot_stream
 from app.workflow import approvals as workflow_approvals
 from app.workflow import lifecycle
 from app.workflow.validate import validate_inputs
@@ -536,6 +539,29 @@ async def get_run(
     run_id: str,
     user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> WorkflowRunDetailOut:
+    return await _run_detail(session, run_id, user)
+
+
+@router.get("/workflow-runs/{run_id}/stream")
+async def stream_run(
+    run_id: str,
+    user: User = Depends(viewer_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> EventSourceResponse:
+    await _owned_run(session, run_id, user)
+
+    async def load(read: AsyncSession) -> dict[str, Any]:
+        detail = await _run_detail(read, run_id, user)
+        return detail.model_dump(mode="json")
+
+    return EventSourceResponse(
+        snapshot_stream(load, status_of=lambda payload: payload["run"]["status"])
+    )
+
+
+async def _run_detail(
+    session: AsyncSession, run_id: str, user: User
 ) -> WorkflowRunDetailOut:
     run = await _owned_run(session, run_id, user)
     version = await _version_number(session, run)

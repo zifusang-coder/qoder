@@ -1,10 +1,11 @@
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.api import (
     accounts,
@@ -28,7 +29,11 @@ from app.api import settings as settings_api
 from app.config import get_settings
 from app.db import SessionLocal
 from app.errors import AppError, app_error_handler
-from app.logging_setup import configure_http_logging
+from app.logging_setup import (
+    RequestContextMiddleware,
+    configure_http_logging,
+)
+from app.metrics import render_metrics
 from app.seed import ensure_admin
 
 configure_http_logging()
@@ -83,6 +88,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestContextMiddleware)
 app.include_router(auth.router, prefix="/api")
 app.include_router(accounts.router, prefix="/api")
 app.include_router(agent.router, prefix="/api")
@@ -105,3 +111,18 @@ app.include_router(workflow_runs.router, prefix="/api")
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+async def metrics_endpoint(request: Request) -> PlainTextResponse:
+    # 令牌为空时视作未启用，返回 404 而不是暴露空指标端点
+    token = get_settings().metrics_token.strip()
+    if not token:
+        return PlainTextResponse("not found\n", status_code=404)
+    supplied = request.headers.get("x-metrics-token", "")
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    if not supplied or not secrets.compare_digest(supplied, token):
+        return PlainTextResponse("unauthorized\n", status_code=401)
+    return PlainTextResponse(render_metrics())

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { streamSse } from "../sse";
+import { streamSse, streamSseGet, type SseEvent } from "../sse";
 
 const encoder = new TextEncoder();
 
@@ -55,7 +55,7 @@ describe("streamSse", () => {
 
     const chunks: string[] = [];
     const onDone = vi.fn();
-    await streamSse("/chat", {}, (text) => chunks.push(text), onDone);
+    await streamSse("/chat", {}, { onChunk: (text) => chunks.push(text), onDone });
 
     expect(chunks).toEqual(["你", "好"]);
     expect(onDone).toHaveBeenCalledTimes(1);
@@ -73,7 +73,7 @@ describe("streamSse", () => {
     );
 
     const chunks: string[] = [];
-    await streamSse("/chat", {}, (text) => chunks.push(text));
+    await streamSse("/chat", {}, { onChunk: (text) => chunks.push(text) });
 
     expect(chunks).toEqual(["你"]);
   });
@@ -87,7 +87,7 @@ describe("streamSse", () => {
 
     const chunks: string[] = [];
     const onDone = vi.fn();
-    await streamSse("/chat", {}, (text) => chunks.push(text), onDone);
+    await streamSse("/chat", {}, { onChunk: (text) => chunks.push(text), onDone });
 
     expect(chunks).toEqual(["末"]);
     expect(onDone).toHaveBeenCalledTimes(1);
@@ -103,7 +103,7 @@ describe("streamSse", () => {
     );
 
     const chunks: string[] = [];
-    await streamSse("/chat", {}, (text) => chunks.push(text));
+    await streamSse("/chat", {}, { onChunk: (text) => chunks.push(text) });
 
     expect(chunks).toEqual(["多行"]);
   });
@@ -121,10 +121,39 @@ describe("streamSse", () => {
 
     const chunks: string[] = [];
     const onDone = vi.fn();
-    await streamSse("/chat", {}, (text) => chunks.push(text), onDone);
+    await streamSse("/chat", {}, { onChunk: (text) => chunks.push(text), onDone });
 
     expect(chunks).toEqual(["a"]);
     expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers parsed events including the done payload", async () => {
+    stubBrowser();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          bytes(
+            'data: {"delta":"a"}\n\n' +
+              'data: {"done":{"reply":"a","conversation_id":"c1"}}\n\n' +
+              "data: [DONE]\n\n",
+          ),
+        ]),
+      ),
+    );
+
+    const events: SseEvent[] = [];
+    const chunks: string[] = [];
+    await streamSse("/chat/stream", {}, {
+      onChunk: (text) => chunks.push(text),
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(chunks).toEqual(["a"]);
+    expect(events).toEqual([
+      { delta: "a" },
+      { done: { reply: "a", conversation_id: "c1" } },
+    ]);
   });
 
   it("throws on an in-band error event", async () => {
@@ -134,7 +163,7 @@ describe("streamSse", () => {
       vi.fn(async () => sseResponse([bytes('data: {"error":"boom"}\n\n')])),
     );
 
-    await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("boom");
+    await expect(streamSse("/chat", {}, {})).rejects.toThrow("boom");
   });
 
   it("throws the message from a structured error event", async () => {
@@ -148,7 +177,7 @@ describe("streamSse", () => {
       ),
     );
 
-    await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("生成失败");
+    await expect(streamSse("/chat", {}, {})).rejects.toThrow("生成失败");
   });
 
   it("calls the unauthorized helper on a 401 response", async () => {
@@ -158,9 +187,33 @@ describe("streamSse", () => {
       vi.fn(async () => new Response(null, { status: 401 })),
     );
 
-    await expect(streamSse("/chat", {}, () => {})).rejects.toThrow("流式请求失败");
+    await expect(streamSse("/chat", {}, {})).rejects.toThrow("流式请求失败");
 
     expect(store.has("nm_token")).toBe(false);
     expect(location.href).toBe("/login");
+  });
+});
+
+describe("streamSseGet", () => {
+  it("sends a GET with the bearer token and parses done events", async () => {
+    const { store } = stubBrowser("live-token");
+    const fetchMock = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        sseResponse([bytes('data: {"done":{"status":"succeeded"}}\n\ndata: [DONE]\n\n')]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const events: SseEvent[] = [];
+    await streamSseGet("/agent/runs/1/stream", {
+      onEvent: (event) => events.push(event),
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.method).toBe("GET");
+    expect((init.headers as Headers).get("Authorization")).toBe(
+      "Bearer live-token",
+    );
+    expect(events).toEqual([{ done: { status: "succeeded" } }]);
+    expect(store.get("nm_token")).toBe("live-token");
   });
 });

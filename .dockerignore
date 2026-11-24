@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+.venv
+backend/.venv
+backend/.pytest_cache
+backend/.ruff_cache
+backend/tests
+backend/newmedia_backend.egg-info
+**/__pycache__
+**/*.pyc
+web
+docs
+outputs
+scripts
+docker-compose.yml

@@ -39,6 +39,7 @@ from app.llm.tools import ToolCall
 from app.models.agent import AgentApproval, AgentRun, AgentStep
 from app.models.user import User
 from app.models.workflow import WorkflowRun
+from app.services.alerts import report_failure
 from app.services.audit import record_best_effort
 from app.skills.registry import SkillRegistry
 from app.storage import StorageBackend
@@ -322,6 +323,12 @@ async def fail_run(
     await session.commit()
     await _audit(
         session, run, "agent.run.fail", status="failure", detail={"code": code}
+    )
+    await report_failure(
+        kind="agent",
+        resource_id=str(run.id),
+        tenant_id=run.tenant_id,
+        error_code=code,
     )
 
 

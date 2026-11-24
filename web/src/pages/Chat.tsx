@@ -13,6 +13,7 @@ import {
   type ChatTurn,
 } from "../chat";
 import { api } from "../client";
+import { streamSse } from "../sse";
 import {
   errorText,
   type ChatConversationDetail,
@@ -124,37 +125,68 @@ export default function Chat() {
     }
     setError("");
     setMessage("");
+    const assistantId = `local-${nextId.current++}`;
     setTurns((prev) => [
       ...prev,
       { id: `local-${nextId.current++}`, role: "user", text },
+      { id: assistantId, role: "assistant", text: "", streaming: true },
     ]);
     setSending(true);
+    let reply = "";
     try {
-      const result = await api<ChatOut>("/chat", {
-        method: "POST",
-        body: JSON.stringify({
+      await streamSse<ChatOut>(
+        "/chat/stream",
+        {
           message: text,
           ...(profileId ? { profile_id: profileId } : {}),
           ...(activeId ? { conversation_id: activeId } : {}),
-        }),
-      });
-      setTurns((prev) => [
-        ...prev,
-        {
-          id: result.run_id ?? `local-${nextId.current++}`,
-          role: "assistant",
-          text: result.reply,
-          meta: result,
         },
-      ]);
-      if (!activeId && result.conversation_id) {
-        setActiveId(result.conversation_id);
-      }
+        {
+          onChunk: (delta) => {
+            reply += delta;
+            setTurns((prev) =>
+              prev.map((turn) =>
+                turn.id === assistantId ? { ...turn, text: reply } : turn,
+              ),
+            );
+          },
+          onEvent: (event) => {
+            const result = event.done;
+            if (!result) return;
+            setTurns((prev) =>
+              prev.map((turn) =>
+                turn.id === assistantId
+                  ? {
+                      id: result.run_id ?? turn.id,
+                      role: "assistant",
+                      text: result.reply,
+                      meta: result,
+                    }
+                  : turn,
+              ),
+            );
+            if (!activeId && result.conversation_id) {
+              setActiveId(result.conversation_id);
+            }
+          },
+        },
+      );
       void queryClient.invalidateQueries({ queryKey: ["chat-conversations"] });
     } catch (err) {
       setError(errorText(err));
+      setTurns((prev) =>
+        prev.flatMap((turn) => {
+          if (turn.id !== assistantId) return [turn];
+          return turn.text ? [{ ...turn, streaming: false }] : [];
+        }),
+      );
     } finally {
       setSending(false);
+      setTurns((prev) =>
+        prev.map((turn) =>
+          turn.id === assistantId ? { ...turn, streaming: false } : turn,
+        ),
+      );
     }
   }
 
@@ -280,11 +312,13 @@ export default function Chat() {
                 }`}
               >
                 {turn.text}
+                {turn.streaming && (
+                  <span className="ml-0.5 animate-pulse">▍</span>
+                )}
               </div>
               {turn.meta && <AssistantMeta meta={turn.meta} />}
             </div>
           ))}
-          {sending && <p className="text-ink-500">生成中…</p>}
           <div ref={endRef} />
         </div>
 

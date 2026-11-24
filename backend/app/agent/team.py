@@ -30,6 +30,7 @@ from app.config import Settings
 from app.errors import AppError
 from app.models.agent import AgentApproval, AgentRun, AgentStep, AgentTeamEntry
 from app.models.user import User
+from app.services.alerts import report_failure
 from app.services.audit import record_best_effort
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,12 @@ async def _fail_team(session, run, code: str, message: str) -> None:
         session, tenant_id=run.tenant_id, action="agent.team.fail",
         actor=actor, resource_type="agent_run", resource_id=str(run.id),
         detail={"error_code": code},
+    )
+    await report_failure(
+        kind="team",
+        resource_id=str(run.id),
+        tenant_id=run.tenant_id,
+        error_code=code,
     )
 
 

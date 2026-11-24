@@ -14,6 +14,7 @@ from app.llm.gateway import LLMGateway, load_gateway_default
 from app.models.media import MediaJob
 from app.models.project import Content, ContentVersion, Project
 from app.models.tenant import Tenant
+from app.services.alerts import report_failure
 from app.services.outputs import prepare_inputs
 from app.services.profiles import inputs_query, profile_block_for
 from app.services.skill_settings import require_enabled
@@ -272,6 +273,12 @@ async def mark_queue_failed(session: AsyncSession, job: MediaJob) -> None:
     job.error_message = "任务队列暂不可用，请稍后重试"
     job.finished_at = datetime.now(UTC)
     await session.commit()
+    await report_failure(
+        kind="media",
+        resource_id=str(job.id),
+        tenant_id=job.tenant_id,
+        error_code="queue_unavailable",
+    )
 
 
 async def retry_media_job(
@@ -331,6 +338,12 @@ async def run_media_job(
         job.error_message = "租户已停用，任务未执行"
         job.finished_at = datetime.now(UTC)
         await session.commit()
+        await report_failure(
+            kind="media",
+            resource_id=str(job.id),
+            tenant_id=job.tenant_id,
+            error_code="tenant_suspended",
+        )
         return job
 
     job.status = "running"
@@ -368,6 +381,12 @@ async def run_media_job(
             failed.error_message = exc.message[:2000]
             failed.finished_at = datetime.now(UTC)
             await session.commit()
+            await report_failure(
+                kind="media",
+                resource_id=str(failed.id),
+                tenant_id=failed.tenant_id,
+                error_code=exc.code,
+            )
         return failed
     except Exception:
         logger.exception("媒体任务执行异常 job=%s", job_uuid)
@@ -379,6 +398,12 @@ async def run_media_job(
             failed.error_message = "媒体生成失败，请稍后重试"
             failed.finished_at = datetime.now(UTC)
             await session.commit()
+            await report_failure(
+                kind="media",
+                resource_id=str(failed.id),
+                tenant_id=failed.tenant_id,
+                error_code="internal_error",
+            )
         return failed
 
     job.status = "succeeded"

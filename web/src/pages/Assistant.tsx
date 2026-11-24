@@ -33,6 +33,7 @@ import {
 } from "../agentTeam";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import { useLiveSnapshot } from "../live";
 import { errorText } from "../types";
 
 const BUDGET_LABELS: Record<string, string> = {
@@ -77,12 +78,6 @@ export default function Assistant() {
   const runs = useQuery({
     queryKey: ["agent-runs"],
     queryFn: () => api<AgentRun[]>("/agent/runs?limit=50"),
-    // spec §11: 列表每 2 秒轮询，直到所有运行进入终态。
-    refetchInterval: (query) => {
-      const items = query.state.data;
-      if (!items) return false;
-      return items.some((item) => !isRunTerminal(item.status)) ? 2000 : false;
-    },
   });
 
   const activeId = selected ?? runs.data?.[0]?.id ?? null;
@@ -90,11 +85,24 @@ export default function Assistant() {
     queryKey: ["agent-run", activeId],
     queryFn: () => api<AgentRunDetail>(`/agent/runs/${activeId}`),
     enabled: Boolean(activeId),
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return !status || isRunTerminal(status) ? false : 2000;
-    },
   });
+
+  useLiveSnapshot<AgentRunDetail>(
+    ["agent-run", activeId],
+    activeId ? `/agent/runs/${activeId}/stream` : null,
+    {
+      onSnapshot: (snapshot) => {
+        queryClient.setQueryData<AgentRun[]>(["agent-runs"], (items) =>
+          items?.map((item) =>
+            item.id === snapshot.id ? { ...item, ...snapshot } : item,
+          ),
+        );
+      },
+      onSettled: () => {
+        void queryClient.invalidateQueries({ queryKey: ["agent-runs"] });
+      },
+    },
+  );
 
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["agent-runs"] });

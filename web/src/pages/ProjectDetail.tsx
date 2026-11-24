@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
 import MediaPreview from "../components/MediaPreview";
+import { useLiveSnapshot } from "../live";
 import {
   formatDuration,
   isMediaJobActive,
@@ -107,9 +108,13 @@ export default function ProjectDetail() {
     queryFn: () =>
       api<MediaJob>(`/projects/${projectId}/media/jobs/${activeMediaJobId}`),
     enabled: Boolean(projectId && activeMediaJobId),
-    refetchInterval: (query) =>
-      isMediaJobActive(query.state.data?.status) ? 2000 : false,
   });
+  useLiveSnapshot<MediaJob>(
+    ["mediaJob", projectId, activeMediaJobId],
+    activeMediaJobId
+      ? `/projects/${projectId}/media/jobs/${activeMediaJobId}/stream`
+      : null,
+  );
 
   const accounts = useQuery({
     queryKey: ["accounts"],

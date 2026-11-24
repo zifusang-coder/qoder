@@ -5,6 +5,7 @@ export interface ChatTurn {
   role: "user" | "assistant";
   text: string;
   meta?: ChatOut;
+  streaming?: boolean;
 }
 
 export function conversationTitle(title: string): string {

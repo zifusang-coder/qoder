@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
 from app.agent.policy import load_overrides, snapshot_policy
 from app.agent.registry import get_tool_registry
@@ -27,6 +28,7 @@ from app.models.user import User
 from app.permissions import admin_access, editor_access, viewer_access
 from app.queue import get_queue
 from app.services.audit import record_best_effort
+from app.services.live import snapshot_stream
 
 router = APIRouter(prefix="/agent/team", tags=["agent-team"])
 
@@ -163,6 +165,30 @@ async def get_team_run(
     user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ):
+    return await _team_detail(session, run_id, user)
+
+
+@router.get("/runs/{run_id}/stream")
+async def stream_team_run(
+    run_id: str,
+    user: User = Depends(viewer_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> EventSourceResponse:
+    run = await agent_api._owned_run(session, run_id, user)
+    if run.mode != "team":
+        raise AppError("not_found", "资源不存在", 404)
+
+    async def load(read: AsyncSession) -> dict[str, Any]:
+        return await _team_detail(read, run_id, user)
+
+    return EventSourceResponse(
+        snapshot_stream(load, status_of=lambda payload: payload["run"]["status"])
+    )
+
+
+async def _team_detail(
+    session: AsyncSession, run_id: str, user: User
+) -> dict[str, Any]:
     run = await agent_api._owned_run(session, run_id, user)
     if run.mode != "team":
         raise AppError("not_found", "资源不存在", 404)

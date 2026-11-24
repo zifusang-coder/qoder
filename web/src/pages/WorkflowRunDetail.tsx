@@ -10,6 +10,7 @@ import {
 } from "../agent";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import { useLiveSnapshot } from "../live";
 import { errorText } from "../types";
 import type {
   WorkflowApproval,
@@ -22,7 +23,6 @@ import {
   canDecideWorkflowApproval,
   canResumeWorkflowRun,
   executedEdgeIds,
-  isRunTerminal,
   latestNodeStatuses,
   nodeKindLabel,
   nodeStatusLabel,
@@ -52,10 +52,6 @@ export default function WorkflowRunDetail() {
     queryKey: ["workflow-run", runId],
     queryFn: () => api<RunDetail>(`/workflow-runs/${runId}`),
     enabled: Boolean(runId),
-    refetchInterval: (query) => {
-      const status = query.state.data?.run.status;
-      return status && isRunTerminal(status) ? false : 2000;
-    },
   });
   const detail = detailQuery.data ?? null;
   const run = detail?.run ?? null;
@@ -73,6 +69,12 @@ export default function WorkflowRunDetail() {
     void queryClient.invalidateQueries({ queryKey: ["workflow", id] });
     void queryClient.invalidateQueries({ queryKey: ["workflows"] });
   }
+
+  useLiveSnapshot<RunDetail>(
+    ["workflow-run", runId],
+    runId ? `/workflow-runs/${runId}/stream` : null,
+    { onSettled: refresh },
+  );
 
   const cancel = useMutation({
     mutationFn: () =>

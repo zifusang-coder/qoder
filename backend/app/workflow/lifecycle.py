@@ -22,6 +22,7 @@ from app.models.workflow import (
     WorkflowNodeRun,
     WorkflowRun,
 )
+from app.services.alerts import report_failure
 from app.services.audit import record_best_effort
 from app.workflow import approvals
 
@@ -360,6 +361,12 @@ async def fail_active_run(
     await _interrupt_nodes(session, run.id)
     await session.commit()
     await _audit(session, run.id, run.tenant_id, "workflow.run.fail", actor)
+    await report_failure(
+        kind="workflow",
+        resource_id=str(run.id),
+        tenant_id=run.tenant_id,
+        error_code=error_code,
+    )
     return True
 
 

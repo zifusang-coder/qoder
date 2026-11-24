@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
 from app.agent.policy import (
     clamped_overrides,
@@ -36,6 +37,7 @@ from app.models.workflow import WorkflowRun
 from app.permissions import admin_access, editor_access, viewer_access
 from app.queue import get_queue
 from app.services.audit import record_best_effort
+from app.services.live import snapshot_stream
 from app.workflow import approvals as workflow_approvals
 from app.workflow import lifecycle
 
@@ -1070,6 +1072,17 @@ async def get_run(
     user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> RunDetailOut:
+    return await _run_detail(session, run_id, user, limit=limit, offset=offset)
+
+
+async def _run_detail(
+    session: AsyncSession,
+    run_id: str,
+    user: User,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> RunDetailOut:
     run = await _owned_run(session, run_id, user)
     steps = (
         await session.execute(
@@ -1093,6 +1106,23 @@ async def get_run(
         **base.model_dump(),
         steps=[_step_out(step) for step in steps],
     )
+
+
+@router.get("/runs/{run_id}/stream")
+async def stream_run(
+    run_id: str,
+    user: User = Depends(viewer_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> EventSourceResponse:
+    # 先做一次归属校验，未知或越权运行直接 404，而不是以流内错误返回。
+    await _owned_run(session, run_id, user)
+
+    async def load(read: AsyncSession) -> dict[str, Any]:
+        detail = await _run_detail(read, run_id, user)
+        return detail.model_dump(mode="json")
+
+    return EventSourceResponse(snapshot_stream(load))
+
 
 
 @router.post("/runs/{run_id}/cancel", response_model=RunOut)

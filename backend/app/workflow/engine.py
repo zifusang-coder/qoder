@@ -51,6 +51,7 @@ from app.models.workflow import (
     WorkflowRun,
     WorkflowVersion,
 )
+from app.services.alerts import report_failure
 from app.services.audit import is_sensitive_key, record_best_effort
 from app.skills.registry import SkillRegistry
 from app.storage import StorageBackend
@@ -1733,6 +1734,12 @@ async def _fail(
             return run.status
         await _fail_run(session, run, code, message)
         await session.commit()
+        await report_failure(
+            kind="workflow",
+            resource_id=str(run.id),
+            tenant_id=run.tenant_id,
+            error_code=code,
+        )
     return "failed"
 
 

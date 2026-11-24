@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
 import jsonschema
@@ -18,6 +18,7 @@ from pydantic import (
 from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette.sse import EventSourceResponse
 
 from app.db import get_session
 from app.errors import AppError
@@ -29,6 +30,7 @@ from app.permissions import editor_access, viewer_access
 from app.publish.base import Platform
 from app.queue import get_queue
 from app.services.audit import record_best_effort
+from app.services.live import snapshot_stream
 from app.services.media import (
     create_media_job,
     mark_queue_failed,
@@ -705,6 +707,24 @@ async def get_project_media_job(
     project = await _owned_project(session, project_id, user)
     job = await _owned_media_job(session, project, job_id, user)
     return _media_job_out(job)
+
+
+@router.get("/projects/{project_id}/media/jobs/{job_id}/stream")
+async def stream_project_media_job(
+    project_id: str,
+    job_id: str,
+    user: User = Depends(viewer_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> EventSourceResponse:
+    project = await _owned_project(session, project_id, user)
+    await _owned_media_job(session, project, job_id, user)
+
+    async def load(read: AsyncSession) -> dict[str, Any]:
+        owned = await _owned_project(read, project_id, user)
+        job = await _owned_media_job(read, owned, job_id, user)
+        return _media_job_out(job).model_dump(mode="json")
+
+    return EventSourceResponse(snapshot_stream(load))
 
 
 @router.post(

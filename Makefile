@@ -1,4 +1,5 @@
-.PHONY: setup up down dev worker migrate test fmt embed-backfill media-setup
+.PHONY: setup up down dev worker migrate test fmt embed-backfill media-setup \
+	docker-build docker-up docker-down docker-logs
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -24,3 +25,13 @@ fmt: setup
 	cd backend && uv run ruff check --fix .
 embed-backfill: setup
 	cd backend && uv run python -m app.scripts.backfill_embeddings
+
+# 生产编排：需要 .env 中的 JWT_SECRET/MASTER_KEY/ADMIN_PASSWORD；down 不删数据卷
+docker-build:
+	docker compose --profile app build
+docker-up:
+	docker compose --profile app up -d --build --wait
+docker-down:
+	docker compose --profile app down
+docker-logs:
+	docker compose --profile app logs -f api worker

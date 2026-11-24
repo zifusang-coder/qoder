@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     login_rate_limit_ip: int = 20
     login_rate_limit_window_seconds: int = 300
     audit_retention_days: int = 180
+    metrics_token: str = ""
+    alert_webhook_url: str = ""
     agent_max_steps_default: int = 12
     agent_max_steps_ceiling: int = 30
     agent_max_tool_calls: int = 20

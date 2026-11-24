@@ -1,7 +1,11 @@
+import json
 import uuid
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api import chat as chat_module
 from app.main import app
@@ -22,12 +26,37 @@ class RecordingGateway:
         self.calls.append(messages)
         return self.reply
 
+    async def stream(self, messages, **kwargs):
+        self.calls.append(messages)
+        for char in self.reply:
+            yield char
+
 
 def _use_gateway(monkeypatch, gateway):
     async def _load(_session, _tenant_id):
         return gateway
 
     monkeypatch.setattr(chat_module, "load_gateway_default", _load)
+
+
+def _bind_write_session(monkeypatch, db_session):
+    # 流式响应在请求依赖之外落库，测试里把独立会话指回同一内存库
+    monkeypatch.setattr(
+        chat_module,
+        "SessionLocal",
+        async_sessionmaker(db_session.bind, expire_on_commit=False),
+    )
+
+
+async def _sse_events(resp) -> list[dict]:
+    body = "".join([chunk async for chunk in resp.aiter_text()])
+    lines = [
+        line[len("data: ") :].strip()
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert lines[-1] == "[DONE]"
+    return [json.loads(line) for line in lines[:-1]]
 
 
 async def _messages(db_session, conversation_id):
@@ -282,3 +311,99 @@ async def test_conversation_remembers_profile(client, monkeypatch, db_session):
     )
     assert "<profile_context>" in gateway.calls[-1][0]["content"]
     assert "效率笔记" in gateway.calls[-1][0]["content"]
+
+
+async def test_chat_message_seq_is_unique_per_conversation(
+    client, monkeypatch, db_session
+):
+    _use_gateway(monkeypatch, RecordingGateway())
+    resp = await client.post("/api/chat", json={"message": "你好"})
+    assert resp.status_code == 200
+    conversation_id = uuid.UUID(resp.json()["conversation_id"])
+
+    db_session.add(
+        ChatMessage(
+            tenant_id=DEFAULT_TENANT_ID,
+            conversation_id=conversation_id,
+            seq=1,
+            role="user",
+            content="重复序号",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+    await db_session.rollback()
+
+
+async def test_chat_stream_emits_deltas_and_persists_reply(
+    client, monkeypatch, db_session
+):
+    _use_gateway(monkeypatch, RecordingGateway("你好，世界"))
+    _bind_write_session(monkeypatch, db_session)
+
+    async with client.stream(
+        "POST", "/api/chat/stream", json={"message": "你好"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _sse_events(resp)
+
+    assert "".join(event["delta"] for event in events if "delta" in event) == "你好，世界"
+    done = events[-1]["done"]
+    assert done["reply"] == "你好，世界"
+    assert done["intent"] == "chat"
+    conversation_id = uuid.UUID(done["conversation_id"])
+
+    db_session.expire_all()
+    messages = await _messages(db_session, conversation_id)
+    assert [(m.role, m.content) for m in messages] == [
+        ("user", "你好"),
+        ("assistant", "你好，世界"),
+    ]
+    assert messages[1].intent == "chat"
+
+
+async def test_chat_stream_skill_intent_emits_done_event(
+    client, monkeypatch, db_session
+):
+    _use_gateway(monkeypatch, RecordingGateway("这是运营建议"))
+    app.dependency_overrides[get_registry] = lambda: SkillRegistry(SKILLS_DIR)
+    try:
+        async with client.stream(
+            "POST",
+            "/api/chat/stream",
+            json={"message": "写个小红书笔记：通勤穿搭"},
+        ) as resp:
+            assert resp.status_code == 200
+            events = await _sse_events(resp)
+
+        assert len(events) == 1
+        done = events[0]["done"]
+        assert done["intent"] == "skill"
+        assert done["skill_id"] == "xhs-note"
+
+        db_session.expire_all()
+        messages = await _messages(db_session, uuid.UUID(done["conversation_id"]))
+        assert [m.role for m in messages] == ["user", "assistant"]
+        assert messages[1].skill_id == "xhs-note"
+    finally:
+        app.dependency_overrides.pop(get_registry, None)
+
+
+async def test_chat_stream_reports_gateway_errors(client, monkeypatch, db_session):
+    class BrokenGateway(RecordingGateway):
+        async def stream(self, messages, **kwargs):
+            yield "半句"
+            raise chat_module.AppError("llm_timeout", "模型超时", 504)
+
+    _use_gateway(monkeypatch, BrokenGateway())
+    _bind_write_session(monkeypatch, db_session)
+
+    async with client.stream(
+        "POST", "/api/chat/stream", json={"message": "你好"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _sse_events(resp)
+
+    assert events[0]["delta"] == "半句"
+    assert events[-1]["error"] == {"code": "llm_timeout", "message": "模型超时"}
+

@@ -1,7 +1,18 @@
 import { getToken, handleUnauthorized } from "./client";
 
-type SseError = string | { code: string; message: string };
-type SseEvent = { delta?: string; error?: SseError };
+export type SseError = string | { code: string; message: string };
+
+export interface SseEvent {
+  delta?: string;
+  done?: unknown;
+  error?: SseError;
+}
+
+export interface SseHandlers<T = unknown> {
+  onChunk?: (text: string) => void;
+  onEvent?: (event: SseEvent & { done?: T }) => void;
+  onDone?: () => void;
+}
 
 function eventData(block: string): string | null {
   const dataLines: string[] = [];
@@ -15,28 +26,44 @@ function eventData(block: string): string | null {
   return dataLines.join("\n");
 }
 
-export async function streamSse(
-  path: string,
-  body: unknown,
-  onChunk: (text: string) => void,
-  onDone?: () => void,
-): Promise<void> {
+async function openStream(path: string, init: RequestInit): Promise<Response> {
   const requestToken = getToken();
-  const resp = await fetch(`/api${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${requestToken ?? ""}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const headers = new Headers(init.headers);
+  if (requestToken) headers.set("Authorization", `Bearer ${requestToken}`);
+  const resp = await fetch(`/api${path}`, { ...init, headers });
   if (resp.status === 401) handleUnauthorized(requestToken);
   if (!resp.ok || !resp.body) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.message ?? "流式请求失败");
   }
+  return resp;
+}
 
-  const reader = resp.body.getReader();
+export async function streamSse<T = unknown>(
+  path: string,
+  body: unknown,
+  handlers: SseHandlers<T>,
+): Promise<void> {
+  const resp = await openStream(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return consume(resp, handlers);
+}
+
+export async function streamSseGet<T = unknown>(
+  path: string,
+  handlers: SseHandlers<T>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await openStream(path, { method: "GET", signal });
+  return consume(resp, handlers);
+}
+
+async function consume<T>(resp: Response, handlers: SseHandlers<T>) {
+  const { onChunk, onEvent, onDone } = handlers;
+  const reader = resp.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let doneCalled = false;
@@ -55,11 +82,11 @@ export async function streamSse(
       finish();
       return true;
     }
-    let event: SseEvent;
+    let event: SseEvent & { done?: T };
     try {
-      event = JSON.parse(joined) as SseEvent;
+      event = JSON.parse(joined) as SseEvent & { done?: T };
     } catch {
-      onChunk(joined);
+      onChunk?.(joined);
       return false;
     }
     if (event.error) {
@@ -67,7 +94,8 @@ export async function streamSse(
         typeof event.error === "string" ? event.error : event.error.message,
       );
     }
-    if (event.delta) onChunk(event.delta);
+    onEvent?.(event);
+    if (event.delta) onChunk?.(event.delta);
     return false;
   };
 
