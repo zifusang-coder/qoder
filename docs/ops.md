@@ -251,9 +251,9 @@ npm --prefix web run test:e2e
 
 ### Phase 3 多租户 SaaS 基础
 
-- **租户生命周期**：新增 `tenants` 表与平台管理员权限位；平台管理员可创建/改名/停用/启用租户，创建时同步开通 owner 账号并返回一次性临时密码。不提供公开注册与租户删除。
+- **租户生命周期**：新增 `tenants` 表与平台管理员权限位；平台管理员可创建/改名/停用/启用/删除租户，创建时同步开通 owner 账号并返回一次性临时密码。不提供公开注册。删除租户要求先停用、再输入租户标识确认，会清空该租户的业务数据，且不能删除自己所在的租户。
 - **四级角色**：`viewer < editor < admin < owner`。viewer 只读；editor 可创作、跑技能、生成媒体、导入数据、导出与创建发布任务；admin 可管理发布账号、审核/执行/排期发布、管理模型设置；owner 可管理成员与租户信息。平台管理员与业务角色解耦，即使角色为 viewer 仍可管理租户。
-- **成员管理**：owner 可创建成员、改角色、停用/启用；临时密码只返回一次，首次登录强制改密；最后一名 owner 不可被降级或停用，不能修改自己的角色或停用自己。
+- **成员管理**：owner 可创建成员、改角色、停用/启用/永久删除；临时密码只返回一次，首次登录强制改密；最后一名 owner 不可被降级或停用，不能修改自己的角色或停用自己。永久删除只允许对已停用成员执行，且不能删除自己。
 - **会话失效**：JWT 增加 `ver` 声明并与 `users.token_version` 比对；改密、改角色、停用用户、停用租户都会使旧 token 立即失效。
 - **审计**：新增 `audit_logs` 表，记录登录、改密、成员、租户、发布账号、模型提供商、技能启停、发布与媒体事件；审计按租户隔离、只追加，`password`/`token`/`secret`/`api_key` 等字段写库前脱敏。
 - **登录限流**：同一邮箱与同一 IP 双维度计数，默认 5 次 / 20 次每 5 分钟；计数存放在 Redis，多实例共享，超限返回 `429 too_many_attempts` 与 `Retry-After`；Redis 不可用时放行登录，只记录错误日志。
@@ -269,13 +269,15 @@ npm --prefix web run test:e2e
 ```text
 GET/POST         /api/members
 PATCH/DELETE     /api/members/{id}
+DELETE           /api/members/{id}/permanent      # 仅限已停用成员
 GET/POST         /api/tenants
 PATCH            /api/tenants/{id}
+DELETE           /api/tenants/{id}                # 需先停用，body 传 {"confirm_slug": "..."}
 GET              /api/audit-logs
 POST             /api/auth/change-password
 ```
 
-Phase 3 已知限制：一人一租户；无公开注册、租户删除与计费；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）；登录限流依赖 Redis，单机部署下 Redis 故障期间限流暂时失效。
+Phase 3 已知限制：一人一租户；无公开注册与计费；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）；登录限流依赖 Redis，单机部署下 Redis 故障期间限流暂时失效。
 
 ## 13. 已知限制与约定
 
@@ -283,6 +285,65 @@ Phase 3 已知限制：一人一租户；无公开注册、租户删除与计费
 - 平台密钥仅加密存储，接口只返回掩码。
 - 公众号账号的 `meta`（封面素材 ID、作者、评论设置）仅在创建授权时写入，之后只能重命名或更新 AppID/AppSecret；需要调整 `meta` 时请停用后重新授权。
 - 停用账号会立即销毁加密凭据且不可恢复；已有发布任务仍保留，但再次执行会因账号不可用而失败。
+
+### 13.1 删除语义
+
+- `DELETE /api/projects/{id}`：删除项目并级联删除其内容、版本、媒体与数据快照，审计记录 `project.delete`。
+- `DELETE /api/contents/{id}`：删除单条内容并级联删除版本、快照与发布任务，审计记录 `content.delete`。
+- `DELETE /api/accounts/{id}/permanent`：仅 admin 及以上；账号须已停用，且没有发布记录，否则返回 409。审计记录 `account.delete`。
+- `DELETE /api/members/{id}/permanent`：仅 owner；成员须已停用，不能删除自己，也不能删除最后一名 owner。审计记录 `member.delete`。
+- `DELETE /api/tenants/{id}`：仅平台管理员；须先停用并提交 `{"confirm_slug": "<租户标识>"}`，不能删除自己所在租户。会按表清理该租户全部业务数据（成员、项目、内容、媒体、账号、密钥、审计等）后删除租户本身，审计记录写入操作者所属租户。
+- 删除只清理数据库记录，不回收对象存储中的文件；需要节省存储时另行清理 `outputs/` 或存储桶。
 - 产物写入 `outputs/<project_id>/`（项目内容）或 `outputs/adhoc/<tenant_id>/<run>/`（技能与对话临时产物），不进版本库。
 - 后处理脚本以独立子进程运行，初始工作目录设为技能目录，环境变量白名单、默认 30 秒超时、无 shell；这不是 OS 级隔离，多租户生产环境应把执行放到容器或沙箱（见 [skills/README.md](../skills/README.md) 的治理清单）。
 - 流式预览接口 `/api/skills/{id}/stream` 不写审计、不做输出校验与后处理；需要完整审计时使用非流式接口。
+
+## 14. 对外 API 与密钥
+
+管理员在「系统设置 → 对外 API 密钥」签发租户级密钥，供外部脚本或内部系统调用 Agent 与工作流。
+
+- 明文仅在创建响应中出现一次，关闭提示后无法再次查看；数据库只保存 sha256 摘要，泄露数据库也无法还原密钥。
+- 密钥绑定租户与创建者。调用以创建者身份执行，继承其角色、每用户并发限制、租户策略与配额。
+- 创建者被停用、角色降级或租户停用后，密钥立即被拒绝。
+- 吊销不可恢复；如需继续调用请重新签发。
+
+### 14.1 权限范围
+
+| 范围 | 能力 |
+| --- | --- |
+| `agent:run` | 创建 Agent 运行（需要创建者角色 ≥ editor） |
+| `agent:read` | 读取 Agent 运行详情与步骤 |
+| `workflow:run` | 按已发布版本触发工作流（需要创建者角色 ≥ editor） |
+| `workflow:read` | 读取工作流运行详情、节点与待审批项 |
+
+### 14.2 认证与接口
+
+请求头二选一：
+
+```http
+X-API-Key: nmk_xxxxxxxxxxxxxxxx
+Authorization: Bearer nmk_xxxxxxxxxxxxxxxx
+```
+
+| 方法 | 路径 | 所需范围 |
+| --- | --- | --- |
+| POST | `/api/public/agent/runs` | `agent:run` |
+| GET | `/api/public/agent/runs/{run_id}` | `agent:read` |
+| POST | `/api/public/workflows/{workflow_id}/runs` | `workflow:run` |
+| GET | `/api/public/workflow-runs/{run_id}` | `workflow:read` |
+
+创建类接口支持 `Idempotency-Key` 请求头，重复提交返回同一条运行，不会重复入队。
+
+```bash
+curl -X POST http://localhost:8000/api/public/agent/runs \
+  -H "X-API-Key: $NEWMEDIA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: weekly-report-2026-11-23" \
+  -d '{"goal": "生成本周品牌周报并给出三个选题"}'
+```
+
+### 14.3 审计
+
+- 密钥管理写 `api_key.create` / `api_key.revoke`。
+- 每次公共接口调用写 `api_key.access`，记录接口、方法、HTTP 状态、密钥前缀与名称；请求体、密钥明文均不进入审计。
+- 创建运行仍会额外写 `agent.run.create` / `workflow.run.create`，可在审计页按动作筛选。

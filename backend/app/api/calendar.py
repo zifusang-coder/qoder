@@ -16,6 +16,8 @@ from app.permissions import viewer_access
 router = APIRouter(tags=["calendar"])
 
 MAX_CALENDAR_RANGE = timedelta(days=90)
+FAILED_STATUSES = {"precheck_failed", "export_failed", "publish_failed"}
+MAX_ERROR_CHARS = 300
 
 
 class CalendarItem(BaseModel):
@@ -29,6 +31,7 @@ class CalendarItem(BaseModel):
     scheduled_at: datetime | None
     published_at: datetime | None
     account_name: str | None
+    error: str | None
 
 
 class CalendarOut(BaseModel):
@@ -104,6 +107,11 @@ async def get_calendar(
                 scheduled_at=_utc(job.scheduled_at),
                 published_at=_utc(job.published_at),
                 account_name=account.name if account is not None else None,
+                error=(
+                    (job.error or "")[:MAX_ERROR_CHARS] or None
+                    if job.status in FAILED_STATUSES
+                    else None
+                ),
             )
             for job, content, project, account in rows
         ]

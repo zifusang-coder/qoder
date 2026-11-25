@@ -8,6 +8,7 @@ import {
   type AuditFilters,
 } from "../audit";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
 import { errorText, type AuditLogList } from "../types";
 
 const PAGE_SIZE = 50;
@@ -134,16 +135,19 @@ export default function Audit() {
 
       {logs.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {logs.isError && (
-        <p className="text-sm text-coral-600">{errorText(logs.error)}</p>
+        <InlineError>{errorText(logs.error)}</InlineError>
       )}
       {logs.isSuccess && logs.data.items.length === 0 && (
-        <p className="text-sm text-ink-500">没有匹配的审计记录。</p>
+        <EmptyState
+          title="没有匹配的审计记录"
+          hint="调整筛选条件，或等待新的操作产生记录。"
+        />
       )}
 
       {logs.data && logs.data.items.length > 0 && (
         <section className="overflow-x-auto rounded-xl border border-line">
-          <table className="min-w-full text-left text-sm">
-            <thead className="bg-surface text-xs text-ink-500">
+          <table className="table1 min-w-full text-left">
+            <thead>
               <tr>
                 <th className="px-4 py-3">时间</th>
                 <th className="px-4 py-3">操作人</th>

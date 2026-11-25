@@ -1,8 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChangeEvent, useState } from "react";
 import { Link } from "react-router-dom";
+import {
+  engagementPercent,
+  rankTimeBuckets,
+  sharePercent,
+  slotLabel,
+  type AnalyticsInsights,
+} from "../analytics";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
 import {
   errorText,
   platformLabel,
@@ -29,6 +37,7 @@ export default function Analytics() {
   const [importNotice, setImportNotice] = useState<ImportNotice | null>(null);
   const [postmortemFeedback, setPostmortemFeedback] =
     useState<PostmortemFeedback | null>(null);
+  const [deletingId, setDeletingId] = useState("");
 
   const projects = useQuery({
     queryKey: ["projects"],
@@ -42,6 +51,15 @@ export default function Analytics() {
     queryFn: () =>
       api<AnalyticsOverview>(
         `/analytics/overview?project_id=${encodeURIComponent(effectiveProjectId)}`,
+      ),
+    enabled: Boolean(effectiveProjectId),
+  });
+
+  const insights = useQuery({
+    queryKey: ["analytics", "insights", effectiveProjectId],
+    queryFn: () =>
+      api<AnalyticsInsights>(
+        `/analytics/insights?project_id=${encodeURIComponent(effectiveProjectId)}`,
       ),
     enabled: Boolean(effectiveProjectId),
   });
@@ -88,6 +106,23 @@ export default function Analytics() {
       }),
   });
 
+  const remove = useMutation({
+    mutationFn: (contentId: string) =>
+      api<void>(`/contents/${contentId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      setDeletingId("");
+      setPostmortemFeedback(null);
+      qc.invalidateQueries({ queryKey: ["analytics"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+    onError: (err, contentId) =>
+      setPostmortemFeedback({
+        contentId,
+        kind: "error",
+        text: errorText(err),
+      }),
+  });
+
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     // Capture the selection, then clear the input so picking the same file
     // again (e.g. after a failed import) still fires onChange.
@@ -122,12 +157,21 @@ export default function Analytics() {
       ]
     : [];
 
+  const insightData = insights.data;
+  const channels = insightData?.channels ?? [];
+  const rankedContents = insightData?.contents ?? [];
+  const bestSlots = insightData?.best_slots ?? [];
+  const timeBuckets = insightData ? rankTimeBuckets(insightData.time_buckets) : [];
+  const topChannelViews = channels[0]?.views ?? 0;
+  const hasTimeData = insightData?.has_time_data ?? false;
+  const publishedContents = insightData?.published_contents ?? 0;
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold">数据</h1>
         <p className="mt-1 text-sm text-ink-500">
-          导入发布数据，查看项目概览并生成单篇复盘。
+          导入发布数据，按渠道、内容和时段查看表现，并生成单篇复盘。
         </p>
       </div>
 
@@ -174,16 +218,18 @@ export default function Analytics() {
       </div>
 
       {projects.isError && (
-        <p className="text-sm text-coral-600">{errorText(projects.error)}</p>
+        <InlineError>{errorText(projects.error)}</InlineError>
       )}
       {projects.isSuccess && projects.data.items.length === 0 && (
-        <p className="card p-6 text-sm text-ink-500">
-          还没有项目，请先
-          <Link className="ml-1 text-brand-700" to="/projects">
-            创建项目
-          </Link>
-          。
-        </p>
+        <EmptyState
+          title="还没有项目"
+          hint="先创建项目并导入发布数据，分析页才会有内容。"
+          action={
+            <Link className="text-brand-700 hover:underline" to="/projects">
+              创建项目
+            </Link>
+          }
+        />
       )}
 
       {importNotice && (
@@ -211,7 +257,7 @@ export default function Analytics() {
         <p className="text-sm text-ink-500">加载中…</p>
       )}
       {overview.isError && (
-        <p className="text-sm text-coral-600">{errorText(overview.error)}</p>
+        <InlineError>{errorText(overview.error)}</InlineError>
       )}
 
       {overview.data && (
@@ -236,9 +282,178 @@ export default function Analytics() {
             </div>
           </section>
 
+          {insights.isError && (
+            <InlineError>{errorText(insights.error)}</InlineError>
+          )}
+
+          {channels.length > 0 && (
+            <section className="grid gap-4 lg:grid-cols-3">
+              <div className="card p-5 lg:col-span-2">
+                <div className="flex items-baseline justify-between">
+                  <h2 className="font-semibold">渠道表现</h2>
+                  <span className="text-xs text-ink-500">按阅读量排序</span>
+                </div>
+                <ul className="mt-4 space-y-4">
+                  {channels.map((channel) => (
+                    <li key={channel.platform}>
+                      <div className="flex flex-wrap items-baseline justify-between gap-1 text-sm">
+                        <span className="font-medium text-ink-900">
+                          {platformLabel(channel.platform)}
+                        </span>
+                        <span className="text-xs text-ink-500">
+                          {channel.contents} 篇 · 互动率{" "}
+                          {engagementPercent(channel.engagement_rate)}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-brand-50">
+                        <div
+                          aria-hidden="true"
+                          className="h-full rounded-full bg-brand-500"
+                          style={{
+                            width: `${sharePercent(channel.views, topChannelViews)}%`,
+                          }}
+                        />
+                      </div>
+                      <p className="mt-1 text-xs text-ink-500">
+                        {channel.views.toLocaleString("zh-CN")} 阅读 ·{" "}
+                        {channel.interactions.toLocaleString("zh-CN")} 次互动
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="card flex flex-col p-5">
+                <div className="flex items-baseline justify-between">
+                  <h2 className="font-semibold">最佳发布时间</h2>
+                  <span
+                    className={
+                      hasTimeData
+                        ? "badge bg-mint-50 text-mint-700"
+                        : "badge bg-honey-50 text-honey-700"
+                    }
+                  >
+                    {hasTimeData ? "基于历史" : "通用建议"}
+                  </span>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {bestSlots.map((slot) => (
+                    <span
+                      key={`${slot.weekday ?? "any"}-${slot.hour}`}
+                      className="rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-xs font-medium text-brand-700"
+                    >
+                      {slotLabel(slot.weekday, slot.hour)}
+                    </span>
+                  ))}
+                </div>
+                <p className="mt-auto pt-3 text-xs leading-relaxed text-ink-500">
+                  {hasTimeData
+                    ? `根据 ${publishedContents} 篇按时段发布的内容表现排序，样本越多越准。`
+                    : "还没有可参考的发布历史，先给出通用建议时段；导入数据并完成发布后会自动按实际表现推荐。"}
+                </p>
+              </div>
+            </section>
+          )}
+
+          {rankedContents.length > 0 && (
+            <section className="overflow-x-auto card">
+              <div className="flex items-baseline justify-between px-4 pt-4">
+                <h2 className="font-semibold">内容排行</h2>
+                <span className="text-xs text-ink-500">按互动量排序</span>
+              </div>
+              <table className="table1 w-full min-w-[560px] text-left">
+                <thead className="border-b border-line-strong">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">#</th>
+                    <th className="px-4 py-3 font-medium">内容</th>
+                    <th className="px-4 py-3 font-medium">平台</th>
+                    <th className="px-4 py-3 font-medium">阅读</th>
+                    <th className="px-4 py-3 font-medium">互动</th>
+                    <th className="px-4 py-3 font-medium">互动率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rankedContents.map((item, index) => (
+                    <tr
+                      key={item.content_id}
+                      className="border-b border-line last:border-0"
+                    >
+                      <td className="px-4 py-3 text-ink-500">{index + 1}</td>
+                      <td className="px-4 py-3 font-medium">
+                        {item.title || "未命名内容"}
+                      </td>
+                      <td className="px-4 py-3 text-ink-700">
+                        {platformLabel(item.platform)}
+                      </td>
+                      <td className="px-4 py-3">
+                        {item.views.toLocaleString("zh-CN")}
+                      </td>
+                      <td className="px-4 py-3">
+                        {item.interactions.toLocaleString("zh-CN")}
+                      </td>
+                      <td className="px-4 py-3 text-ink-700">
+                        {engagementPercent(item.engagement_rate)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
+
+          {hasTimeData && (
+            <section className="overflow-x-auto card">
+              <div className="flex items-baseline justify-between px-4 pt-4">
+                <h2 className="font-semibold">时段表现</h2>
+                <span className="text-xs text-ink-500">
+                  按平均互动排序，最多展示 8 个时段
+                </span>
+              </div>
+              <table className="table1 w-full min-w-[520px] text-left">
+                <thead className="border-b border-line-strong">
+                  <tr>
+                    <th className="px-4 py-3 font-medium">时段</th>
+                    <th className="px-4 py-3 font-medium">样本</th>
+                    <th className="px-4 py-3 font-medium">平均阅读</th>
+                    <th className="px-4 py-3 font-medium">平均互动</th>
+                    <th className="px-4 py-3 font-medium">互动率</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {timeBuckets.map((bucket) => (
+                    <tr
+                      key={`${bucket.weekday}-${bucket.hour}`}
+                      className="border-b border-line last:border-0"
+                    >
+                      <td className="px-4 py-3 font-medium">
+                        {slotLabel(bucket.weekday, bucket.hour)}
+                      </td>
+                      <td className="px-4 py-3 text-ink-500">
+                        {bucket.samples}
+                      </td>
+                      <td className="px-4 py-3">
+                        {bucket.avg_views.toLocaleString("zh-CN")}
+                      </td>
+                      <td className="px-4 py-3">
+                        {bucket.avg_interactions.toLocaleString("zh-CN")}
+                      </td>
+                      <td className="px-4 py-3 text-ink-700">
+                        {engagementPercent(bucket.engagement_rate)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
+
           <section className="overflow-x-auto card">
-            <table className="w-full min-w-[560px] text-left text-sm">
-              <thead className="border-b border-line text-xs text-ink-500">
+            <div className="flex items-baseline justify-between px-4 pt-4">
+              <h2 className="font-semibold">全部内容</h2>
+              <span className="text-xs text-ink-500">查看采集时间并生成复盘</span>
+            </div>
+            <table className="table1 w-full min-w-[560px] text-left">
+              <thead className="border-b border-line-strong">
                 <tr>
                   <th className="px-4 py-3 font-medium">内容</th>
                   <th className="px-4 py-3 font-medium">平台</th>
@@ -264,8 +479,9 @@ export default function Analytics() {
                       ? postmortemFeedback
                       : null;
                   const pending =
-                    postmortem.isPending &&
-                    postmortem.variables === item.content_id;
+                    (postmortem.isPending &&
+                      postmortem.variables === item.content_id) ||
+                    (remove.isPending && remove.variables === item.content_id);
                   return (
                     <tr
                       key={item.content_id}
@@ -315,6 +531,39 @@ export default function Analytics() {
                         >
                           {pending ? "复盘中…" : "复盘"}
                         </button>
+                        {canWrite &&
+                          (deletingId === item.content_id ? (
+                            <span className="mt-1 flex flex-wrap items-center gap-1 text-xs text-coral-600">
+                              删除后无法恢复
+                              <button
+                                type="button"
+                                className="rounded bg-coral-600 px-2 py-1 font-medium text-white hover:bg-coral-700 disabled:opacity-50"
+                                disabled={remove.isPending}
+                                onClick={() => remove.mutate(item.content_id)}
+                              >
+                                {remove.isPending ? "删除中…" : "确认"}
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded px-1 py-1 text-ink-500 hover:text-ink-900"
+                                onClick={() => setDeletingId("")}
+                              >
+                                取消
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="mt-1 rounded border border-coral-100 px-3 py-1.5 text-xs text-coral-600 hover:border-coral-600 disabled:opacity-50"
+                              disabled={pending}
+                              onClick={() => {
+                                setDeletingId(item.content_id);
+                                setPostmortemFeedback(null);
+                              }}
+                            >
+                              删除
+                            </button>
+                          ))}
                         {feedback && (
                           <p
                             className={`mt-1 text-xs ${

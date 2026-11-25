@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
+import ApiKeysPanel from "../components/ApiKeysPanel";
 import { ApiError, api } from "../client";
 
 type Provider = {
@@ -233,6 +234,7 @@ export default function Settings() {
           收窄各角色的工具与预算（仅管理员）
         </span>
       </Link>
+      <ApiKeysPanel />
       <section className="space-y-2">
         <h2 className="font-medium">已配置</h2>
         {providers.isLoading && <p className="text-sm text-ink-500">加载中…</p>}

@@ -39,3 +39,10 @@ export function canSuspendTenant(
 export function canEnableTenant(tenant: { status: string }): boolean {
   return tenant.status === "suspended";
 }
+
+export function canDeleteTenant(
+  tenant: { id: string; status: string },
+  currentTenantId: string,
+): boolean {
+  return tenant.status === "suspended" && tenant.id !== currentTenantId;
+}

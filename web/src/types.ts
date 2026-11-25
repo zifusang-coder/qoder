@@ -88,8 +88,13 @@ export interface Job {
   content_id: string;
   content_version: number;
   content_kind: string;
+  project_id: string;
+  content_title: string;
+  content_excerpt: string;
+  content_cover: string | null;
   platform: string;
   account_id: string | null;
+  account_name: string | null;
   status: string;
   scheduled_at: string | null;
   published_at: string | null;
@@ -179,6 +184,7 @@ export interface CalendarItem {
   scheduled_at: string | null;
   published_at: string | null;
   account_name: string | null;
+  error: string | null;
 }
 
 export interface CalendarOut {
@@ -378,8 +384,12 @@ export function canReject(job: Job): boolean {
   return job.status === "awaiting_review";
 }
 
+export function canRescheduleStatus(status: string): boolean {
+  return RESCHEDULABLE_STATUSES.has(status);
+}
+
 export function canReschedule(job: Job): boolean {
-  return RESCHEDULABLE_STATUSES.has(job.status);
+  return canRescheduleStatus(job.status);
 }
 
 const EXECUTE_LABELS: Record<string, string> = {

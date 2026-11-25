@@ -12,13 +12,16 @@ from app.api import (
     agent,
     agent_team,
     analytics,
+    api_keys,
     audit,
     auth,
     calendar,
     chat,
     members,
+    notifications,
     profiles,
     projects,
+    public_api,
     publish,
     skills,
     tenants,
@@ -94,13 +97,16 @@ app.include_router(accounts.router, prefix="/api")
 app.include_router(agent.router, prefix="/api")
 app.include_router(agent_team.router, prefix="/api")
 app.include_router(analytics.router, prefix="/api")
+app.include_router(api_keys.router, prefix="/api")
 app.include_router(calendar.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
+app.include_router(public_api.router, prefix="/api")
 app.include_router(publish.router, prefix="/api")
 app.include_router(skills.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(members.router, prefix="/api")
+app.include_router(notifications.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")

@@ -108,8 +108,8 @@ export default function Workflows() {
       )}
 
       <section className="card overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-paper text-left text-xs text-ink-500">
+        <table className="table1 w-full">
+          <thead className="text-left">
             <tr>
               <th className="px-4 py-3 font-medium">名称</th>
               <th className="px-4 py-3 font-medium">版本</th>

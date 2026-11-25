@@ -11,13 +11,13 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.errors import AppError
-from app.models.publish import PlatformAccount
+from app.models.publish import PlatformAccount, PublishJob
 from app.models.user import User
 from app.permissions import admin_access, editor_access
 from app.publish.base import Platform
@@ -402,4 +402,42 @@ async def revoke_account(
             request=request,
         )
         await session.commit()
+    return Response(status_code=204)
+
+
+@router.delete("/{account_id}/permanent", status_code=204)
+async def purge_account(
+    account_id: str,
+    request: Request,
+    user: User = Depends(admin_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    account = await _owned_account(session, account_id, user)
+    if account.status != "revoked":
+        raise AppError("account_not_revoked", "请先停用账号再删除", 409)
+    job_count = (
+        await session.execute(
+            select(func.count())
+            .select_from(PublishJob)
+            .where(PublishJob.account_id == account.id)
+        )
+    ).scalar_one()
+    if job_count:
+        raise AppError(
+            "account_has_publish_history",
+            "该账号存在发布记录，无法删除",
+            409,
+        )
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="account.delete",
+        actor=user,
+        resource_type="account",
+        resource_id=str(account.id),
+        detail={"platform": account.platform, "name": account.name},
+        request=request,
+    )
+    await session.delete(account)
+    await session.commit()
     return Response(status_code=204)

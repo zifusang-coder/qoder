@@ -235,3 +235,31 @@ async def disable_member(
     )
     await session.commit()
     return Response(status_code=204)
+
+
+@router.delete("/{member_id}/permanent", status_code=204)
+async def purge_member(
+    member_id: str,
+    request: Request,
+    user: User = Depends(owner_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    member = await _owned_member(session, member_id, user)
+    if member.id == user.id:
+        raise AppError("cannot_modify_self", "不能删除自己", 409)
+    if member.is_active:
+        raise AppError("member_not_disabled", "请先停用成员再删除", 409)
+    await ensure_not_last_owner(session, user.tenant_id, member)
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="member.delete",
+        actor=user,
+        resource_type="user",
+        resource_id=str(member.id),
+        detail={"email": member.email, "role": member.role},
+        request=request,
+    )
+    await session.delete(member)
+    await session.commit()
+    return Response(status_code=204)

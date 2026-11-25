@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canDeleteTenant,
   canEnableTenant,
   canSuspendTenant,
   tenantStatusLabel,
@@ -58,6 +59,12 @@ describe("tenant status actions", () => {
   it("allows enabling only suspended tenants", () => {
     expect(canEnableTenant({ status: "suspended" })).toBe(true);
     expect(canEnableTenant({ status: "active" })).toBe(false);
+  });
+
+  it("allows deleting only suspended tenants other than the current one", () => {
+    expect(canDeleteTenant({ id: "t2", status: "suspended" }, "t1")).toBe(true);
+    expect(canDeleteTenant({ id: "t1", status: "suspended" }, "t1")).toBe(false);
+    expect(canDeleteTenant({ id: "t2", status: "active" }, "t1")).toBe(false);
   });
 
   it("labels tenant status", () => {

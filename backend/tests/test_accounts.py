@@ -2,6 +2,9 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
+
+from app.models.audit import AuditLog
 from app.models.publish import PlatformAccount
 from app.security import decrypt_secret
 
@@ -250,3 +253,60 @@ async def test_credentials_are_masked_and_encrypted(client, db_session):
     account = await db_session.get(PlatformAccount, uuid.UUID(body["id"]))
     assert "cs-secret-1" not in account.credential_enc
     assert json.loads(decrypt_secret(account.credential_enc)) == DOUYIN
+
+
+async def test_account_permanent_delete_requires_revoked(client, db_session):
+    created = await _create(client, name="待删账号", credential=WECHAT)
+    account_id = created.json()["id"]
+
+    early = await client.delete(f"/api/accounts/{account_id}/permanent")
+    assert early.status_code == 409
+    assert early.json()["code"] == "account_not_revoked"
+
+    revoked = await client.delete(f"/api/accounts/{account_id}")
+    assert revoked.status_code == 204
+    purged = await client.delete(f"/api/accounts/{account_id}/permanent")
+    assert purged.status_code == 204
+
+    row = (
+        await db_session.execute(
+            select(PlatformAccount).where(
+                PlatformAccount.id == uuid.UUID(account_id)
+            )
+        )
+    ).scalar_one_or_none()
+    assert row is None
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "account.delete")
+        )
+    ).scalars().all()
+    assert [audit.resource_id for audit in audits] == [account_id]
+
+    missing = await client.delete(f"/api/accounts/{account_id}/permanent")
+    assert missing.status_code == 404
+
+
+async def test_account_permanent_delete_blocked_by_publish_jobs(client):
+    project = await client.post("/api/projects", json={"title": "账号历史项目"})
+    project_id = project.json()["id"]
+    content = await client.post(
+        f"/api/projects/{project_id}/contents",
+        json={"platform": "wechat", "title": "历史内容", "body": "正文"},
+    )
+    created = await _create(client, name="有历史账号", credential=WECHAT)
+    account_id = created.json()["id"]
+    job = await client.post(
+        "/api/publish/jobs",
+        json={
+            "content_id": content.json()["id"],
+            "platform": "wechat",
+            "account_id": account_id,
+        },
+    )
+    assert job.status_code == 201
+
+    assert (await client.delete(f"/api/accounts/{account_id}")).status_code == 204
+    blocked = await client.delete(f"/api/accounts/{account_id}/permanent")
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "account_has_publish_history"

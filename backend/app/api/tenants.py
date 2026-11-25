@@ -3,20 +3,21 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import (
     BaseModel,
     StringConstraints,
     field_validator,
     model_validator,
 )
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.members import MemberCreatedOut
 from app.db import get_session
 from app.errors import AppError
+from app.models.base import Base
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.permissions import require_platform_admin
@@ -83,6 +84,12 @@ class TenantUpdateIn(BaseModel):
             if getattr(self, name) is None:
                 raise ValueError(f"{name} 不能为空")
         return self
+
+
+class TenantDeleteIn(BaseModel):
+    confirm_slug: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)
+    ]
 
 
 def _out(tenant: Tenant, members_count: int) -> TenantOut:
@@ -252,3 +259,42 @@ async def update_tenant(
     await session.commit()
     await session.refresh(tenant)
     return _out(tenant, await _member_count(session, tenant.id))
+
+
+@router.delete("/{tenant_id}", status_code=204)
+async def delete_tenant(
+    tenant_id: str,
+    payload: TenantDeleteIn,
+    request: Request,
+    user: User = Depends(require_platform_admin),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise AppError("not_found", "租户不存在", 404)
+    if tenant.id == user.tenant_id:
+        raise AppError("cannot_delete_self", "不能删除自己的租户", 409)
+    if tenant.status != "suspended":
+        raise AppError("tenant_not_suspended", "请先停用租户再删除", 409)
+    if payload.confirm_slug != tenant.slug:
+        raise AppError("slug_mismatch", "租户标识不匹配", 409)
+
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="tenant.delete",
+        actor=user,
+        resource_type="tenant",
+        resource_id=tenant.id,
+        detail={"slug": tenant.slug, "name": tenant.name},
+        request=request,
+    )
+    # tenant_id 不是外键，必须按依赖倒序逐表清理该租户的全部数据
+    for table in reversed(Base.metadata.sorted_tables):
+        if "tenant_id" in table.c:
+            await session.execute(
+                delete(table).where(table.c.tenant_id == tenant.id)
+            )
+    await session.delete(tenant)
+    await session.commit()
+    return Response(status_code=204)

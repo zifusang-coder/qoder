@@ -178,3 +178,110 @@ async def test_tenant_operations_are_audited(
         )
     ).scalars().all()
     assert len(updates) == 1
+
+
+async def test_delete_tenant_requires_suspend_and_slug_confirmation(
+    auth_client, auth_headers, db_session
+):
+    from sqlalchemy import func
+
+    from app.models.project import Content, Project
+    from app.models.publish import PlatformAccount
+    from app.models.tenant import Tenant
+    from app.models.user import User
+
+    created = (await _create_tenant(auth_client, auth_headers)).json()
+    tenant_id = created["id"]
+    project = Project(tenant_id=tenant_id, title="客户项目")
+    db_session.add(project)
+    await db_session.flush()
+    content = Content(
+        tenant_id=tenant_id, project_id=project.id, platform="wechat", title="客户内容"
+    )
+    db_session.add(content)
+    db_session.add(
+        PlatformAccount(tenant_id=tenant_id, platform="wechat", name="客户账号")
+    )
+    await db_session.commit()
+
+    early = await auth_client.request(
+        "DELETE",
+        f"/api/tenants/{tenant_id}",
+        headers=auth_headers,
+        json={"confirm_slug": "customer-a"},
+    )
+    assert early.status_code == 409
+    assert early.json()["code"] == "tenant_not_suspended"
+
+    suspended = await auth_client.patch(
+        f"/api/tenants/{tenant_id}",
+        headers=auth_headers,
+        json={"status": "suspended"},
+    )
+    assert suspended.status_code == 200
+
+    wrong = await auth_client.request(
+        "DELETE",
+        f"/api/tenants/{tenant_id}",
+        headers=auth_headers,
+        json={"confirm_slug": "wrong-slug"},
+    )
+    assert wrong.status_code == 409
+    assert wrong.json()["code"] == "slug_mismatch"
+
+    deleted = await auth_client.request(
+        "DELETE",
+        f"/api/tenants/{tenant_id}",
+        headers=auth_headers,
+        json={"confirm_slug": "customer-a"},
+    )
+    assert deleted.status_code == 204
+
+    assert (await db_session.get(Tenant, tenant_id)) is None
+    for model in (User, Project, Content, PlatformAccount):
+        count = (
+            await db_session.execute(
+                select(func.count())
+                .select_from(model)
+                .where(model.tenant_id == tenant_id)
+            )
+        ).scalar_one()
+        assert count == 0
+
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "tenant.delete")
+        )
+    ).scalars().all()
+    assert [audit.resource_id for audit in audits] == [tenant_id]
+    assert audits[0].tenant_id == DEFAULT_TENANT_ID
+    assert audits[0].detail["slug"] == "customer-a"
+
+    again = await auth_client.request(
+        "DELETE",
+        f"/api/tenants/{tenant_id}",
+        headers=auth_headers,
+        json={"confirm_slug": "customer-a"},
+    )
+    assert again.status_code == 404
+
+
+async def test_cannot_delete_own_tenant(auth_client, auth_headers):
+    denied = await auth_client.request(
+        "DELETE",
+        f"/api/tenants/{DEFAULT_TENANT_ID}",
+        headers=auth_headers,
+        json={"confirm_slug": "default"},
+    )
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "cannot_delete_self"
+
+
+async def test_delete_tenant_requires_platform_admin(client):
+    resp = await client.request(
+        "DELETE",
+        "/api/tenants/00000000-0000-0000-0000-000000000099",
+        json={"confirm_slug": "x"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["code"] == "platform_admin_required"

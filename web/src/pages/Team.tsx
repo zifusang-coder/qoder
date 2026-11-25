@@ -3,9 +3,11 @@ import { FormEvent, useState } from "react";
 import type { Role } from "../auth";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
 import {
   canEditMember,
   canManageMembers,
+  canPurgeMember,
   memberStatusLabel,
   roleLabel,
 } from "../team";
@@ -22,6 +24,7 @@ export default function Team() {
     role: "editor" as Role,
   });
   const [created, setCreated] = useState<MemberCreated | null>(null);
+  const [purgingId, setPurgingId] = useState("");
   const [message, setMessage] = useState<{
     kind: "ok" | "error";
     text: string;
@@ -75,6 +78,17 @@ export default function Team() {
       api<void>(`/members/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       setMessage({ kind: "ok", text: "成员已停用" });
+      qc.invalidateQueries({ queryKey: ["members"] });
+    },
+    onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
+  });
+
+  const purge = useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/members/${id}/permanent`, { method: "DELETE" }),
+    onSuccess: () => {
+      setPurgingId("");
+      setMessage({ kind: "ok", text: "成员已删除" });
       qc.invalidateQueries({ queryKey: ["members"] });
     },
     onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
@@ -202,17 +216,21 @@ export default function Team() {
           <p className="text-sm text-ink-500">加载中…</p>
         )}
         {members.isError && (
-          <p className="text-sm text-coral-600">{errorText(members.error)}</p>
+          <InlineError>{errorText(members.error)}</InlineError>
         )}
         {members.data?.length === 0 && (
-          <p className="text-sm text-ink-500">还没有其他成员。</p>
+          <EmptyState
+            title="还没有其他成员"
+            hint="邀请成员加入租户，按角色分配读写权限。"
+          />
         )}
         {members.data?.map((member) => {
           const isSelf = member.id === user?.id;
           const editable = user ? canEditMember(user, member) : false;
           const pending =
             (update.isPending && update.variables?.id === member.id) ||
-            (disable.isPending && disable.variables === member.id);
+            (disable.isPending && disable.variables === member.id) ||
+            (purge.isPending && purge.variables === member.id);
           return (
             <article
               key={member.id}
@@ -267,19 +285,52 @@ export default function Team() {
                     停用
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    className="rounded border border-line px-3 py-1.5 text-ink-700 hover:border-ink-300 disabled:opacity-50"
-                    disabled={!editable || pending}
-                    onClick={() =>
-                      update.mutate({
-                        id: member.id,
-                        payload: { is_active: true },
-                      })
-                    }
-                  >
-                    启用
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className="rounded border border-line px-3 py-1.5 text-ink-700 hover:border-ink-300 disabled:opacity-50"
+                      disabled={!editable || pending}
+                      onClick={() =>
+                        update.mutate({
+                          id: member.id,
+                          payload: { is_active: true },
+                        })
+                      }
+                    >
+                      启用
+                    </button>
+                    {user && canPurgeMember(user, member) && (
+                      purgingId === member.id ? (
+                        <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-3 py-1.5 text-coral-600">
+                          删除后无法恢复
+                          <button
+                            type="button"
+                            className="rounded bg-coral-600 px-2 py-1 text-xs font-medium text-white hover:bg-coral-700 disabled:opacity-50"
+                            disabled={purge.isPending}
+                            onClick={() => purge.mutate(member.id)}
+                          >
+                            {purge.isPending ? "删除中…" : "确认删除"}
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded px-2 py-1 text-xs text-ink-500 hover:text-ink-900"
+                            onClick={() => setPurgingId("")}
+                          >
+                            取消
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="rounded border border-coral-100 px-3 py-1.5 text-coral-600 hover:border-coral-600 disabled:opacity-50"
+                          disabled={pending}
+                          onClick={() => setPurgingId(member.id)}
+                        >
+                          删除
+                        </button>
+                      )
+                    )}
+                  </>
                 )}
               </div>
             </article>

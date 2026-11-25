@@ -3,6 +3,7 @@ import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState from "../components/EmptyState";
 import {
   errorText,
   projectStatusLabel,
@@ -18,6 +19,7 @@ export default function Projects() {
   const [topic, setTopic] = useState("");
   const [profileId, setProfileId] = useState("");
   const [createdId, setCreatedId] = useState("");
+  const [deletingId, setDeletingId] = useState("");
   const [message, setMessage] = useState<{
     kind: "ok" | "error";
     text: string;
@@ -53,6 +55,16 @@ export default function Projects() {
       setMessage({ kind: "ok", text: `已创建项目「${project.title}」` });
     },
     onError: () => setMessage(null),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/projects/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      setDeletingId("");
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+    onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
   });
 
   function submit(event: FormEvent) {
@@ -168,35 +180,76 @@ export default function Projects() {
           </p>
         )}
         {projects.isSuccess && projects.data.items.length === 0 && (
-          <p className="text-sm text-ink-500">还没有项目。</p>
+          <EmptyState
+            title="还没有项目"
+            hint="创建第一个项目，开始沉淀内容与发布计划。"
+          />
         )}
         {projects.data?.items.map((project) => (
-          <Link
+          <div
             key={project.id}
-            to={`/projects/${project.id}`}
-            className="block card p-4 transition-colors hover:border-ink-300"
+            className="card p-4 transition-colors hover:border-ink-300"
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-medium">{project.title}</span>
-              <span className="text-xs text-ink-500">
-                {projectStatusLabel(project.status)}
-              </span>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <Link
+                to={`/projects/${project.id}`}
+                className="min-w-0 flex-1"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">{project.title}</span>
+                  <span className="text-xs text-ink-500">
+                    {projectStatusLabel(project.status)}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-ink-500">
+                  {project.topic || "未填写选题"}
+                </p>
+                <p className="mt-2 text-xs text-ink-500">
+                  画像：
+                  {project.profile_id
+                    ? profileNames.get(project.profile_id) ?? "未知画像"
+                    : "未绑定"}
+                  {project.platforms.length > 0 && (
+                    <span className="ml-3">
+                      平台：{project.platforms.join("、")}
+                    </span>
+                  )}
+                </p>
+              </Link>
+              {canWrite &&
+                (deletingId === project.id ? (
+                  <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-2 py-1 text-xs text-coral-600">
+                    删除后无法恢复
+                    <button
+                      type="button"
+                      className="rounded bg-coral-600 px-2 py-1 font-medium text-white hover:bg-coral-700 disabled:opacity-50"
+                      disabled={remove.isPending}
+                      onClick={() => remove.mutate(project.id)}
+                    >
+                      {remove.isPending ? "删除中…" : "确认删除"}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded px-2 py-1 text-ink-500 hover:text-ink-900"
+                      onClick={() => setDeletingId("")}
+                    >
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="rounded border border-coral-100 px-3 py-1.5 text-sm text-coral-600 hover:border-coral-600"
+                    onClick={() => {
+                      setDeletingId(project.id);
+                      setMessage(null);
+                    }}
+                  >
+                    删除
+                  </button>
+                ))}
             </div>
-            <p className="mt-1 text-sm text-ink-500">
-              {project.topic || "未填写选题"}
-            </p>
-            <p className="mt-2 text-xs text-ink-500">
-              画像：
-              {project.profile_id
-                ? profileNames.get(project.profile_id) ?? "未知画像"
-                : "未绑定"}
-              {project.platforms.length > 0 && (
-                <span className="ml-3">
-                  平台：{project.platforms.join("、")}
-                </span>
-              )}
-            </p>
-          </Link>
+          </div>
         ))}
       </section>
     </div>

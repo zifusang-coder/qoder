@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
 import {
   errorText,
   type Profile,
@@ -303,12 +304,13 @@ export default function Profiles() {
               <p className="text-sm text-ink-500">加载中…</p>
             )}
             {profiles.isError && (
-              <p className="text-sm text-coral-600">
-                {errorText(profiles.error)}
-              </p>
+              <InlineError>{errorText(profiles.error)}</InlineError>
             )}
             {profiles.isSuccess && items.length === 0 && (
-              <p className="text-sm text-ink-500">还没有画像，先创建一个。</p>
+              <EmptyState
+                title="还没有画像"
+                hint="创建画像后，技能与助理会按画像写作。"
+              />
             )}
             {items.map((profile) => {
               const active = profile.id === selected?.id;
@@ -420,14 +422,13 @@ export default function Profiles() {
                   <p className="text-sm text-ink-500">加载中…</p>
                 )}
                 {memories.isError && (
-                  <p className="text-sm text-coral-600">
-                    {errorText(memories.error)}
-                  </p>
+                  <InlineError>{errorText(memories.error)}</InlineError>
                 )}
                 {memories.isSuccess && memories.data.length === 0 && (
-                  <p className="text-sm text-ink-500">
-                    还没有记忆，添加一条试试。
-                  </p>
+                  <EmptyState
+                    title="还没有记忆"
+                    hint="添加一条记忆，让后续创作更贴近账号风格。"
+                  />
                 )}
                 <ul className="space-y-2">
                   {memories.data?.map((memory) => (

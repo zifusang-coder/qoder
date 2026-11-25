@@ -1,9 +1,12 @@
+import uuid
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 from app.config import get_settings
 from app.errors import AppError
+from app.models.audit import AuditLog
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.user import User
 from app.security import hash_password
@@ -312,3 +315,52 @@ async def test_enabling_member_revokes_old_token(auth_client, auth_headers):
     )
     assert old.status_code == 401
     assert old.json()["code"] == "token_revoked"
+
+
+async def test_purge_member_requires_disabled_and_audits(
+    auth_client, auth_headers, db_session
+):
+    created = (await _create_member(auth_client, auth_headers)).json()
+    member_id = created["id"]
+
+    early = await auth_client.delete(
+        f"/api/members/{member_id}/permanent", headers=auth_headers
+    )
+    assert early.status_code == 409
+    assert early.json()["code"] == "member_not_disabled"
+
+    disabled = await auth_client.delete(
+        f"/api/members/{member_id}", headers=auth_headers
+    )
+    assert disabled.status_code == 204
+    purged = await auth_client.delete(
+        f"/api/members/{member_id}/permanent", headers=auth_headers
+    )
+    assert purged.status_code == 204
+
+    row = (
+        await db_session.execute(
+            select(User).where(User.id == uuid.UUID(member_id))
+        )
+    ).scalar_one_or_none()
+    assert row is None
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "member.delete")
+        )
+    ).scalars().all()
+    assert [audit.resource_id for audit in audits] == [member_id]
+
+    again = await auth_client.delete(
+        f"/api/members/{member_id}/permanent", headers=auth_headers
+    )
+    assert again.status_code == 404
+
+
+async def test_cannot_purge_self_member(auth_client, auth_headers):
+    me = (await auth_client.get("/api/auth/me", headers=auth_headers)).json()
+    denied = await auth_client.delete(
+        f"/api/members/{me['id']}/permanent", headers=auth_headers
+    )
+    assert denied.status_code == 409
+    assert denied.json()["code"] == "cannot_modify_self"
