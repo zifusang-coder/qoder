@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
+import EmptyState, { InlineError } from "../components/EmptyState";
 import {
   agentStatusLabel,
   artifactLabel,
@@ -334,13 +335,18 @@ export default function Assistant() {
         </section>
       )}
 
-      {error && <p className="text-sm text-coral-600">{error}</p>}
+      {error && <InlineError>{error}</InlineError>}
 
       <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
         <aside className="card divide-y divide-line">
           {runs.isLoading && <p className="p-4 text-sm text-ink-500">加载中…</p>}
           {runs.data?.length === 0 && (
-            <p className="p-4 text-sm text-ink-500">还没有任务。</p>
+            <div className="p-4">
+              <EmptyState
+                title="还没有任务"
+                hint="在右侧输入目标，助理会创建并跟踪运行。"
+              />
+            </div>
           )}
           {runs.data?.map((item) => (
             <button

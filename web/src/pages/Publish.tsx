@@ -3,6 +3,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
+import PlatformPreview from "../components/PlatformPreview";
 import {
   FALLBACK_PLATFORMS,
   capabilityFor,
@@ -10,6 +12,7 @@ import {
   usePlatforms,
 } from "../platforms";
 import { formatTime, toDatetimeLocal, toScheduledAt } from "../schedule";
+import { slotSuggestions } from "../slots";
 import {
   actionFor,
   canCancel,
@@ -67,6 +70,12 @@ function issueLevelLabel(level: string): string {
   return level;
 }
 
+function slotChipClass(recommended: boolean, selected: boolean): string {
+  if (selected) return "border-brand-600 bg-brand-100 text-brand-700 font-medium";
+  if (recommended) return "border-brand-200 bg-brand-50 text-brand-700";
+  return "border-line bg-white text-ink-700 hover:border-brand-200";
+}
+
 export default function Publish() {
   const qc = useQueryClient();
   const { canWrite, isAdmin } = useAuth();
@@ -74,7 +83,9 @@ export default function Publish() {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [scheduleOpen, setScheduleOpen] = useState("");
   const [scheduleDraft, setScheduleDraft] = useState("");
+  const [previewOpen, setPreviewOpen] = useState("");
   const [cancelingId, setCancelingId] = useState("");
+  const quickSlots = slotSuggestions(new Date()).slice(0, 6);
 
   const jobs = useQuery({
     queryKey: ["jobs"],
@@ -232,12 +243,18 @@ export default function Publish() {
 
       {jobs.isLoading && <p className="text-sm text-ink-500">加载中…</p>}
       {jobs.isError && (
-        <p className="text-sm text-coral-600">{errorText(jobs.error)}</p>
+        <InlineError>{errorText(jobs.error)}</InlineError>
       )}
       {jobs.isSuccess && jobs.data.items.length === 0 && (
-        <p className="card p-6 text-sm text-ink-500">
-          还没有发布任务，请先在项目详情中创建。
-        </p>
+        <EmptyState
+          title="还没有发布任务"
+          hint="在项目详情中创建内容并提交发布，任务会出现在这里。"
+          action={
+            <Link className="text-brand-700 hover:underline" to="/projects">
+              去项目
+            </Link>
+          }
+        />
       )}
 
       <div className="space-y-3">
@@ -260,9 +277,11 @@ export default function Publish() {
           const note = feedback?.jobId === job.id ? feedback : null;
           const missingAccount =
             capability === "auto_publish" && !job.account_id;
-          const accountLabel = job.account_id
-            ? (accountNames.get(job.account_id) ?? job.account_id)
-            : "";
+          const accountLabel = job.account_name
+            ? job.account_name
+            : job.account_id
+              ? (accountNames.get(job.account_id) ?? job.account_id)
+              : "";
           return (
             <article
               key={job.id}
@@ -360,6 +379,18 @@ export default function Publish() {
                       {scheduleOpen === job.id ? "收起定时" : "定时"}
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="rounded border border-line px-4 py-2 text-sm text-ink-700 hover:border-brand-300 hover:text-brand-700"
+                    aria-expanded={previewOpen === job.id}
+                    onClick={() =>
+                      setPreviewOpen((current) =>
+                        current === job.id ? "" : job.id,
+                      )
+                    }
+                  >
+                    {previewOpen === job.id ? "收起预览" : "预览"}
+                  </button>
                   {canAct && action ? (
                     <button
                       type="button"
@@ -394,6 +425,20 @@ export default function Publish() {
                 </div>
               </div>
 
+              {previewOpen === job.id && (
+                <div className="mt-4 max-w-md">
+                  <PlatformPreview
+                    platform={job.platform}
+                    contentKind={job.content_kind}
+                    title={job.content_title}
+                    excerpt={job.content_excerpt}
+                    cover={job.content_cover}
+                    projectId={job.project_id}
+                    accountName={job.account_name}
+                  />
+                </div>
+              )}
+
               {missingAccount && job.status === "approved" && (
                 <p className="mt-3 text-sm text-honey-600">
                   该任务创建时未关联账号，请取消后在项目详情重新创建并选择账号。
@@ -414,6 +459,31 @@ export default function Publish() {
 
               {scheduleOpen === job.id && isAdmin && (
                 <div className="mt-3 space-y-2 rounded border border-line bg-white p-3">
+                  {quickSlots.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-sm text-ink-500">快捷时段</span>
+                      <div className="flex flex-wrap gap-2">
+                        {quickSlots.map((slot) => {
+                          const value = toDatetimeLocal(slot.scheduledAt);
+                          const selected = scheduleDraft === value;
+                          return (
+                            <button
+                              key={slot.scheduledAt}
+                              type="button"
+                              aria-pressed={selected}
+                              className={`rounded-full border px-3 py-1 text-xs transition-colors ${slotChipClass(slot.recommended, selected)}`}
+                              onClick={() => setScheduleDraft(value)}
+                            >
+                              {slot.label}
+                              {slot.recommended && (
+                                <span className="ml-1 opacity-70">推荐</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-end gap-2">
                     <label className="min-w-56 flex-1 space-y-1 text-sm text-ink-500">
                       <span>定时发布时间</span>

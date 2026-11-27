@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from app.errors import AppError
 from app.models.profile import Profile, ProfileMemory
 from app.models.user import User
 from app.permissions import editor_access, viewer_access
+from app.services.audit import record
 from app.services.embeddings import embed_memories
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -213,10 +214,21 @@ async def update_profile(
 @router.delete("/{profile_id}", status_code=204)
 async def delete_profile(
     profile_id: str,
+    request: Request,
     user: User = Depends(editor_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> Response:
     profile = await _owned_profile(session, profile_id, user)
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="profile.delete",
+        actor=user,
+        resource_type="profile",
+        resource_id=str(profile.id),
+        detail={"name": profile.name},
+        request=request,
+    )
     await session.delete(profile)
     await session.commit()
     return Response(status_code=204)

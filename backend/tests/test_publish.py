@@ -1090,6 +1090,51 @@ async def test_list_jobs_filters_tenant_and_status(client, db_session):
     assert [item["id"] for item in prechecking.json()["items"]] == [other["id"]]
 
 
+async def test_list_jobs_includes_content_preview(client):
+    content = await _create_content(
+        client,
+        title="预览标题",
+        body="第一段内容 " + "长" * 400,
+        platform="wechat",
+    )
+    job = (
+        await _create_job(client, content["id"], platform="wechat")
+    ).json()
+
+    listed = await client.get("/api/publish/jobs")
+    assert listed.status_code == 200
+    item = next(i for i in listed.json()["items"] if i["id"] == job["id"])
+    assert item["project_id"] == content["project_id"]
+    assert item["content_title"] == "预览标题"
+    assert item["content_excerpt"].startswith("第一段内容")
+    assert "\n" not in item["content_excerpt"]
+    assert len(item["content_excerpt"]) <= 200
+    assert item["content_cover"] is None
+    assert item["account_name"] == "自动测试账号"
+
+
+async def test_list_jobs_exposes_cover_from_version_meta(client, db_session):
+    content = await _create_content(
+        client, title="封面标题", body="正文", platform="wechat"
+    )
+    job = (
+        await _create_job(client, content["id"], platform="wechat")
+    ).json()
+    version = (
+        await db_session.execute(
+            select(ContentVersion).where(
+                ContentVersion.content_id == uuid.UUID(content["id"])
+            )
+        )
+    ).scalar_one()
+    version.meta = {"cover": "media/cover.png"}
+    await db_session.commit()
+
+    listed = await client.get("/api/publish/jobs")
+    item = next(i for i in listed.json()["items"] if i["id"] == job["id"])
+    assert item["content_cover"] == "media/cover.png"
+
+
 async def test_list_jobs_pagination(client, db_session):
     jobs = []
     for platform in ("wechat", "douyin", "zhihu"):

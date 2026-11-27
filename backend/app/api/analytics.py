@@ -14,6 +14,7 @@ from app.models.project import Content, Project
 from app.models.user import User
 from app.permissions import editor_access, viewer_access
 from app.services.analytics import import_csv, latest_snapshots
+from app.services.analytics_insights import collect_insights
 from app.services.postmortem import generate_postmortem
 from app.skills.manifest import ManifestError
 from app.skills.registry import SkillRegistry, get_registry
@@ -60,6 +61,50 @@ class OverviewOut(BaseModel):
     engagement_rate: float
 
 
+class ChannelInsight(BaseModel):
+    platform: str
+    contents: int
+    views: int
+    interactions: int
+    engagement_rate: float
+
+
+class ContentInsight(BaseModel):
+    content_id: str
+    title: str
+    platform: str
+    views: int
+    interactions: int
+    engagement_rate: float
+
+
+class TimeBucket(BaseModel):
+    weekday: int
+    hour: int
+    samples: int
+    avg_views: int
+    avg_interactions: float
+    engagement_rate: float
+
+
+class BestSlot(BaseModel):
+    weekday: int | None = None
+    hour: int
+    samples: int
+    avg_views: int
+    avg_interactions: float
+    source: str
+
+
+class InsightsOut(BaseModel):
+    channels: list[ChannelInsight]
+    contents: list[ContentInsight]
+    time_buckets: list[TimeBucket]
+    best_slots: list[BestSlot]
+    has_time_data: bool
+    published_contents: int
+
+
 class PostmortemIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -101,22 +146,29 @@ async def import_analytics(
     return ImportResult(upserted=upserted, errors=errors)
 
 
+async def _require_project(
+    session: AsyncSession, tenant_id: str, project_id: uuid.UUID
+) -> Project:
+    project = (
+        await session.execute(
+            select(Project).where(
+                Project.id == project_id,
+                Project.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if project is None:
+        raise AppError("not_found", "项目不存在", 404)
+    return project
+
+
 @router.get("/overview", response_model=OverviewOut)
 async def get_overview(
     project_id: uuid.UUID,
     user: User = Depends(viewer_access),  # noqa: B008
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> OverviewOut:
-    project = (
-        await session.execute(
-            select(Project).where(
-                Project.id == project_id,
-                Project.tenant_id == user.tenant_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if project is None:
-        raise AppError("not_found", "项目不存在", 404)
+    project = await _require_project(session, user.tenant_id, project_id)
 
     contents = (
         await session.execute(
@@ -168,6 +220,17 @@ async def get_overview(
     return OverviewOut(
         items=items, totals=totals, engagement_rate=engagement_rate
     )
+
+
+@router.get("/insights", response_model=InsightsOut)
+async def get_insights(
+    project_id: uuid.UUID,
+    user: User = Depends(viewer_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> InsightsOut:
+    project = await _require_project(session, user.tenant_id, project_id)
+    data = await collect_insights(session, user.tenant_id, project.id)
+    return InsightsOut(**data)
 
 
 @router.post("/contents/{content_id}/postmortem", response_model=PostmortemOut)

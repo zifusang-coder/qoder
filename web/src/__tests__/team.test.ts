@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canEditMember,
   canManageMembers,
+  canPurgeMember,
   memberStatusLabel,
   roleLabel,
 } from "../team";
@@ -21,6 +22,16 @@ describe("team helpers", () => {
     expect(canEditMember({ id: "u1", role: "owner" }, { id: "u1" })).toBe(false);
     expect(canEditMember({ id: "u1", role: "owner" }, { id: "u2" })).toBe(true);
     expect(canEditMember({ id: "u1", role: "admin" }, { id: "u2" })).toBe(false);
+  });
+
+  it("allows purging only disabled members other than the operator", () => {
+    const owner = { id: "u1", role: "owner" as const };
+    expect(canPurgeMember(owner, { id: "u2", is_active: false })).toBe(true);
+    expect(canPurgeMember(owner, { id: "u2", is_active: true })).toBe(false);
+    expect(canPurgeMember(owner, { id: "u1", is_active: false })).toBe(false);
+    expect(
+      canPurgeMember({ id: "u1", role: "admin" }, { id: "u2", is_active: false }),
+    ).toBe(false);
   });
 
   it("labels active state", () => {

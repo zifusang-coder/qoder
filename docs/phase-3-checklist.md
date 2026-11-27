@@ -1,6 +1,6 @@
 # Phase 3 验收清单
 
-验收日期：2026-11-11。环境：macOS 本地；自动化测试使用内存 SQLite；真实环境使用 Docker Compose 中的 PostgreSQL 16 + Redis 7、uvicorn、vite、arq worker，以及浏览器手工验收。
+验收日期：2026-11-11，2026-11-24 补充资源删除验收并刷新结果，2026-11-25 补充画像删除与记忆目标选择。环境：macOS 本地；自动化测试使用内存 SQLite；真实环境使用 Docker Compose 中的 PostgreSQL 16 + Redis 7、uvicorn、vite、arq worker，以及浏览器手工验收。
 
 ## 功能
 
@@ -18,6 +18,17 @@
 - [x] 前端角色化导航与页面：团队（admin 读/owner 写）、审计（admin）、租户（平台管理员）、改密（强制跳转）（验证：`web/src/__tests__/*.test.ts` 与浏览器验收）
 - [x] viewer 在业务页面看不到写入按钮（验证：浏览器验收）
 
+## 资源删除
+
+- [x] 项目删除：`DELETE /api/projects/{id}`，editor 及以上；级联清理内容、版本、快照、发布任务与媒体，审计 `project.delete`（验证：`tests/test_projects.py`、`tests/test_permissions.py`、浏览器验收）
+- [x] 内容删除：`DELETE /api/contents/{id}`，editor 及以上；级联清理版本、快照与发布任务，审计 `content.delete`（验证：`tests/test_projects.py`、浏览器验收）
+- [x] 发布账号永久删除：`DELETE /api/accounts/{id}/permanent`，仅 admin 及以上；须先停用且没有发布记录，否则 409；审计 `account.delete`（验证：`tests/test_accounts.py`、`tests/test_permissions.py`、浏览器验收）
+- [x] 成员永久删除：`DELETE /api/members/{id}/permanent`，仅 owner；须已停用，不能删除自己或最后一名 owner；审计 `member.delete`（验证：`tests/test_members.py`、浏览器验收）
+- [x] 画像删除：`DELETE /api/profiles/{id}`，editor 及以上；级联删除画像记忆，引用项目保留并将 `profile_id` 置空，审计 `profile.delete`（验证：`tests/test_profiles.py`、浏览器验收）
+- [x] 画像记忆目标选择：新增记忆时可选择写入哪个画像，切换目标同步切换详情与记忆列表（验证：`web/src/__tests__/profiles.test.ts`、浏览器验收）
+- [x] 租户删除：`DELETE /api/tenants/{id}`，仅平台管理员；须先停用并提交 `{"confirm_slug": "<slug>"}`，slug 不匹配返回 409，不能删除自己所在租户；清空该租户全部数据并写审计 `tenant.delete`（验证：`tests/test_tenants.py`、浏览器验收）
+- [x] 前端两段式确认：停用后出现删除按钮，账号/成员/内容/画像提示"删除后无法恢复"，租户需输入 slug 完全匹配才可确认；viewer 与无权限角色不可见（验证：`web/src/__tests__/team.test.ts`、`web/src/__tests__/tenants.test.ts`、`web/src/__tests__/profiles.test.ts`、浏览器验收）
+
 ## 安全与合规
 
 - [x] 新增写接口使用角色依赖，未授权返回 403 `forbidden`（验证：`tests/test_permissions.py`）
@@ -29,7 +40,7 @@
 
 ## 工程
 
-- [x] `alembic upgrade head` 成功，当前 head `c3d4e5f6a7b8`（真实 PostgreSQL）
+- [x] `alembic upgrade head` 成功，当前 head `c9d0e1f2a3b4`（含 `add_api_keys` 迁移，真实 PostgreSQL 已升级）
 - [x] `cd backend && uv run ruff check .` 通过
 - [x] `cd backend && uv run pytest -q` 全部通过
 - [x] `npm --prefix web run test` 全部通过
@@ -46,6 +57,7 @@
 6. [x] 修改密码后旧 token 失效，新 token 正常使用。
 7. [x] 审计页面可查到登录、成员、发布、租户事件；任何审计 `detail` 中不出现密码、token 或平台凭据。
 8. [x] 迁移成功；默认租户与现有管理员角色正确回填。
+9. [x] 六个删除入口逐项在浏览器验收：项目、内容（数据页）、画像、停用后的发布账号、停用后的成员、停用后的租户；两段式确认与"删除后无法恢复"提示正常，租户删除需输入 slug 且完全匹配才可确认，删除后列表即时消失、审计出现对应动作。
 
 ## 上线加固
 
@@ -56,11 +68,11 @@
 
 ## 本次结果（执行后填写）
 
-- 后端测试：`cd backend && uv run pytest -q` → 696 passed, 2 skipped；`uv run ruff check .` → 通过。
-- 前端测试：`npm --prefix web run test` → 14 个测试文件、127 个用例全部通过。
-- 前端构建：`npm --prefix web run build`（`tsc -b && vite build`）→ 通过。
-- 迁移：真实 PostgreSQL 16 上 `alembic upgrade head` 成功，当前 head `c3d4e5f6a7b8 (head)`；默认租户存在；`admin@local` 回填为 `owner`，`ensure_admin` 后 `is_platform_admin=t`、`token_version=0`；`audit_logs` 表与索引存在。
-- 真实环境验收：第 1–8 项全部通过（API 脚本 + 浏览器）。补充记录：
+- 后端测试（2026-11-25 复核）：`cd backend && uv run pytest -q` → 1254 passed, 5 skipped；`uv run ruff check .` → 通过。
+- 前端测试（2026-11-25 复核）：`npm --prefix web run test` → 25 个测试文件、275 个用例全部通过。
+- 前端构建（2026-11-25 复核）：`npm --prefix web run build`（`tsc -b && vite build`）→ 通过。
+- 迁移：真实 PostgreSQL 16 上 `alembic upgrade head` 成功，当前 head `c9d0e1f2a3b4 (head)`（含 `add_api_keys`）；默认租户存在；`admin@local` 回填为 `owner`，`ensure_admin` 后 `is_platform_admin=t`、`token_version=0`；`audit_logs` 表与索引存在。
+- 真实环境验收：第 1–9 项全部通过（API 脚本 + 浏览器）。补充记录：
   - 租户 B 通过 API、租户 C 通过浏览器创建；两者的一次性临时密码登录均被强制跳转 `/change-password`。
   - 双租户隔离：跨租户项目/内容访问返回 404，列表互不出现；viewer 仅见只读导航，业务页面的创建/导入/复盘/发布按钮均隐藏。
   - 角色矩阵：editor 可创建内容与发布任务，审核/账号/成员写入返回 403；admin 审核与账号写入成功，成员写入返回 403。
@@ -73,3 +85,12 @@
   - 强制改密：临时密码登录后 `/api/projects` 返回 403 `password_change_required`，`/auth/me` 仍可访问；改密后新 token 访问 `/api/projects` 返回 200。
   - owner 并发：两名 owner 同时降级对方，结果为一个 200、一个 409 `last_owner`，成员列表仍保留 1 名 owner。
   - 审计归档：插入 200 天前的日志后执行归档，生成 `_audit_archive/<日期>/<id>.ndjson`，过期行被删除、近期行保留；验收文件已清理。
+- 资源删除真实环境验收（2026-11-24，浏览器 + API）：
+  - 项目：点击删除并确认后行消失，刷新不复发，接口返回 204。
+  - 内容：数据页"删除 → 删除后无法恢复 → 确认"后内容清空，项目保留。
+  - 账号：新建"小红书·人工导出"账号 → 停用（确认凭据销毁）→ 删除（提示发布历史保留）→ 列表移除。
+  - 成员：新建成员 → 停用 → 删除 → 提示"成员已删除"；自己、在职成员与最后一名 owner 不会出现可用的删除入口。
+  - 租户：新建临时租户 → 停用 → 删除并输入 slug（不匹配时确认按钮禁用）→ 提示"租户及其全部数据已删除"；API 查询该 slug 不存在，审计出现 `tenant.delete`，`detail` 仅含 `name` 与 `slug`。
+  - 画像：新建两个临时画像 A/B，记忆表单选择"添加到画像 B"后写入只出现在 B 的列表，切回 A 显示"还没有记忆"；对 A、B 执行"删除画像 → 确认删除 → 取消/再确认"流程，删除后列表即时移除、视图回落到首个画像，审计出现 `profile.delete`（`detail` 仅含 `name`，真实 PostgreSQL 中记忆随画像级联删除）；验收画像已清理。
+  - 守卫校验：未停用的账号/成员、存在发布记录的账号返回 409；非平台管理员删除租户、跨租户删除返回对应 403/404（`tests/test_accounts.py`、`tests/test_members.py`、`tests/test_tenants.py`、`tests/test_permissions.py`）。
+  - 验收数据均为临时创建，结束后已清理；本地 uvicorn 未开 `--reload` 时旧进程缺少新路由导致删除一度返回 405，重启后正常（环境问题，非代码缺陷）。

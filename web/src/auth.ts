@@ -34,27 +34,54 @@ export function isOwner(role: Role): boolean {
   return role === "owner";
 }
 
+export type NavGroupKey = "ai" | "content" | "manage";
+
+export const NAV_GROUP_LABELS: Record<NavGroupKey, string> = {
+  ai: "AI",
+  content: "内容",
+  manage: "管理",
+};
+
+export type NavIconKey =
+  | "assistant"
+  | "workflow"
+  | "chat"
+  | "profiles"
+  | "projects"
+  | "accounts"
+  | "calendar"
+  | "publish"
+  | "analytics"
+  | "settings"
+  | "team"
+  | "audit"
+  | "billing"
+  | "tenants";
+
 export interface NavItem {
   to: string;
   label: string;
   minRole: Role;
   platformOnly?: boolean;
+  group: NavGroupKey;
+  icon: NavIconKey;
 }
 
 export const NAV_ITEMS: NavItem[] = [
-  { to: "/assistant", label: "AI 助理", minRole: "editor" },
-  { to: "/workflows", label: "工作流", minRole: "editor" },
-  { to: "/chat", label: "助手", minRole: "editor" },
-  { to: "/profiles", label: "账号画像", minRole: "viewer" },
-  { to: "/projects", label: "项目", minRole: "viewer" },
-  { to: "/accounts", label: "发布账号", minRole: "editor" },
-  { to: "/calendar", label: "日历", minRole: "viewer" },
-  { to: "/publish", label: "发布", minRole: "viewer" },
-  { to: "/analytics", label: "数据", minRole: "viewer" },
-  { to: "/settings", label: "设置", minRole: "admin" },
-  { to: "/team", label: "团队", minRole: "admin" },
-  { to: "/audit", label: "审计", minRole: "admin" },
-  { to: "/tenants", label: "租户", minRole: "viewer", platformOnly: true },
+  { to: "/assistant", label: "AI 助理", minRole: "editor", group: "ai", icon: "assistant" },
+  { to: "/workflows", label: "工作流", minRole: "editor", group: "ai", icon: "workflow" },
+  { to: "/chat", label: "助手", minRole: "editor", group: "ai", icon: "chat" },
+  { to: "/profiles", label: "账号画像", minRole: "viewer", group: "content", icon: "profiles" },
+  { to: "/projects", label: "项目", minRole: "viewer", group: "content", icon: "projects" },
+  { to: "/accounts", label: "发布账号", minRole: "editor", group: "content", icon: "accounts" },
+  { to: "/calendar", label: "日历", minRole: "viewer", group: "content", icon: "calendar" },
+  { to: "/publish", label: "发布", minRole: "viewer", group: "content", icon: "publish" },
+  { to: "/analytics", label: "数据", minRole: "viewer", group: "content", icon: "analytics" },
+  { to: "/settings", label: "设置", minRole: "admin", group: "manage", icon: "settings" },
+  { to: "/team", label: "团队", minRole: "admin", group: "manage", icon: "team" },
+  { to: "/audit", label: "审计", minRole: "admin", group: "manage", icon: "audit" },
+  { to: "/billing", label: "账单", minRole: "admin", group: "manage", icon: "billing" },
+  { to: "/tenants", label: "租户", minRole: "viewer", platformOnly: true, group: "manage", icon: "tenants" },
 ];
 
 export function visibleNavItems(

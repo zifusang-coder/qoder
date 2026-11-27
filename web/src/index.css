@@ -9,6 +9,7 @@
   --color-ink-500: #6f78a3;
   --color-ink-300: #aeb5d6;
   --color-line: #e4e8fa;
+  --color-line-strong: #cdd5ee;
   --color-brand-50: #f2efff;
   --color-brand-100: #e5e0ff;
   --color-brand-200: #d6cffd;
@@ -76,6 +77,21 @@ body {
   }
   .badge {
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .table1 {
+    @apply w-full text-sm;
+  }
+  .table1 thead {
+    @apply bg-brand-50/70 text-xs text-ink-500;
+  }
+  .table1 th {
+    @apply px-4 py-3 text-left font-medium;
+  }
+  .table1 td {
+    @apply px-4 py-3 align-top;
+  }
+  .table1 tbody tr {
+    @apply border-t border-line-strong;
   }
   .brand-mark {
     @apply flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white;

@@ -103,8 +103,13 @@ class JobOut(BaseModel):
     content_id: str
     content_version: int
     content_kind: str
+    project_id: str
+    content_title: str
+    content_excerpt: str
+    content_cover: str | None
     platform: str
     account_id: str | None
+    account_name: str | None
     status: str
     scheduled_at: datetime | None
     published_at: datetime | None
@@ -131,14 +136,35 @@ class PrecheckOut(BaseModel):
     issues: list[dict]
 
 
-def _out(job: PublishJob, content_kind: str = "") -> JobOut:
+EXCERPT_CHARS = 200
+
+
+def _excerpt(body: str) -> str:
+    return " ".join(body.split())[:EXCERPT_CHARS]
+
+
+def _out(
+    job: PublishJob,
+    content_kind: str = "",
+    *,
+    project_id: str = "",
+    content_title: str = "",
+    content_excerpt: str = "",
+    content_cover: str | None = None,
+    account_name: str | None = None,
+) -> JobOut:
     return JobOut(
         id=str(job.id),
         content_id=str(job.content_id),
         content_version=job.content_version,
         content_kind=content_kind,
+        project_id=project_id,
+        content_title=content_title,
+        content_excerpt=content_excerpt,
+        content_cover=content_cover,
         platform=job.platform,
         account_id=str(job.account_id) if job.account_id else None,
+        account_name=account_name,
         status=job.status,
         scheduled_at=_utc(job.scheduled_at),
         published_at=_utc(job.published_at),
@@ -150,6 +176,32 @@ def _out(job: PublishJob, content_kind: str = "") -> JobOut:
         checks=job.checks or {},
         created_at=_utc(job.created_at),
         updated_at=_utc(job.updated_at),
+    )
+
+
+def _list_out(
+    job: PublishJob,
+    content: Content,
+    version: ContentVersion | None,
+    account: PlatformAccount | None,
+) -> JobOut:
+    meta = version.meta if version is not None and isinstance(version.meta, dict) else {}
+    cover = next(
+        (
+            meta[key]
+            for key in ("cover", "preview")
+            if isinstance(meta.get(key), str) and meta[key]
+        ),
+        None,
+    )
+    return _out(
+        job,
+        content.kind,
+        project_id=str(content.project_id),
+        content_title=version.title if version is not None else content.title,
+        content_excerpt=_excerpt(version.body) if version is not None else "",
+        content_cover=cover,
+        account_name=account.name if account is not None else None,
     )
 
 
@@ -272,11 +324,22 @@ async def list_jobs(
         await session.execute(select(func.count()).select_from(base.subquery()))
     ).scalar_one()
     stmt = (
-        select(PublishJob, Content.kind)
+        select(PublishJob, Content, ContentVersion, PlatformAccount)
         .join(
             Content,
             (Content.id == PublishJob.content_id)
             & (Content.tenant_id == PublishJob.tenant_id),
+        )
+        .outerjoin(
+            ContentVersion,
+            (ContentVersion.content_id == PublishJob.content_id)
+            & (ContentVersion.version == PublishJob.content_version)
+            & (ContentVersion.tenant_id == PublishJob.tenant_id),
+        )
+        .outerjoin(
+            PlatformAccount,
+            (PlatformAccount.id == PublishJob.account_id)
+            & (PlatformAccount.tenant_id == PublishJob.tenant_id),
         )
         .where(PublishJob.tenant_id == user.tenant_id)
     )
@@ -289,7 +352,7 @@ async def list_jobs(
     )
     rows = (await session.execute(stmt)).all()
     return JobList(
-        items=[_out(job, kind) for job, kind in rows],
+        items=[_list_out(*row) for row in rows],
         total=total,
     )
 

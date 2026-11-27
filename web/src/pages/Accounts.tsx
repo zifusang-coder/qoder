@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
 import {
   CAPABILITY_LABELS,
   FALLBACK_PLATFORMS,
@@ -100,6 +101,7 @@ export default function Accounts() {
     {},
   );
   const [revokingId, setRevokingId] = useState("");
+  const [purgingId, setPurgingId] = useState("");
 
   const accounts = useQuery({
     queryKey: ["accounts"],
@@ -202,6 +204,21 @@ export default function Accounts() {
       }),
   });
 
+  const purge = useMutation({
+    mutationFn: (account: Account) =>
+      api<void>(`/accounts/${account.id}/permanent`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      setPurgingId("");
+    },
+    onError: (err, account) =>
+      setRowFeedback({
+        id: account.id,
+        kind: "error",
+        text: errorText(err),
+      }),
+  });
+
   function selectPlatform(next: string) {
     setPlatform(next);
     setCredentials({});
@@ -276,6 +293,7 @@ export default function Accounts() {
   function revokeAccount(account: Account) {
     setRowFeedback(null);
     setRevokingId("");
+    setPurgingId("");
     revoke.mutate(account);
   }
 
@@ -467,14 +485,13 @@ export default function Accounts() {
             <p className="text-sm text-ink-500">加载中…</p>
           )}
           {accounts.isError && (
-            <p className="text-sm text-coral-600">
-              {errorText(accounts.error)}
-            </p>
+            <InlineError>{errorText(accounts.error)}</InlineError>
           )}
           {accounts.isSuccess && groups.length === 0 && (
-            <p className="card p-6 text-sm text-ink-500">
-              还没有账号，先在左侧添加。
-            </p>
+            <EmptyState
+              title="还没有账号"
+              hint="在左侧选择平台并填写凭据，保存后即可用于自动发布。"
+            />
           )}
           {groups.map((group) => (
             <div key={group.spec.key} className="space-y-2">
@@ -590,6 +607,45 @@ export default function Accounts() {
                             }}
                           >
                             停用
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {!active && isAdmin && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {purgingId === account.id ? (
+                          <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-3 py-1.5 text-sm text-coral-600">
+                            删除后无法恢复，发布历史保留
+                            <button
+                              type="button"
+                              className="rounded bg-coral-600 px-2 py-1 text-xs font-medium text-white hover:bg-coral-700 disabled:opacity-50"
+                              disabled={purge.isPending}
+                              onClick={() => {
+                                setRowFeedback(null);
+                                purge.mutate(account);
+                              }}
+                            >
+                              {purge.isPending ? "删除中…" : "确认删除"}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded px-2 py-1 text-xs text-ink-500 hover:text-ink-900"
+                              onClick={() => setPurgingId("")}
+                            >
+                              取消
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded border border-coral-100 px-3 py-1.5 text-sm text-coral-600 hover:border-coral-600"
+                            onClick={() => {
+                              setPurgingId(account.id);
+                              setRowFeedback(null);
+                            }}
+                          >
+                            删除
                           </button>
                         )}
                       </div>

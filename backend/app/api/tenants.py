@@ -3,20 +3,23 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import (
     BaseModel,
     StringConstraints,
     field_validator,
     model_validator,
 )
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.members import MemberCreatedOut
+from app.billing.plans import DEFAULT_PLAN_CODE
 from app.db import get_session
 from app.errors import AppError
+from app.models.base import Base
+from app.models.billing import Plan
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.permissions import require_platform_admin
@@ -47,6 +50,8 @@ class TenantOut(BaseModel):
     name: str
     slug: str
     status: str
+    plan_code: str
+    plan_name: str
     members_count: int
     created_at: datetime
 
@@ -85,12 +90,22 @@ class TenantUpdateIn(BaseModel):
         return self
 
 
-def _out(tenant: Tenant, members_count: int) -> TenantOut:
+class TenantDeleteIn(BaseModel):
+    confirm_slug: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50)
+    ]
+
+
+def _out(
+    tenant: Tenant, members_count: int, plan_code: str, plan_name: str
+) -> TenantOut:
     return TenantOut(
         id=tenant.id,
         name=tenant.name,
         slug=tenant.slug,
         status=tenant.status,
+        plan_code=plan_code,
+        plan_name=plan_name,
         members_count=members_count,
         created_at=tenant.created_at,
     )
@@ -118,12 +133,21 @@ async def list_tenants(
     )
     rows = (
         await session.execute(
-            select(Tenant, func.coalesce(counts.c.cnt, 0))
+            select(
+                Tenant,
+                func.coalesce(counts.c.cnt, 0),
+                Plan.code,
+                Plan.name,
+            )
+            .join(Plan, Plan.id == Tenant.plan_id)
             .outerjoin(counts, counts.c.tenant_id == Tenant.id)
             .order_by(Tenant.created_at.desc(), Tenant.id.desc())
         )
     ).all()
-    return [_out(tenant, count) for tenant, count in rows]
+    return [
+        _out(tenant, count, plan_code, plan_name)
+        for tenant, count, plan_code, plan_name in rows
+    ]
 
 
 @router.post("", response_model=TenantCreatedOut, status_code=201)
@@ -148,12 +172,26 @@ async def create_tenant(
     if email_taken is not None:
         raise AppError("email_exists", "该邮箱已被使用", 409)
 
+    # 按 code 取默认套餐，避免依赖模型里的固定 UUID 默认值；
+    # 默认套餐被归档时视为未配置，防止新租户绑定不可指派的套餐
+    default_plan = (
+        await session.execute(
+            select(Plan).where(
+                Plan.code == DEFAULT_PLAN_CODE,
+                Plan.status == "active",
+            )
+        )
+    ).scalar_one_or_none()
+    if default_plan is None:
+        raise AppError("default_plan_missing", "默认套餐未配置", 500)
+
     initial_password = secrets.token_urlsafe(12)
     tenant = Tenant(
         id=str(uuid.uuid4()),
         name=payload.name,
         slug=payload.slug,
         status="active",
+        plan_id=default_plan.id,
     )
     owner = User(
         tenant_id=tenant.id,
@@ -210,7 +248,10 @@ async def create_tenant(
         created_at=owner.created_at,
         initial_password=initial_password,
     )
-    return TenantCreatedOut(**_out(tenant, 1).model_dump(), owner=owner_out)
+    return TenantCreatedOut(
+        **_out(tenant, 1, default_plan.code, default_plan.name).model_dump(),
+        owner=owner_out,
+    )
 
 
 @router.patch("/{tenant_id}", response_model=TenantOut)
@@ -251,4 +292,44 @@ async def update_tenant(
     )
     await session.commit()
     await session.refresh(tenant)
-    return _out(tenant, await _member_count(session, tenant.id))
+    plan = await session.get(Plan, tenant.plan_id)
+    return _out(tenant, await _member_count(session, tenant.id), plan.code, plan.name)
+
+
+@router.delete("/{tenant_id}", status_code=204)
+async def delete_tenant(
+    tenant_id: str,
+    payload: TenantDeleteIn,
+    request: Request,
+    user: User = Depends(require_platform_admin),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise AppError("not_found", "租户不存在", 404)
+    if tenant.id == user.tenant_id:
+        raise AppError("cannot_delete_self", "不能删除自己的租户", 409)
+    if tenant.status != "suspended":
+        raise AppError("tenant_not_suspended", "请先停用租户再删除", 409)
+    if payload.confirm_slug != tenant.slug:
+        raise AppError("slug_mismatch", "租户标识不匹配", 409)
+
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="tenant.delete",
+        actor=user,
+        resource_type="tenant",
+        resource_id=tenant.id,
+        detail={"slug": tenant.slug, "name": tenant.name},
+        request=request,
+    )
+    # tenant_id 不是外键，必须按依赖倒序逐表清理该租户的全部数据
+    for table in reversed(Base.metadata.sorted_tables):
+        if "tenant_id" in table.c:
+            await session.execute(
+                delete(table).where(table.c.tenant_id == tenant.id)
+            )
+    await session.delete(tenant)
+    await session.commit()
+    return Response(status_code=204)

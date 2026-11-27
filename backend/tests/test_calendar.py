@@ -69,6 +69,43 @@ async def test_calendar_returns_scheduled_job(client):
     assert item["scheduled_at"].startswith("2026-11-12T10:00:00")
     assert item["published_at"] is None
     assert item["account_name"] == "日历账号"
+    assert item["error"] is None
+
+
+async def test_calendar_exposes_failure_reason(client, db_session):
+    start = datetime(2026, 11, 1, tzinfo=UTC)
+    end = datetime(2026, 12, 1, tzinfo=UTC)
+    _, _, job = await _create_scheduled_job(
+        client, scheduled_at=datetime(2026, 11, 12, tzinfo=UTC)
+    )
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == uuid.UUID(job["id"]))
+        .values(status="publish_failed", error="发布执行失败（PublishError）")
+    )
+    await db_session.commit()
+
+    response = await _calendar(client, start, end)
+    item = response.json()["items"][0]
+    assert item["status"] == "publish_failed"
+    assert item["error"] == "发布执行失败（PublishError）"
+
+
+async def test_calendar_truncates_long_failure_reason(client, db_session):
+    start = datetime(2026, 11, 1, tzinfo=UTC)
+    end = datetime(2026, 12, 1, tzinfo=UTC)
+    _, _, job = await _create_scheduled_job(
+        client, scheduled_at=datetime(2026, 11, 12, tzinfo=UTC)
+    )
+    await db_session.execute(
+        update(PublishJob)
+        .where(PublishJob.id == uuid.UUID(job["id"]))
+        .values(status="export_failed", error="长" * 600)
+    )
+    await db_session.commit()
+
+    response = await _calendar(client, start, end)
+    assert len(response.json()["items"][0]["error"]) == 300
 
 
 async def test_calendar_excludes_jobs_outside_range(client):

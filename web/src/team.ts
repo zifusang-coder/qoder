@@ -22,6 +22,15 @@ export function canEditMember(
   return canManageMembers(me.role) && me.id !== member.id;
 }
 
+export function canPurgeMember(
+  me: { id: string; role: Role },
+  member: { id: string; is_active: boolean },
+): boolean {
+  return (
+    canManageMembers(me.role) && me.id !== member.id && !member.is_active
+  );
+}
+
 export function memberStatusLabel(isActive: boolean): string {
   return isActive ? "启用" : "已停用";
 }

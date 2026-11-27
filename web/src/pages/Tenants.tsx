@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { useAuth } from "../auth-context";
+import type { PlanOut } from "../billing";
 import { api } from "../client";
 import {
+  canDeleteTenant,
   canEnableTenant,
   canSuspendTenant,
+  planOptions,
   tenantStatusLabel,
   validateTenantForm,
 } from "../tenants";
@@ -26,10 +29,37 @@ export default function Tenants() {
     kind: "ok" | "error";
     text: string;
   } | null>(null);
+  const [purgingId, setPurgingId] = useState("");
+  const [confirmSlug, setConfirmSlug] = useState("");
 
   const tenants = useQuery({
     queryKey: ["tenants"],
     queryFn: () => api<Tenant[]>("/tenants"),
+  });
+
+  // The plan catalog and plan assignment are platform-admin-only on the backend.
+  const isPlatformAdmin = Boolean(user?.is_platform_admin);
+
+  const plans = useQuery({
+    queryKey: ["billing-plans"],
+    queryFn: () => api<PlanOut[]>("/billing/plans"),
+    enabled: isPlatformAdmin,
+  });
+
+  const assignPlan = useMutation({
+    mutationFn: ({ id, planCode }: { id: string; planCode: string }) =>
+      api<{ plan_code: string; plan_name: string }>(
+        `/billing/tenants/${id}/plan`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ plan_code: planCode }),
+        },
+      ),
+    onSuccess: () => {
+      setMessage({ kind: "ok", text: "套餐已更新" });
+      qc.invalidateQueries({ queryKey: ["tenants"] });
+    },
+    onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
   });
 
   const create = useMutation({
@@ -55,6 +85,21 @@ export default function Tenants() {
       }),
     onSuccess: () => {
       setMessage({ kind: "ok", text: "租户状态已更新" });
+      qc.invalidateQueries({ queryKey: ["tenants"] });
+    },
+    onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
+  });
+
+  const purge = useMutation({
+    mutationFn: ({ id, slug }: { id: string; slug: string }) =>
+      api<void>(`/tenants/${id}`, {
+        method: "DELETE",
+        body: JSON.stringify({ confirm_slug: slug }),
+      }),
+    onSuccess: () => {
+      setPurgingId("");
+      setConfirmSlug("");
+      setMessage({ kind: "ok", text: "租户及其全部数据已删除" });
       qc.invalidateQueries({ queryKey: ["tenants"] });
     },
     onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
@@ -213,7 +258,8 @@ export default function Tenants() {
         )}
         {tenants.data?.map((tenant) => {
           const pending =
-            update.isPending && update.variables?.id === tenant.id;
+            (update.isPending && update.variables?.id === tenant.id) ||
+            (purge.isPending && purge.variables?.id === tenant.id);
           return (
             <article
               key={tenant.id}
@@ -227,11 +273,11 @@ export default function Tenants() {
                   )}
                 </h3>
                 <p className="mt-1 text-xs text-ink-500">
-                  {tenant.slug} · {tenant.members_count} 名成员 · 创建于{" "}
-                  {tenant.created_at.slice(0, 10)}
+                  {tenant.slug} · {tenant.plan_name} · {tenant.members_count}{" "}
+                  名成员 · 创建于 {tenant.created_at.slice(0, 10)}
                 </p>
               </div>
-              <div className="flex items-center gap-2 text-sm">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
                 <span
                   className={
                     tenant.status === "active"
@@ -241,6 +287,27 @@ export default function Tenants() {
                 >
                   {tenantStatusLabel(tenant.status)}
                 </span>
+                {isPlatformAdmin && plans.data && plans.data.length > 0 && (
+                  <select
+                    className="rounded border border-line px-2 py-1 text-xs text-ink-700 disabled:opacity-50"
+                    aria-label={`调整 ${tenant.name} 的套餐`}
+                    value={tenant.plan_code}
+                    disabled={assignPlan.isPending}
+                    onChange={(event) => {
+                      if (event.target.value === tenant.plan_code) return;
+                      assignPlan.mutate({
+                        id: tenant.id,
+                        planCode: event.target.value,
+                      });
+                    }}
+                  >
+                    {planOptions(plans.data, tenant).map((plan) => (
+                      <option key={plan.code} value={plan.code}>
+                        {plan.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 {canSuspendTenant(tenant, currentTenantId) && (
                   <button
                     type="button"
@@ -265,6 +332,55 @@ export default function Tenants() {
                     启用
                   </button>
                 )}
+                {canDeleteTenant(tenant, currentTenantId) &&
+                  (purgingId === tenant.id ? (
+                    <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-2 py-1 text-xs text-coral-600">
+                      输入
+                      <code className="font-mono">{tenant.slug}</code>
+                      确认删除：
+                      <input
+                        className="w-32 rounded border border-line px-2 py-1 text-xs text-ink-900"
+                        value={confirmSlug}
+                        onChange={(e) => setConfirmSlug(e.target.value)}
+                        aria-label="确认租户标识"
+                      />
+                      <button
+                        type="button"
+                        className="rounded bg-coral-600 px-2 py-1 font-medium text-white hover:bg-coral-700 disabled:opacity-50"
+                        disabled={
+                          confirmSlug !== tenant.slug || purge.isPending
+                        }
+                        onClick={() =>
+                          purge.mutate({ id: tenant.id, slug: tenant.slug })
+                        }
+                      >
+                        {purge.isPending ? "删除中…" : "确认删除"}
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded px-2 py-1 text-ink-500 hover:text-ink-900"
+                        onClick={() => {
+                          setPurgingId("");
+                          setConfirmSlug("");
+                        }}
+                      >
+                        取消
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="rounded border border-coral-100 px-3 py-1.5 text-coral-600 hover:border-coral-600 disabled:opacity-50"
+                      disabled={pending}
+                      onClick={() => {
+                        setPurgingId(tenant.id);
+                        setConfirmSlug("");
+                        setMessage(null);
+                      }}
+                    >
+                      删除
+                    </button>
+                  ))}
               </div>
             </article>
           );

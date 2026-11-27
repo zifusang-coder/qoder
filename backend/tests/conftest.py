@@ -7,6 +7,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from app.billing.plans import ensure_plans
 from app.config import get_settings
 from app.db import get_session
 from app.deps import get_current_user
@@ -59,6 +60,9 @@ async def db_session() -> AsyncSession:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
+        # 套餐是平台级目录，租户的 plan_id 外键指向它，建表后必须先写入种子
+        await ensure_plans(session)
+        await session.commit()
         yield session
     await engine.dispose()
 

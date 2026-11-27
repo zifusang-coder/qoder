@@ -29,7 +29,7 @@ from app.models.user import User
 from app.permissions import editor_access, viewer_access
 from app.publish.base import Platform
 from app.queue import get_queue
-from app.services.audit import record_best_effort
+from app.services.audit import record, record_best_effort
 from app.services.live import snapshot_stream
 from app.services.media import (
     create_media_job,
@@ -405,6 +405,29 @@ async def get_project(
     return _project_out(await _owned_project(session, project_id, user))
 
 
+@router.delete("/projects/{project_id}", status_code=204)
+async def delete_project(
+    project_id: str,
+    request: Request,
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    project = await _owned_project(session, project_id, user)
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="project.delete",
+        actor=user,
+        resource_type="project",
+        resource_id=str(project.id),
+        detail={"title": project.title},
+        request=request,
+    )
+    await session.delete(project)
+    await session.commit()
+    return Response(status_code=204)
+
+
 @router.get("/projects/{project_id}/contents", response_model=list[ContentOut])
 async def list_contents(
     project_id: str,
@@ -501,6 +524,29 @@ async def create_version(
         raise AppError("version_conflict", "版本冲突，请重试", 409) from None
     await session.refresh(version)
     return _version_out(version)
+
+
+@router.delete("/contents/{content_id}", status_code=204)
+async def delete_content(
+    content_id: str,
+    request: Request,
+    user: User = Depends(editor_access),  # noqa: B008
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> Response:
+    content = await _owned_content(session, content_id, user)
+    await record(
+        session,
+        tenant_id=user.tenant_id,
+        action="content.delete",
+        actor=user,
+        resource_type="content",
+        resource_id=str(content.id),
+        detail={"title": content.title, "platform": content.platform},
+        request=request,
+    )
+    await session.delete(content)
+    await session.commit()
+    return Response(status_code=204)
 
 
 @router.get("/projects/{project_id}/files")

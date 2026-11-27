@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { useAuth } from "../auth-context";
 import { api } from "../client";
+import EmptyState, { InlineError } from "../components/EmptyState";
+import { resolveProfileTarget } from "../profiles";
 import {
   errorText,
   type Profile,
@@ -67,6 +69,7 @@ export default function Profiles() {
   const [memoryKind, setMemoryKind] = useState("insight");
   const [memoryWeight, setMemoryWeight] = useState("1");
   const [memoryMessage, setMemoryMessage] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const profiles = useQuery({
     queryKey: ["profiles"],
@@ -74,8 +77,7 @@ export default function Profiles() {
   });
 
   const items = profiles.data?.items ?? [];
-  const selected =
-    items.find((profile) => profile.id === selectedId) ?? items[0];
+  const selected = resolveProfileTarget(items, selectedId);
   const profileId = selected?.id ?? "";
 
   const memories = useQuery({
@@ -103,9 +105,25 @@ export default function Profiles() {
       );
       qc.invalidateQueries({ queryKey: ["profiles"] });
       setSelectedId(profile.id);
+      setConfirmDelete(false);
       resetMemoryForm();
       setForm((prev) => (formMatchesPayload(prev, payload) ? EMPTY_FORM : prev));
       setFormMessage("");
+    },
+  });
+
+  const deleteProfile = useMutation({
+    mutationFn: (id: string) =>
+      api<void>(`/profiles/${id}`, { method: "DELETE" }),
+    onSuccess: (_data, id) => {
+      qc.setQueryData<ProfileList>(["profiles"], (old) =>
+        old ? { ...old, items: old.items.filter((p) => p.id !== id) } : old,
+      );
+      qc.removeQueries({ queryKey: ["memories", id] });
+      qc.invalidateQueries({ queryKey: ["profiles"] });
+      setSelectedId("");
+      setConfirmDelete(false);
+      resetMemoryForm();
     },
   });
 
@@ -303,12 +321,13 @@ export default function Profiles() {
               <p className="text-sm text-ink-500">加载中…</p>
             )}
             {profiles.isError && (
-              <p className="text-sm text-coral-600">
-                {errorText(profiles.error)}
-              </p>
+              <InlineError>{errorText(profiles.error)}</InlineError>
             )}
             {profiles.isSuccess && items.length === 0 && (
-              <p className="text-sm text-ink-500">还没有画像，先创建一个。</p>
+              <EmptyState
+                title="还没有画像"
+                hint="创建画像后，技能与助理会按画像写作。"
+              />
             )}
             {items.map((profile) => {
               const active = profile.id === selected?.id;
@@ -324,6 +343,7 @@ export default function Profiles() {
                   onClick={() => {
                     if (profile.id === selected?.id) return;
                     setSelectedId(profile.id);
+                    setConfirmDelete(false);
                     resetMemoryForm();
                   }}
                 >
@@ -346,12 +366,46 @@ export default function Profiles() {
           {selected ? (
             <>
               <section className="space-y-4 card p-6">
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 className="font-medium">{selected.name}</h2>
-                  <span className="text-xs text-ink-500">
-                    {selected.account_name || "未填写账号名"}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-ink-500">
+                      {selected.account_name || "未填写账号名"}
+                    </span>
+                    {canWrite &&
+                      (confirmDelete ? (
+                        <span className="flex flex-wrap items-center gap-2 rounded border border-coral-100 px-3 py-1.5 text-xs text-coral-600">
+                          画像及其记忆删除后无法恢复；关联项目会保留但解除绑定
+                          <button
+                            type="button"
+                            className="rounded bg-coral-600 px-2 py-1 text-xs font-medium text-white hover:bg-coral-700 disabled:opacity-50"
+                            disabled={deleteProfile.isPending}
+                            onClick={() => deleteProfile.mutate(selected.id)}
+                          >
+                            {deleteProfile.isPending ? "删除中…" : "确认删除"}
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded px-2 py-1 text-xs text-ink-500 hover:text-ink-900"
+                            onClick={() => setConfirmDelete(false)}
+                          >
+                            取消
+                          </button>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="rounded border border-coral-100 px-3 py-1.5 text-xs text-coral-600 hover:border-coral-600"
+                          onClick={() => setConfirmDelete(true)}
+                        >
+                          删除画像
+                        </button>
+                      ))}
+                  </div>
                 </div>
+                {deleteProfile.isError && (
+                  <InlineError>{errorText(deleteProfile.error)}</InlineError>
+                )}
                 <dl className="grid gap-4 text-sm sm:grid-cols-2">
                   <Info label="定位" value={selected.positioning} />
                   <Info label="受众" value={selected.audience} />
@@ -372,6 +426,25 @@ export default function Profiles() {
                     className="flex flex-wrap items-end gap-2"
                     onSubmit={submitMemory}
                   >
+                  <label className="space-y-1 text-sm text-ink-500">
+                    <span>添加到画像</span>
+                    <select
+                      className="input text-ink-900"
+                      value={profileId}
+                      onChange={(e) => {
+                        setSelectedId(e.target.value);
+                        setMemoryMessage("");
+                        setConfirmDelete(false);
+                        addMemory.reset();
+                      }}
+                    >
+                      {items.map((profile) => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <label className="min-w-40 flex-1 space-y-1 text-sm text-ink-500">
                     <span>新增记忆</span>
                     <input
@@ -420,14 +493,13 @@ export default function Profiles() {
                   <p className="text-sm text-ink-500">加载中…</p>
                 )}
                 {memories.isError && (
-                  <p className="text-sm text-coral-600">
-                    {errorText(memories.error)}
-                  </p>
+                  <InlineError>{errorText(memories.error)}</InlineError>
                 )}
                 {memories.isSuccess && memories.data.length === 0 && (
-                  <p className="text-sm text-ink-500">
-                    还没有记忆，添加一条试试。
-                  </p>
+                  <EmptyState
+                    title="还没有记忆"
+                    hint="添加一条记忆，让后续创作更贴近账号风格。"
+                  />
                 )}
                 <ul className="space-y-2">
                   {memories.data?.map((memory) => (

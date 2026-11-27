@@ -219,3 +219,10 @@ async def test_platform_admin_dependency():
         token_version=0,
     )
     assert await require_platform_admin(platform_admin) is platform_admin
+
+
+async def test_editor_cannot_purge_accounts(db_session):
+    async with _role_client(db_session, "editor") as client:
+        resp = await client.delete(f"/api/accounts/{uuid.uuid4()}/permanent")
+        assert resp.status_code == 403
+        assert resp.json()["code"] == "forbidden"

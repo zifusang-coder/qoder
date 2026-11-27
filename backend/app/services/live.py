@@ -38,14 +38,17 @@ async def snapshot_stream(
     *,
     status_of: Callable[[dict[str, Any]], str] | None = None,
     interval: float = LIVE_INTERVAL,
+    max_frames: int | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """按周期读取快照，只在内容变化时推送，终态后结束。
 
     ``load`` 每次调用都会拿到独立的会话，因为流可能长于请求依赖的生命周期。
     ``status_of`` 提取快照里的运行状态，默认读顶层的 ``status``。
+    ``max_frames`` 用于没有终态的资源：推满指定帧数后结束，供一次性快照与冒烟使用。
     """
     get_status = status_of or (lambda payload: str(payload.get("status", "")))
     last: str | None = None
+    sent = 0
     while True:
         try:
             async with SessionLocal() as session:
@@ -60,7 +63,11 @@ async def snapshot_stream(
         text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         if text != last:
             last = text
+            sent += 1
             yield _data_event(payload)
+            if max_frames is not None and sent >= max_frames:
+                yield {"data": "[DONE]"}
+                return
         if get_status(payload) in TERMINAL_STATUSES:
             yield {"data": "[DONE]"}
             return
