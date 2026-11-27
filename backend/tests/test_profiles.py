@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.models.audit import AuditLog
 from app.models.base import DEFAULT_TENANT_ID
 from app.models.profile import Profile, ProfileMemory
 
@@ -76,6 +77,52 @@ async def test_profile_crud_flow(client):
     gone = await client.get(f"/api/profiles/{profile_id}")
     assert gone.status_code == 404
     assert gone.json()["code"] == "not_found"
+
+
+async def test_delete_profile_cascades_memories_unbinds_projects_and_audits(
+    client, db_session
+):
+    profile_id = await _create_profile(client)
+    memory = await client.post(
+        f"/api/profiles/{profile_id}/memories",
+        json={"content": "读者更喜欢带数据的案例", "kind": "insight", "weight": 2},
+    )
+    assert memory.status_code == 201
+
+    project = await client.post(
+        "/api/projects", json={"title": "画像删除验收", "profile_id": profile_id}
+    )
+    assert project.status_code == 201
+    project_id = project.json()["id"]
+    assert project.json()["profile_id"] == profile_id
+
+    deleted = await client.delete(f"/api/profiles/{profile_id}")
+    assert deleted.status_code == 204
+
+    gone = await client.get(f"/api/profiles/{profile_id}")
+    assert gone.status_code == 404
+
+    memories = (
+        await db_session.execute(
+            select(ProfileMemory).where(
+                ProfileMemory.profile_id == uuid.UUID(profile_id)
+            )
+        )
+    ).scalars().all()
+    assert memories == []
+
+    kept = await client.get(f"/api/projects/{project_id}")
+    assert kept.status_code == 200
+    assert kept.json()["profile_id"] is None
+
+    logs = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.action == "profile.delete")
+        )
+    ).scalars().all()
+    assert len(logs) == 1
+    assert logs[0].tenant_id == DEFAULT_TENANT_ID
+    assert logs[0].detail == {"name": "主账号"}
 
 
 @pytest.mark.parametrize("name", ["", "   "])
