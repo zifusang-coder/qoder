@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 import { useAuth } from "../auth-context";
+import type { PlanOut } from "../billing";
 import { api } from "../client";
 import {
   canDeleteTenant,
   canEnableTenant,
   canSuspendTenant,
+  planOptions,
   tenantStatusLabel,
   validateTenantForm,
 } from "../tenants";
@@ -33,6 +35,31 @@ export default function Tenants() {
   const tenants = useQuery({
     queryKey: ["tenants"],
     queryFn: () => api<Tenant[]>("/tenants"),
+  });
+
+  // The plan catalog and plan assignment are platform-admin-only on the backend.
+  const isPlatformAdmin = Boolean(user?.is_platform_admin);
+
+  const plans = useQuery({
+    queryKey: ["billing-plans"],
+    queryFn: () => api<PlanOut[]>("/billing/plans"),
+    enabled: isPlatformAdmin,
+  });
+
+  const assignPlan = useMutation({
+    mutationFn: ({ id, planCode }: { id: string; planCode: string }) =>
+      api<{ plan_code: string; plan_name: string }>(
+        `/billing/tenants/${id}/plan`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ plan_code: planCode }),
+        },
+      ),
+    onSuccess: () => {
+      setMessage({ kind: "ok", text: "套餐已更新" });
+      qc.invalidateQueries({ queryKey: ["tenants"] });
+    },
+    onError: (err) => setMessage({ kind: "error", text: errorText(err) }),
   });
 
   const create = useMutation({
@@ -246,8 +273,8 @@ export default function Tenants() {
                   )}
                 </h3>
                 <p className="mt-1 text-xs text-ink-500">
-                  {tenant.slug} · {tenant.members_count} 名成员 · 创建于{" "}
-                  {tenant.created_at.slice(0, 10)}
+                  {tenant.slug} · {tenant.plan_name} · {tenant.members_count}{" "}
+                  名成员 · 创建于 {tenant.created_at.slice(0, 10)}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -260,6 +287,27 @@ export default function Tenants() {
                 >
                   {tenantStatusLabel(tenant.status)}
                 </span>
+                {isPlatformAdmin && plans.data && plans.data.length > 0 && (
+                  <select
+                    className="rounded border border-line px-2 py-1 text-xs text-ink-700 disabled:opacity-50"
+                    aria-label={`调整 ${tenant.name} 的套餐`}
+                    value={tenant.plan_code}
+                    disabled={assignPlan.isPending}
+                    onChange={(event) => {
+                      if (event.target.value === tenant.plan_code) return;
+                      assignPlan.mutate({
+                        id: tenant.id,
+                        planCode: event.target.value,
+                      });
+                    }}
+                  >
+                    {planOptions(plans.data, tenant).map((plan) => (
+                      <option key={plan.code} value={plan.code}>
+                        {plan.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 {canSuspendTenant(tenant, currentTenantId) && (
                   <button
                     type="button"

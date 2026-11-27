@@ -28,6 +28,7 @@ describe("groupedNav", () => {
       "/settings",
       "/team",
       "/audit",
+      "/billing",
     ]);
   });
 
@@ -47,6 +48,27 @@ describe("groupedNav", () => {
 
   it("returns no groups for an empty nav", () => {
     expect(groupedNav([])).toEqual([]);
+  });
+});
+
+describe("billing nav entry", () => {
+  it("declares the billing entry in the manage group for admins", () => {
+    const billing = NAV_ITEMS.find((item) => item.to === "/billing");
+    expect(billing).toBeDefined();
+    expect(billing?.label).toBe("账单");
+    expect(billing?.minRole).toBe("admin");
+    expect(billing?.group).toBe("manage");
+    expect(billing?.icon).toBe("billing");
+    expect(billing?.platformOnly).toBeFalsy();
+  });
+
+  it("shows billing to admins and owners but not to editors or viewers", () => {
+    const hrefs = (role: Me["role"]) =>
+      visibleNavItems(me({ role })).map((item) => item.to);
+    expect(hrefs("viewer")).not.toContain("/billing");
+    expect(hrefs("editor")).not.toContain("/billing");
+    expect(hrefs("admin")).toContain("/billing");
+    expect(hrefs("owner")).toContain("/billing");
   });
 });
 

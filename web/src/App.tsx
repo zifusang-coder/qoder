@@ -8,6 +8,7 @@ import Accounts from "./pages/Accounts";
 import Analytics from "./pages/Analytics";
 import Assistant from "./pages/Assistant";
 import Audit from "./pages/Audit";
+import Billing from "./pages/Billing";
 import Calendar from "./pages/Calendar";
 import ChangePassword from "./pages/ChangePassword";
 import Chat from "./pages/Chat";
@@ -132,6 +133,14 @@ export default function App() {
             element={
               <RequireRole minRole="admin">
                 <Audit />
+              </RequireRole>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <RequireRole minRole="admin">
+                <Billing />
               </RequireRole>
             }
           />

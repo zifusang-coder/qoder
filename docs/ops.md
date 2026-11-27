@@ -275,9 +275,14 @@ PATCH            /api/tenants/{id}
 DELETE           /api/tenants/{id}                # 需先停用，body 传 {"confirm_slug": "..."}
 GET              /api/audit-logs
 POST             /api/auth/change-password
+GET/POST/PATCH   /api/billing/plans                # 套餐目录与维护（平台管理员）
+PATCH            /api/billing/tenants/{id}/plan    # 指派套餐（平台管理员）
+GET              /api/billing/plan|usage|statements # 租户套餐、用量与账单
+GET              /api/billing/platform/usage       # 跨租户用量（平台管理员）
+POST             /api/billing/platform/statements/{tenant_id}/{period}/close|reopen
 ```
 
-Phase 3 已知限制：一人一租户；无公开注册与计费；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）；登录限流依赖 Redis，单机部署下 Redis 故障期间限流暂时失效。
+Phase 3/4 已知限制：一人一租户；无公开注册与在线支付（套餐、计量与账单已交付，关账由平台管理员手工触发）；审计 IP 只取直连地址（不信任 `X-Forwarded-For`）；登录限流依赖 Redis，单机部署下 Redis 故障期间限流暂时失效。
 
 ## 13. 已知限制与约定
 
@@ -290,13 +295,21 @@ Phase 3 已知限制：一人一租户；无公开注册与计费；审计 IP �
 
 - `DELETE /api/projects/{id}`：删除项目并级联删除其内容、版本、媒体与数据快照，审计记录 `project.delete`。
 - `DELETE /api/contents/{id}`：删除单条内容并级联删除版本、快照与发布任务，审计记录 `content.delete`。
+- `DELETE /api/profiles/{id}`：删除账号画像并级联删除其记忆；引用该画像的项目保留，`profile_id` 置空。审计记录 `profile.delete`。
 - `DELETE /api/accounts/{id}/permanent`：仅 admin 及以上；账号须已停用，且没有发布记录，否则返回 409。审计记录 `account.delete`。
 - `DELETE /api/members/{id}/permanent`：仅 owner；成员须已停用，不能删除自己，也不能删除最后一名 owner。审计记录 `member.delete`。
-- `DELETE /api/tenants/{id}`：仅平台管理员；须先停用并提交 `{"confirm_slug": "<租户标识>"}`，不能删除自己所在租户。会按表清理该租户全部业务数据（成员、项目、内容、媒体、账号、密钥、审计等）后删除租户本身，审计记录写入操作者所属租户。
+- `DELETE /api/tenants/{id}`：仅平台管理员；须先停用并提交 `{"confirm_slug": "<租户标识>"}`，不能删除自己所在租户。会按表清理该租户全部业务数据（成员、项目、内容、媒体、账号、密钥、审计、计费账单 `billing_statements` 等）后删除租户本身，审计记录写入操作者所属租户。
 - 删除只清理数据库记录，不回收对象存储中的文件；需要节省存储时另行清理 `outputs/` 或存储桶。
 - 产物写入 `outputs/<project_id>/`（项目内容）或 `outputs/adhoc/<tenant_id>/<run>/`（技能与对话临时产物），不进版本库。
 - 后处理脚本以独立子进程运行，初始工作目录设为技能目录，环境变量白名单、默认 30 秒超时、无 shell；这不是 OS 级隔离，多租户生产环境应把执行放到容器或沙箱（见 [skills/README.md](../skills/README.md) 的治理清单）。
 - 流式预览接口 `/api/skills/{id}/stream` 不写审计、不做输出校验与后处理；需要完整审计时使用非流式接口。
+
+### 13.2 计费与月初对账
+
+- 账期按北京时间（UTC+8）自然月切分，`period` 形如 `2026-11`；当前月只做实时预览，已结束月份才允许关账。
+- 每月初在「账单」页核对上月用量后，由平台管理员关闭上一个北京月份账单；关账金额 = 套餐月费 + 各计费维度超额费用。
+- 关账前删除技能运行、媒体任务等源数据会改变该月用量与预计金额；关账后账单写入套餐与用量快照，源数据删除、套餐改价都不再影响已关账金额。
+- 已关账账单不可直接修改；需要按最新源数据重算时先「重开」，再重新关账。删除租户会连同其全部账单记录一起清除。
 
 ## 14. 对外 API 与密钥
 

@@ -62,6 +62,12 @@ const ICONS: Record<NavIconKey, ReactNode> = {
       <path d="M9 12l2 2 4-4" />
     </>
   ),
+  billing: (
+    <>
+      <path d="M5 4h14v16l-7-3-7 3V4z" />
+      <path d="M9 8h6M9 12h6" />
+    </>
+  ),
   tenants: (
     <>
       <path d="M4 21V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v16" />

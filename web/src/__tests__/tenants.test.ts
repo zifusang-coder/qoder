@@ -3,6 +3,7 @@ import {
   canDeleteTenant,
   canEnableTenant,
   canSuspendTenant,
+  planOptions,
   tenantStatusLabel,
   validateTenantForm,
 } from "../tenants";
@@ -44,6 +45,36 @@ describe("validateTenantForm", () => {
     expect(
       validateTenantForm({ ...VALID_FORM, owner_email: "owner@example.com" }),
     ).toBeNull();
+  });
+});
+
+describe("plan options", () => {
+  const PLANS = [
+    { code: "free", name: "免费版", status: "active" },
+    { code: "pro", name: "专业版", status: "active" },
+    { code: "legacy", name: "旧版", status: "archived" },
+  ];
+
+  it("lists only active plans", () => {
+    expect(planOptions(PLANS, { plan_code: "free", plan_name: "免费版" })).toEqual(
+      [
+        { code: "free", name: "免费版", status: "active" },
+        { code: "pro", name: "专业版", status: "active" },
+      ],
+    );
+  });
+
+  it("keeps the current plan when it was archived or removed", () => {
+    expect(
+      planOptions(PLANS, { plan_code: "legacy", plan_name: "旧版" }).map(
+        (plan) => plan.code,
+      ),
+    ).toEqual(["free", "pro", "legacy"]);
+    expect(
+      planOptions(PLANS, { plan_code: "gone", plan_name: "" }).map(
+        (plan) => plan.name,
+      ),
+    ).toEqual(["免费版", "专业版", "gone"]);
   });
 });
 

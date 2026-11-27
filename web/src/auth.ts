@@ -55,6 +55,7 @@ export type NavIconKey =
   | "settings"
   | "team"
   | "audit"
+  | "billing"
   | "tenants";
 
 export interface NavItem {
@@ -79,6 +80,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: "/settings", label: "设置", minRole: "admin", group: "manage", icon: "settings" },
   { to: "/team", label: "团队", minRole: "admin", group: "manage", icon: "team" },
   { to: "/audit", label: "审计", minRole: "admin", group: "manage", icon: "audit" },
+  { to: "/billing", label: "账单", minRole: "admin", group: "manage", icon: "billing" },
   { to: "/tenants", label: "租户", minRole: "viewer", platformOnly: true, group: "manage", icon: "tenants" },
 ];
 

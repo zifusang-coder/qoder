@@ -209,6 +209,8 @@ export interface Tenant {
   name: string;
   slug: string;
   status: string;
+  plan_code: string;
+  plan_name: string;
   members_count: number;
   created_at: string;
 }

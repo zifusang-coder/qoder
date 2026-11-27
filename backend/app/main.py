@@ -15,6 +15,7 @@ from app.api import (
     api_keys,
     audit,
     auth,
+    billing,
     calendar,
     chat,
     members,
@@ -108,6 +109,7 @@ app.include_router(chat.router, prefix="/api")
 app.include_router(members.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
+app.include_router(billing.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(settings_api.router, prefix="/api")
 app.include_router(workflows.router, prefix="/api")

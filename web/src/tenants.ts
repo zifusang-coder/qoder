@@ -46,3 +46,35 @@ export function canDeleteTenant(
 ): boolean {
   return tenant.status === "suspended" && tenant.id !== currentTenantId;
 }
+
+export interface PlanOption {
+  code: string;
+  name: string;
+  status?: string;
+}
+
+/**
+ * Options for the plan select. Archived plans cannot be assigned (the backend
+ * answers 409), so only active ones are offered; the tenant's current plan is
+ * kept even when it is archived or missing from the catalog, so the select
+ * never renders blank.
+ */
+export function planOptions(
+  plans: PlanOption[],
+  current: { plan_code: string; plan_name: string },
+): PlanOption[] {
+  const selectable = plans.filter(
+    (plan) => plan.status === undefined || plan.status === "active",
+  );
+  if (!current.plan_code) return selectable;
+  if (selectable.some((plan) => plan.code === current.plan_code)) {
+    return selectable;
+  }
+  return [
+    ...selectable,
+    {
+      code: current.plan_code,
+      name: current.plan_name || current.plan_code,
+    },
+  ];
+}
